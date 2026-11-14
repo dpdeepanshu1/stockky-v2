@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Button } from "../kit/Button";
 
 // group 443: a React component that throws while rendering unmounts the WHOLE app (blank page). Wrapped around a tab, a crash shows this card
 // (message + Try again) and the rest of the app, navigation included, keeps working.
@@ -12,7 +13,7 @@ export default class ErrorBoundary extends Component<{ children: ReactNode; labe
       <div className="rounded-2xl border border-signal-sell bg-graphite p-4 text-[12px]" role="alert">
         <div className="font-bold text-signal-sell">{this.props.label || "This page"} hit an error and was stopped</div>
         <p className="mt-1 text-mist">{String(this.state.error.message || this.state.error)}</p>
-        <button type="button" className="btn-terminal mt-2" onClick={() => this.setState({ error: null })}>Try again</button>
+        <div className="mt-2"><Button variant="ghost" onClick={() => this.setState({ error: null })}>Try again</Button></div>
       </div>
     );
   }

@@ -39,7 +39,7 @@ for (const bad of ["tata motors", "TCS!", "^NSEI", "-X", "&X", "A".repeat(21), "
 const dup = checkSymbol("tcs", ["TCS"]); assert.equal(dup.ok, false); assert.equal(dup.reason, "duplicate"); assert.equal(dup.message, "TCS is already on your watchlist.");
 assert.equal(checkSymbol("A".repeat(20), []).ok, true);
 const wl = readFileSync(new URL("./components/WatchlistManager.tsx", import.meta.url), "utf8");
-const wcss = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+const wcss = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
 assert.ok(/checkSymbol\(symOverride \?\? input, symbols\)/.test(wl) && /role="status"/.test(wl) && !/\.replace\(\/\\\.NS\$\/i, ""\)\.replace\(\/\\\.BO\$\/i, ""\);\n    if \(!sym \|\| symbols\.includes/.test(wl), "Add goes through checkSymbol");
 assert.ok(/no price yet/.test(wl) && /Scan watchlist/.test(wl) && /Quick add/.test(wl) && /Remove/.test(wl), "no-price words, buttons and quick add kept");
 assert.ok(!/animation\s*:/.test(wcss.slice(wcss.indexOf("E166"))), "E166 CSS adds no animation");

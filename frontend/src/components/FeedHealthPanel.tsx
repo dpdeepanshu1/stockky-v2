@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Button, DataTable, Stat, Stats } from "./kit";   // E545
 
 export interface IncompleteStock {
   symbol: string;
@@ -45,7 +45,7 @@ export default function FeedHealthPanel({
   batchRepairBusy, patchingSymbol, repairBatchLabel = "⚡ Auto-Repair Missing (15)",
 }: Props) {
   return (
-    <div className="mt-2 mb-6 border border-slate bg-ink/40 rounded-2xl p-4 sm:p-5">
+    <div className="k-card mt-2 mb-6">
       <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
         <div>
           <h3 className="font-display tabular-nums text-sm font-bold text-paper">{title}</h3>
@@ -61,14 +61,9 @@ export default function FeedHealthPanel({
             </p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => void onRefreshAudit()}
-          disabled={healthLoading}
-          className="font-display tabular-nums text-xs px-3 py-1.5 bg-graphite text-mist rounded-xl border border-slate hover:bg-slate/40 transition disabled:opacity-50"
-        >
+        <Button variant="ghost" size="sm" onClick={() => void onRefreshAudit()} disabled={healthLoading}>
           {healthLoading ? "Auditing…" : auditError ? "🔄 Retry Audit" : "🔄 Refresh Audit"}
-        </button>
+        </Button>
       </div>
       {auditError && !healthLoading && (
         <p className="font-display tabular-nums text-[11px] text-signal-sell mb-3" role="alert">
@@ -76,40 +71,20 @@ export default function FeedHealthPanel({
         </p>
       )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
-          <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Health score</div>
-          <div
-            className={`font-display tabular-nums text-xl font-bold mt-1 ${
-              (healthData?.health_score ?? 0) >= 90
-                ? "text-signal-buy"
-                : (healthData?.health_score ?? 0) >= 70
-                  ? "text-signal-hold"
-                  : "text-signal-sell"
-            }`}
-          >
-            {healthData?.health_score ?? "—"}%
-          </div>
-        </div>
-        <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
-          <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Total tracked</div>
-          <div className="font-display tabular-nums text-xl font-bold text-paper mt-1">
-            {healthData?.total_tracked ?? "—"}
-          </div>
-        </div>
-        <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
-          <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Fully populated</div>
-          <div className="font-display tabular-nums text-xl font-bold text-signal-buy mt-1">
-            {healthData?.fully_populated ?? "—"}
-          </div>
-        </div>
-        <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">
-          <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">Missing data</div>
-          <div className="font-display tabular-nums text-xl font-bold text-signal-sell mt-1">
-            {healthData?.missing_data ?? "—"}
-          </div>
-        </div>
-      </div>
+      <Stats>
+        {typeof healthData?.health_score === "number" && Number.isFinite(healthData.health_score)
+          ? (
+            <Stat
+              label="Health score" size="sm" value={`${healthData.health_score}%`}
+              tone={healthData.health_score >= 90 ? "up" : healthData.health_score >= 70 ? "warn" : "down"}
+              delta={healthData.health_score >= 90 ? "Healthy" : healthData.health_score >= 70 ? "Needs attention" : "Poor"}
+            />
+          )
+          : <Stat label="Health score" size="sm" value="—" sub="not reported" />}
+        <Stat label="Total tracked" size="sm" value={healthData?.total_tracked ?? "—"} />
+        <Stat label="Fully populated" size="sm" value={healthData?.fully_populated ?? "—"} />
+        <Stat label="Missing data" size="sm" value={healthData?.missing_data ?? "—"} />
+      </Stats>
       {healthData?.message && (
         <p className="font-display tabular-nums text-[10px] text-mist/50 mt-3">{healthData.message}</p>
       )}
@@ -130,8 +105,8 @@ export default function FeedHealthPanel({
       )}
 
       <div className="flex flex-wrap gap-2 mt-4">
-        <button
-          type="button"
+        <Button
+          variant="soft"
           onClick={() => void onRepairBatch()}
           disabled={
             batchRepairBusy ||
@@ -144,50 +119,33 @@ export default function FeedHealthPanel({
             // missing — the common case — so repair "did nothing".
             ((healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0) === 0)
           }
-          className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl bg-signal-sell/20 text-white border border-signal-sell/40 hover:bg-signal-sell/35 transition disabled:opacity-50"
         >
           {batchRepairBusy ? "Repairing…" : repairBatchLabel}
-        </button>
+        </Button>
       </div>
 
       {(healthData?.incomplete_stocks?.length ?? 0) > 0 && (
-        <div className="mt-4 overflow-x-auto rounded-xl border border-slate/60">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="text-mist/50 border-b border-slate/60 font-display tabular-nums text-[10px] uppercase tracking-wider">
-                <th className="py-2 px-3">Symbol</th>
-                <th className="py-2 px-3">Missing</th>
-                <th className="py-2 px-3 text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(healthData?.incomplete_stocks || []).map((stock) => (
-                <tr key={stock.symbol} className="border-b border-slate/40 hover:bg-ink/40">
-                  <td className="py-2 px-3 font-display tabular-nums font-semibold text-paper">{stock.symbol}</td>
-                  <td className="py-2 px-3">
-                    {(stock.missing_fields || ["price"]).map((m) => (
-                      <span
-                        key={m}
-                        className="inline-block bg-signal-sell/40 text-signal-sell px-1.5 py-0.5 rounded mr-1 text-[10px] uppercase"
-                      >
-                        {m}
-                      </span>
-                    ))}
-                  </td>
-                  <td className="py-2 px-3 text-right">
-                    <button
-                      type="button"
-                      onClick={() => void onRepairSingle(stock.symbol)}
-                      disabled={patchingSymbol === stock.symbol || batchRepairBusy}
-                      className="font-display tabular-nums text-[11px] px-2 py-1 bg-graphite text-mist rounded border border-slate hover:bg-slate/40 disabled:opacity-50"
-                    >
-                      {patchingSymbol === stock.symbol ? "Patching…" : "Repair"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="mt-4">
+          <DataTable
+            dense
+            rows={healthData?.incomplete_stocks || []}
+            rowKey={(stock) => stock.symbol}
+            columns={[
+              { key: "sym", header: "Symbol", render: (stock) => <b>{stock.symbol}</b> },
+              { key: "missing", header: "Missing", render: (stock) => (
+                <>
+                  {(stock.missing_fields || ["price"]).map((m) => (
+                    <span key={m} className="inline-block bg-signal-sell/40 text-signal-sell px-1.5 py-0.5 rounded mr-1 text-[10px] uppercase">{m}</span>
+                  ))}
+                </>
+              ) },
+              { key: "act", header: "Action", align: "right", render: (stock) => (
+                <Button variant="ghost" size="sm" onClick={() => void onRepairSingle(stock.symbol)} disabled={patchingSymbol === stock.symbol || batchRepairBusy}>
+                  {patchingSymbol === stock.symbol ? "Patching…" : "Repair"}
+                </Button>
+              ) },
+            ]}
+          />
         </div>
       )}
     </div>

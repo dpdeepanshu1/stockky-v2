@@ -7,6 +7,9 @@ import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import { KpiStrip } from "./ui/KpiStrip";
 import { MarketsFilterBar, NoMatch } from "./MarketsFilterBar";   // E541
+import { MarketCard } from "./MarketCard";   // E543
+import { Tabs } from "./kit";   // E543
+import { SURPRISE_VIEWS, surpriseCard, type SurpriseView } from "../marketCardView";   // E543
 import { NO_FILTER, applyMarketFilter, isFilteredEmpty, sortsFor, type MarketAccess, type MarketFilter } from "../marketsFilter";   // E541
 import { surpriseKpis, surpriseRowView } from "./surpriseView";
 
@@ -71,6 +74,7 @@ export default function SurpriseStocks({
   onSelect?: (symbol: string) => void;
 }) {
   const [stocks, setStocks] = useState<SurpriseStock[]>([]);
+  const [view, setView] = useState<SurpriseView>("table");   // E543: Cards is a second way to read the same rows; Table stays the default
   const [mfilter, setMfilter] = useState<MarketFilter>(NO_FILTER);   // E541: what is shown only; the scan list itself is untouched
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
@@ -884,8 +888,25 @@ export default function SurpriseStocks({
 
       <KpiStrip items={surpriseKpis(stocks, meta)} label="Surprise Momentum summary" />
       <MarketsFilterBar label="Surprise Momentum" query={mfilter.query} onQuery={(query) => setMfilter((f) => ({ ...f, query }))} sort={mfilter.sort}
-        onSort={(sort) => setMfilter((f) => ({ ...f, sort }))} sorts={sortsFor(SURPRISE_ACCESS)} shown={shownStocks.length} total={stocks.length} />
+        onSort={(sort) => setMfilter((f) => ({ ...f, sort }))} sorts={sortsFor(SURPRISE_ACCESS)} shown={shownStocks.length} total={stocks.length}
+        extra={<Tabs label="Surprise Momentum view" items={SURPRISE_VIEWS} value={view} onChange={setView} />} />
 
+      {view === "cards" && (
+        <>
+          {isFilteredEmpty(shownStocks.length, stocks.length) && <NoMatch query={mfilter.query} onClear={() => setMfilter(NO_FILTER)} />}
+          {stocks.length === 0 && (
+            <p className="mk-nomatch" role="status">{loading ? `Scanning universe… ${scanProg ? `${scanProg.processed}/${scanProg.total}` : ""}` : "No surprise breakouts or early-building setups right now."}</p>
+          )}
+          <div className="mk-grid">
+            {shownStocks.map((s) => (
+              <MarketCard key={s.symbol} card={surpriseCard(s, surpriseRowView(s))} onSelect={onSelect}
+                price={<PriceRoll value={resolveDisplayPrice(s as any, null)} text={formatInrPrice(s as any, null, "—")} />} />
+            ))}
+          </div>
+        </>
+      )}
+
+      {view === "table" && (
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
@@ -905,7 +926,7 @@ export default function SurpriseStocks({
             {shownStocks.map((s) => {
               const v = surpriseRowView(s);   // E161: formatted text, dashes for missing values
               return (
-              <tr key={s.symbol} className={`v7-srow ${v.change.dir ?? "flat"} border-b border-slate/40 hover:bg-ink/40 text-sm transition`}>
+              <tr key={s.symbol} className={`mk-srow ${v.change.dir ?? "flat"} border-b border-slate/40 hover:bg-ink/40 text-sm transition`}>
                 <td className="py-2.5 px-3">
                   <button
                     type="button"
@@ -916,19 +937,19 @@ export default function SurpriseStocks({
                   </button>
                 </td>
                 <td className="py-2.5 px-3">
-                  <span className={`v7-tier ${v.tier.tone}`}><i aria-hidden="true">{v.tier.glyph}</i>{v.tier.label}</span>
+                  <span className={`mk-tier ${v.tier.tone}`}><i aria-hidden="true">{v.tier.glyph}</i>{v.tier.label}</span>
                 </td>
                 <td className="py-2.5 px-3">
                   {v.score ? (
-                    <span className={`v7-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
+                    <span className={`mk-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
                   ) : "—"}
                 </td>
                 <td className="py-2.5 px-3 font-display tabular-nums text-xs text-paper">
                   <PriceRoll value={resolveDisplayPrice(s as any, null)} text={formatInrPrice(s as any, null, "—")} />
                 </td>
                 <td className={`py-2.5 px-3 font-display tabular-nums text-xs font-semibold ${v.change.dir === "down" ? "text-signal-sell" : v.change.dir === "up" ? "text-signal-buy" : "text-paper"}`}>
-                  {v.change.dir === "up" && <i className="v7-arrow" aria-hidden="true">▲</i>}
-                  {v.change.dir === "down" && <i className="v7-arrow" aria-hidden="true">▼</i>}
+                  {v.change.dir === "up" && <i className="mk-arrow" aria-hidden="true">▲</i>}
+                  {v.change.dir === "down" && <i className="mk-arrow" aria-hidden="true">▼</i>}
                   {v.change.text}
                 </td>
                 <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-hold font-bold">
@@ -965,6 +986,7 @@ export default function SurpriseStocks({
           </tbody>
         </table>
       </div>
+      )}
 
       <BuySniperModal
         isOpen={sniperOpen}

@@ -41,10 +41,10 @@ assert.equal(surpriseRowView({ change_pct: -1.2 }).change.text, "-1.20%"); asser
 assert.equal(surpriseRowView({ score: 150 }).score.text, "100/100"); assert.equal(surpriseRowView({ score: 55 }).score.word, "Good"); assert.equal(surpriseRowView({ score: 40 }).score.word, "Mixed");
 // source guards
 const tsx = readFileSync(new URL("./components/SurpriseStocks.tsx", import.meta.url), "utf8");
-const css = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/markets.css", import.meta.url), "utf8");
 assert.ok(/surpriseRowView\(s\)/.test(tsx) && !/Number\(s\.(change_pct|rvol|target_1|trailing_stop)\)/.test(tsx), "cells read the row view, no raw Number(x).toFixed");
 assert.ok(/import \{[^}]*\bsurpriseRowView\b[^}]*\} from "\.\/surpriseView"/.test(tsx), "SurpriseStocks.tsx imports surpriseRowView (E171: the import was missing and only tsc/build caught it)");
-assert.ok(/v7-tier/.test(tsx) && /v\.tier\.glyph/.test(tsx) && /aria-label=\{`Score /.test(tsx), "tier has a glyph, score has a spoken label");
+assert.ok(/mk-tier/.test(tsx) && /v\.tier\.glyph/.test(tsx) && /aria-label=\{`Score /.test(tsx), "tier has a glyph, score has a spoken label");
 assert.ok(/Target \+5%/.test(tsx) && /Trail \(VWAP\)/.test(tsx), "column headings unchanged");
-assert.ok(!/animation\s*:/.test(css.slice(css.indexOf("E161"))), "E161 CSS adds no animation");
+assert.ok(!/animation\s*:/.test(css.slice(css.indexOf("row faces"))), "E161 CSS adds no animation");
 console.log("surpriseView ok");

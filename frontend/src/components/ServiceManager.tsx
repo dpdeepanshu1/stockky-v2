@@ -5,6 +5,7 @@ import { getRealTradeApiUrl } from "../realTradeApi";
 import BottomSheet from "./BottomSheet";
 import { KpiStrip } from "./ui/KpiStrip";
 import { serviceKpis } from "./serviceView";
+import { Button } from "./kit/Button";
 
 interface ServiceManagerProps {
   onClose: () => void;
@@ -204,9 +205,9 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
           <h2 className="topo-title">
             <span aria-hidden>◈</span> System Health &amp; 5 Microservices Topology
           </h2>
-          <button type="button" className="btn-terminal text-xs" onClick={onClose}>
+          <Button variant="ghost" size="sm" onClick={onClose}>
             Close
-          </button>
+          </Button>
         </div>
         <p className="topo-sub">
           Zero-cost architecture across Render microservices, Upstash Redis, and Supabase Postgres.
@@ -219,25 +220,21 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
         <KpiStrip items={serviceKpis({ services, loading, failed, checkedAt }, Date.now())} label="Service health summary" />
 
         <div className="flex gap-2 mb-3 flex-wrap">
-          <button type="button" className="btn-terminal text-xs" onClick={fetchServices} disabled={loading}>
+          <Button variant="ghost" size="sm" onClick={fetchServices} disabled={loading}>
             Refresh
-          </button>
-          <button type="button" className="btn-terminal text-xs" onClick={handleWakeAll} disabled={isWakingAll}>
+          </Button>
+          <Button variant="ghost" size="sm" onClick={handleWakeAll} disabled={isWakingAll}>
             {isWakingAll ? "Waking…" : "Wake all"}
-          </button>
-          <button
-            type="button"
-            className="btn-terminal text-xs"
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
             onClick={handleReset}
             disabled={isResetting}
             title="Reset circuit breakers — fixes Api Gateway Half-open / Market Data Closed. No data deleted."
-            style={{
-              borderColor: "rgba(246,70,93,0.5)",
-              color: isResetting ? "var(--text-mist)" : "var(--sell)",
-            }}
           >
             {isResetting ? "Resetting…" : "⚡ Reset Failures"}
-          </button>
+          </Button>
         </div>
         {statusMessage && <p className="mono text-xs text-mist mb-2">{statusMessage}</p>}
         {resetResult && (
@@ -277,14 +274,11 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
               </div>
               <p>{DESCRIPTIONS[name] || st?.detail || "Downstream Stockky service."}</p>
               {!st?.ok && st?.url && (
-                <button
-                  type="button"
-                  className="btn-terminal text-xs mt-2"
-                  disabled={waking[name]}
-                  onClick={() => handleWake(name, st.url)}
-                >
-                  {waking[name] ? "Waking…" : "Wake service"}
-                </button>
+                <div className="mt-2">
+                  <Button variant="ghost" size="sm" disabled={waking[name]} onClick={() => handleWake(name, st.url)}>
+                    {waking[name] ? "Waking…" : "Wake service"}
+                  </Button>
+                </div>
               )}
             </div>
           ))

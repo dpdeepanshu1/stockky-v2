@@ -267,15 +267,15 @@ function Section({
   onAnalyze?: (symbol: string) => void;
 }) {
   return (
-    <section className="hot-section">
-      <header className="hot-section-header">
-        <h3 className="hot-section-title">{title}</h3>
-        <p className="hot-section-sub">{subtitle}</p>
+    <section className="mk-hot-section">
+      <header className="mk-hot-head">
+        <h3 className="mk-hot-title">{title}</h3>
+        <p className="mk-hot-sub">{subtitle}</p>
       </header>
       {items.length === 0 ? (
-        <div className="hot-empty">{filtered ? "No pick in this section matches the search." : "No qualifying picks in this section right now."}</div>
+        <div className="mk-hot-empty">{filtered ? "No pick in this section matches the search." : "No qualifying picks in this section right now."}</div>
       ) : (
-        <div className="hot-grid">
+        <div className="mk-hot-grid">
           {items.map((item) => {
             const sum = hotSummary(item);
             const live = liveQuotes[item.symbol];
@@ -830,7 +830,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
           </div>
         )}
 
-        {error && <div className="hot-error mt-3">{error}</div>}
+        {error && <div className="mk-hot-error mt-3">{error}</div>}
       </div>
 
       <HotFeedHealth refreshKey={healthKey} />
@@ -862,7 +862,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
       {data && (
         <>
           <KpiStrip items={hotKpis(data)} label="Hot Picks summary" />
-          <div className="hot-meta-bar mono text-[10px] text-mist/50">
+          <div className="mk-hot-meta mono text-[10px] text-mist/50">
             Universe {data.universe_size ?? "—"}
             {" · "}scan seeds {data.scan_seed_count ?? "—"}
             {" · "}

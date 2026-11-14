@@ -11,10 +11,10 @@ const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.9
 const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
 let n = 0; const test = (name, f) => { f(); n++; console.log("ok -", name); };
 
-test("tokens.css is imported after alignment.css and before the kit styles (the kit file, if present, is last)", () => {
+test("tokens.css is imported after base.css and legacy.css and before the kit styles (the kit file, if present, is last)", () => {
   const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
   const t = imports.indexOf("styles/tokens.css");
-  assert.ok(t > imports.indexOf("alignment.css"), "after alignment.css");
+  assert.ok(t > imports.indexOf("styles/legacy.css") && imports.indexOf("styles/legacy.css") > imports.indexOf("styles/base.css") && imports.indexOf("styles/base.css") >= 0, "base, then legacy, then tokens");
   const tail = imports.slice(t + 1);
   assert.ok(tail.every((x) => ["styles/components.css", "styles/shell.css", "styles/home.css", "styles/trading.css", "styles/control.css", "styles/markets.css"].includes(x)), "only the kit, shell, home, trading, control and markets styles come after tokens.css");
 });

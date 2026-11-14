@@ -256,7 +256,7 @@ export function PsOverviewTab({ s }: { s: PsState }) {
       {/* AUDIT MOVE (this session): Status banners, "Last manual cycle",
           and all Action buttons (Enable/Pause Module, Arm/Disarm,
           Auto-Pilot toggle, Run Cycle Now, Sync Capital, Check Exits,
-          Reset Daily Ledger, Kill Switch) moved to the Pipeline subtab —
+          Reset Daily Ledger, Kill Switch) moved to the Pipeline sub-tab —
           they control the exact pipeline that tab now visualizes, so
           they belong right next to it rather than on Overview. See
           subTab === "pipeline" below. */}

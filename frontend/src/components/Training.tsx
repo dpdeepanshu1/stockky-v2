@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import TrainingProgressPanel from "./TrainingProgressPanel";
 import { KpiStrip } from "./ui/KpiStrip";
-import { Button } from "./kit";   // E542
+import { Button, DataTable, SkeletonLines } from "./kit";   // E542, E544
 import { trainingKpis, fmtMetric, fmtFixed, predictionRowView } from "./trainingView";
 import { api, TrainingStatusResponse, PeriodRollupItem, TrainingProgress } from "../api";
 
@@ -599,7 +599,7 @@ export default function Training() {
   };
 
   const renderPeriodRollup = () => {
-    if (loadingRollup) return <Spinner />;
+    if (loadingRollup) return <SkeletonLines rows={4} />;
     if (periodRollup.length === 0) {
       return (
         <p className="text-mist/40 text-sm py-2">
@@ -608,92 +608,58 @@ export default function Training() {
         </p>
       );
     }
+    const rateCell = (rate: number | null | undefined) => (
+  <span className={rate == null ? "text-mist/40" : rate >= 50 ? "text-signal-buy" : "text-signal-sell"}>{rate == null ? "—" : `${rate}%`}</span>
+);
+    const pctCell = (v: number | null | undefined) => (v == null ? "—" : `${v}%`);
     return (
-      <div className="overflow-x-auto mt-2">
-        <table className="w-full text-xs font-display tabular-nums">
-          <thead>
-            <tr className="text-mist/50 border-b border-slate/40">
-              <th className="text-left py-1 pr-3">{periodView === "daily" ? "Date" : "Week"}</th>
-              <th className="text-right py-1 px-2">Picks</th>
-              <th className="text-right py-1 px-2">Buy Now</th>
-              <th className="text-right py-1 px-2">Prepare</th>
-              <th className="text-right py-1 px-2">T+1 Success</th>
-              <th className="text-right py-1 px-2">T+1 Avg</th>
-              <th className="text-right py-1 px-2">T+5 Success</th>
-              <th className="text-right py-1 px-2">T+5 Avg</th>
-              <th className="text-right py-1 pl-2">Pending</th>
-            </tr>
-          </thead>
-          <tbody>
-            {periodRollup.map((row) => (
-              <tr key={row.period} className="border-b border-slate/30">
-                <td className="py-1 pr-3 text-paper">{row.period}</td>
-                <td className="text-right py-1 px-2 text-mist/80">{row.predictions_recorded}</td>
-                <td className="text-right py-1 px-2 text-mist/80">{row.buy_now}</td>
-                <td className="text-right py-1 px-2 text-mist/80">{row.prepare_to_buy}</td>
-                <td className={`text-right py-1 px-2 ${row.t1_success_rate == null ? "text-mist/40" : row.t1_success_rate >= 50 ? "text-signal-buy" : "text-signal-sell"}`}>
-                  {row.t1_success_rate == null ? "—" : `${row.t1_success_rate}%`}
-                </td>
-                <td className="text-right py-1 px-2 text-mist/60">{row.t1_avg_return_pct == null ? "—" : `${row.t1_avg_return_pct}%`}</td>
-                <td className={`text-right py-1 px-2 ${row.t5_success_rate == null ? "text-mist/40" : row.t5_success_rate >= 50 ? "text-signal-buy" : "text-signal-sell"}`}>
-                  {row.t5_success_rate == null ? "—" : `${row.t5_success_rate}%`}
-                </td>
-                <td className="text-right py-1 px-2 text-mist/60">{row.t5_avg_return_pct == null ? "—" : `${row.t5_avg_return_pct}%`}</td>
-                <td className="text-right py-1 pl-2 text-mist/50">{row.t1_pending}/{row.t5_pending}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="mt-2">
+        <DataTable
+          dense
+          rows={periodRollup}
+          rowKey={(row) => row.period}
+          columns={[
+            { key: "period", header: periodView === "daily" ? "Date" : "Week", render: (row) => row.period },
+            { key: "picks", header: "Picks", align: "right", render: (row) => row.predictions_recorded },
+            { key: "buy", header: "Buy Now", align: "right", render: (row) => row.buy_now },
+            { key: "prep", header: "Prepare", align: "right", render: (row) => row.prepare_to_buy },
+            { key: "t1s", header: "T+1 Success", align: "right", render: (row) => rateCell(row.t1_success_rate) },
+            { key: "t1a", header: "T+1 Avg", align: "right", render: (row) => pctCell(row.t1_avg_return_pct) },
+            { key: "t5s", header: "T+5 Success", align: "right", render: (row) => rateCell(row.t5_success_rate) },
+            { key: "t5a", header: "T+5 Avg", align: "right", render: (row) => pctCell(row.t5_avg_return_pct) },
+            { key: "pend", header: "Pending", align: "right", render: (row) => `${row.t1_pending}/${row.t5_pending}` },
+          ]}
+        />
       </div>
     );
   };
 
   const renderPredictionHistory = () => {
-    if (loadingHistory) return <Spinner />;
+    if (loadingHistory) return <SkeletonLines rows={4} />;
     if (!predictions.length) return <p className="text-mist/40 text-sm">No predictions recorded yet.</p>;
 
     return (
-      <div className="overflow-x-auto mt-2">
-        <table className="w-full text-xs font-display tabular-nums">
-          <thead>
-            <tr className="text-mist/50 border-b border-slate/40">
-              <th className="text-left py-1 pr-4">Symbol</th>
-              <th className="text-left py-1 pr-4">Decision</th>
-              <th className="text-left py-1 pr-4">Price</th>
-              <th className="text-left py-1 pr-4">Date</th>
-              <th className="text-left py-1 pr-4">T+1 Success</th>
-              <th className="text-left py-1 pr-4">T+5 Success</th>
-              <th className="text-left py-1">Outcome</th>
-            </tr>
-          </thead>
-          <tbody>
-            {predictions.map((p) => {
-              const v = predictionRowView(p);   // E164: formatted text; null is "not evaluated", not a miss
-              return (
-              <tr key={p.prediction_id} className="border-b border-slate/30">
-                <td className="py-1 pr-4 text-paper">{p.symbol}</td>
-                <td className="py-1 pr-4 text-mist/80">{p.decision}</td>
-                <td className="py-1 pr-4 text-mist/80">{v.price}</td>
-                <td className="py-1 pr-4 text-mist/60">{formatDate(p.timestamp)}</td>
-                {[v.t1, v.t5].map((m, i) => (
-                  <td key={i} className="py-1 pr-4">
-                    <span className={`v7-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>
-                  </td>
-                ))}
-                <td className="py-1">
-                  <span className="text-mist/60">{v.outcomes}</span>
-                </td>
-              </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="mt-2">
+        <DataTable
+          dense
+          rows={predictions}
+          rowKey={(p) => String(p.prediction_id)}
+          columns={[
+            { key: "sym", header: "Symbol", render: (p) => p.symbol },
+            { key: "dec", header: "Decision", render: (p) => p.decision },
+            { key: "price", header: "Price", render: (p) => predictionRowView(p).price },   // E164: formatted text; null is "not evaluated", not a miss
+            { key: "date", header: "Date", render: (p) => formatDate(p.timestamp) },
+            { key: "t1", header: "T+1 Success", render: (p) => { const m = predictionRowView(p).t1; return <span className={`v7-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>; } },
+            { key: "t5", header: "T+5 Success", render: (p) => { const m = predictionRowView(p).t5; return <span className={`v7-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>; } },
+            { key: "out", header: "Outcome", render: (p) => predictionRowView(p).outcomes },
+          ]}
+        />
       </div>
     );
   };
 
   const renderInsights = () => {
-    if (loadingInsights) return <Spinner />;
+    if (loadingInsights) return <SkeletonLines rows={4} />;
     if (!insights.length) return <p className="text-mist/40 text-sm">No insights available yet.</p>;
 
     return (
@@ -1123,33 +1089,21 @@ export default function Training() {
                 <span className="text-xs">{showFolds ? "▲" : "▼"}</span>
               </button>
               {showFolds && (
-                <div className="mt-3 overflow-x-auto">
-                  <table className="w-full text-xs font-display tabular-nums">
-                    <thead>
-                      <tr className="text-mist/50 border-b border-slate/40">
-                        <th className="text-left py-1 pr-4">Fold</th>
-                        <th className="text-left py-1 pr-4">Train Start</th>
-                        <th className="text-left py-1 pr-4">Train End</th>
-                        <th className="text-left py-1 pr-4">Val Start</th>
-                        <th className="text-left py-1 pr-4">Val End</th>
-                        <th className="text-left py-1 pr-4">Train Samples</th>
-                        <th className="text-left py-1">Val Samples</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {status.fold_details.map((fold) => (
-                        <tr key={fold.fold} className="border-b border-slate/30">
-                          <td className="py-1 pr-4 text-paper">{fold.fold}</td>
-                          <td className="py-1 pr-4 text-mist/70">{fold.train_start}</td>
-                          <td className="py-1 pr-4 text-mist/70">{fold.train_end}</td>
-                          <td className="py-1 pr-4 text-mist/70">{fold.val_start}</td>
-                          <td className="py-1 pr-4 text-mist/70">{fold.val_end}</td>
-                          <td className="py-1 pr-4 text-mist/70">{fold.train_samples}</td>
-                          <td className="py-1 text-mist/70">{fold.val_samples}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div className="mt-3">
+                  <DataTable
+                    dense
+                    rows={status.fold_details}
+                    rowKey={(fold) => String(fold.fold)}
+                    columns={[
+                      { key: "fold", header: "Fold", render: (fold) => fold.fold },
+                      { key: "ts", header: "Train Start", render: (fold) => fold.train_start },
+                      { key: "te", header: "Train End", render: (fold) => fold.train_end },
+                      { key: "vs", header: "Val Start", render: (fold) => fold.val_start },
+                      { key: "ve", header: "Val End", render: (fold) => fold.val_end },
+                      { key: "tn", header: "Train Samples", render: (fold) => fold.train_samples },
+                      { key: "vn", header: "Val Samples", render: (fold) => fold.val_samples },
+                    ]}
+                  />
                 </div>
               )}
             </div>

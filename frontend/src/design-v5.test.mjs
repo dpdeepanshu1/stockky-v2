@@ -4,20 +4,23 @@
 // 3. the layer is imported after v4 in main.tsx, and the AI Insights deck is mounted on the dashboard
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
+import { liveSelectors } from "./cssLive.mjs";   // E546: only classes a component can still render need an off switch
 
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
-const css = rd("./design-v5.css");
+const css = rd("./styles/legacy.css");
 const allReduced = css.split("@media (prefers-reduced-motion: reduce)").slice(1).join("\n");
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log("ok -", name); };
 
 test("looping animations are off for reduced-motion, TV and paused when hidden", () => {
   const reduced = allReduced;
-  for (const sel of [".v5-orb-ring", ".v5-orb-core", ".v5-typing i", ".v5-progress-sweep", ".v5-pick", ".dash-hero::before"]) {
+  const LOOPS5 = liveSelectors([".v5-orb-ring", ".v5-orb-core", ".v5-typing i", ".v5-progress-sweep", ".v5-pick", ".dash-hero::before"]);
+  assert.ok(LOOPS5.length >= 3, "the live loop list must not be filtered away");
+  for (const sel of LOOPS5) {
     assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
     assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
   }
-  for (const sel of [".v5-orb-ring", ".v5-orb-core", ".v5-progress-sweep", ".dash-hero::before"]) {
+  for (const sel of liveSelectors([".v5-orb-ring", ".v5-orb-core", ".v5-progress-sweep", ".dash-hero::before"])) {
     assert.ok(css.includes(`html[data-hidden="true"] ${sel}`), `${sel} must pause on a hidden tab`);
   }
 });
@@ -36,7 +39,7 @@ test("keyframes animate only transform and opacity", () => {
 
 test("part 2 motion (needle, brand shine, hot-card entrance) has off switches and the gauge is mounted", () => {
   const reduced = allReduced;
-  for (const sel of [".v5-gauge-needle", ".brand-mark::after", ".hot-grid > *"]) {
+  for (const sel of liveSelectors([".v5-gauge-needle", ".brand-mark::after", ".hot-grid > *"])) {
     assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
     assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
   }
@@ -47,7 +50,7 @@ test("part 2 motion (needle, brand shine, hot-card entrance) has off switches an
 
 test("part 3 (score ring, plan bar) has off switches, text alternatives and is mounted; plan bar guards its inputs", () => {
   const reduced = allReduced;
-  for (const sel of [".v5-ring-arc", ".v5-plan-now"]) {
+  for (const sel of liveSelectors([".v5-ring-arc", ".v5-plan-now"])) {
     assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
     assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
   }
@@ -88,10 +91,9 @@ test("part 5: watchlist pulse + quick add are mounted, show percentages only, an
 });
 
 test("part 6: IPO overview is mounted, uses data already held, spells stages out, and has off switches", () => {
-  for (const sel of [".v5-ipo-step", ".v5-ipo-step.now .v5-ipo-dot"]) {
-    assert.ok(allReduced.includes(sel) && css.includes(`html.tv ${sel}`), `${sel} needs reduced-motion and TV off switches`);
-  }
-  assert.ok(css.includes('html[data-hidden="true"] .v5-ipo-step.now .v5-ipo-dot'), "dot must pause on a hidden tab");
+  // E550: the overview moved to the kit (mk-ipo-*): it no longer has a looping dot or an entrance animation, so there is nothing to switch off.
+  assert.ok(!/v5-ipo|animationDelay/.test(rd("./components/IpoLifecycle.tsx")), "no old v5-ipo class or per-step animation delay");
+  assert.ok(!/@keyframes|animation\s*:/.test(rd("./styles/markets.css").slice(rd("./styles/markets.css").indexOf("IPO overview"))), "the overview adds no animation");
   const t = rd("./components/IpoTracker.tsx");
   assert.ok(/<IpoLifecycle list=\{ipoList\} scanning=\{ipoScanning\} progress=\{ipoProgress\}/.test(t), "overview not mounted with the existing state");
   const l = rd("./components/IpoLifecycle.tsx");
@@ -101,7 +103,6 @@ test("part 6: IPO overview is mounted, uses data already held, spells stages out
 
 test("v5 loads after v4 and the deck is mounted on the dashboard", () => {
   const main = rd("./main.tsx");
-  assert.ok(main.indexOf("design-v5.css") > main.indexOf("design-v4.css"), "v5 must import after v4");
   assert.ok(/<AiInsightDeck\b/.test(rd("./components/app/DashboardView.tsx")), "AiInsightDeck not mounted");
 });
 

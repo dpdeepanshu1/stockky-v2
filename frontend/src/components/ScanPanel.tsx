@@ -9,6 +9,7 @@ import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { decisionTally, ruleCounts, prepareNoteLines } from "../structureView";
+import { Button } from "./kit/Button";
 
 interface Props {
   result: ScanResult;
@@ -634,38 +635,30 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         <div className="scan-bento-card scan-bento-actions">
           <p className="dash-section-title mb-2">Actions</p>
           <div className="scan-action-row">
-            <button onClick={handleSendTopPicks} disabled={!!isSendingTelegram || top5Actionable.length === 0} className="scan-action-btn">
+            <Button variant="ghost" size="sm" onClick={handleSendTopPicks} disabled={!!isSendingTelegram || top5Actionable.length === 0}>
               {isSendingTelegram === "top5" ? "Sending…" : "📤 Top 5"}
-            </button>
-            <button onClick={handleSendAllActionable} disabled={!!isSendingTelegram || allActionable.length === 0} className="scan-action-btn">
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleSendAllActionable} disabled={!!isSendingTelegram || allActionable.length === 0}>
               {isSendingTelegram === "all" ? "Sending…" : "📤 All actionable"}
-            </button>
-            <button onClick={handleTop5ToTrade} disabled={!!committing || top5Actionable.length === 0} className="scan-action-btn scan-action-trade">
+            </Button>
+            <Button variant="soft" size="sm" onClick={handleTop5ToTrade} disabled={!!committing || top5Actionable.length === 0}>
               {committing === "trade_top5" ? "Opening…" : `📈 Trade top (${top5Actionable.length})`}
-            </button>
-            <button onClick={handleAllActionableToTrade} disabled={!!committing || allActionable.length === 0} className="scan-action-btn scan-action-trade">
+            </Button>
+            <Button variant="soft" size="sm" onClick={handleAllActionableToTrade} disabled={!!committing || allActionable.length === 0}>
               {committing === "trade_all" ? "Opening…" : `📈 Trade all (${allActionable.length})`}
-            </button>
-            <button onClick={handleAddActionableToTraining} disabled={!!committing || allActionable.length === 0} className="scan-action-btn">
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleAddActionableToTraining} disabled={!!committing || allActionable.length === 0}>
               {committing === "training" ? "Adding…" : "🎓 Train actionable"}
-            </button>
-            <button type="button" onClick={handleSendUniverseForTraining} disabled={!!committing || !result} className="scan-action-btn scan-action-violet" title="Send entire scan universe into training">
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleSendUniverseForTraining} disabled={!!committing || !result} title="Send entire scan universe into training">
               {committing === "universe" ? "Sending…" : "🌌 Universe → train"}
-            </button>
-            <button
-              onClick={() => onAddManyToWatchlist(top5Actionable.map((r) => r.symbol), "Top Picks")}
-              disabled={top5Actionable.length === 0}
-              className="scan-action-btn"
-            >
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => onAddManyToWatchlist(top5Actionable.map((r) => r.symbol), "Top Picks")} disabled={top5Actionable.length === 0}>
               ⭐ Watchlist top
-            </button>
-            <button
-              onClick={() => onAddManyToWatchlist(allActionable.map((d) => d.symbol), "All Actionable")}
-              disabled={allActionable.length === 0}
-              className="scan-action-btn"
-            >
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => onAddManyToWatchlist(allActionable.map((d) => d.symbol), "All Actionable")} disabled={allActionable.length === 0}>
               ⭐ Watchlist all
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -697,9 +690,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="btn-terminal"
+              <Button
+                variant="ghost"
                 onClick={() => {
                   const needed = Math.max(0, (balanceLow.needed ?? 0) - (balanceLow.available ?? 0));
                   setBalanceLow(null);
@@ -711,7 +703,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                 }}
               >
                 Add Balance / Open Trades
-              </button>
+              </Button>
               <button
                 type="button"
                 className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl border border-signal-hold/40 text-signal-hold hover:bg-signal-hold/20"

@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 // UI refresh (2026-10-11): every themed colour is now an RGB-channel CSS
-// variable (see :root / html.light in src/index.css) wrapped with
+// variable (see :root / html.light in src/styles/base.css) wrapped with
 // <alpha-value>. Before this, colours were plain `var(--x)` strings, which
 // Tailwind cannot apply an opacity modifier to — so ~600 classes such as
 // `text-mist/60`, `border-slate/40`, `bg-ink/40` were silently never

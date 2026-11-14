@@ -691,7 +691,7 @@ export default function IpoTracker({
               return (
                 <div
                   key={ipo.symbol}
-                  className={`v7-ipo-row ${v.stage.tone} rounded-xl border border-slate/50 bg-ink/50 px-3 py-2.5`}
+                  className={`mk-ipo-row ${v.stage.tone} rounded-xl border border-slate/50 bg-ink/50 px-3 py-2.5`}
                 >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-[140px]">
@@ -716,14 +716,14 @@ export default function IpoTracker({
                         v.gain.dir === "down" ? "text-signal-sell" : v.gain.dir === "up" ? "text-signal-buy" : "text-paper"
                       }`}
                     >
-                      {v.gain.dir === "up" && <i className="v7-arrow" aria-hidden="true">▲</i>}
-                      {v.gain.dir === "down" && <i className="v7-arrow" aria-hidden="true">▼</i>}
+                      {v.gain.dir === "up" && <i className="mk-arrow" aria-hidden="true">▲</i>}
+                      {v.gain.dir === "down" && <i className="mk-arrow" aria-hidden="true">▼</i>}
                       {v.gain.text}
                     </p>
                   )}
 
                   {v.score && (
-                    <span className={`v7-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
+                    <span className={`mk-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
                   )}
 
                   {/* GMP shown on card face — most relevant for pre/upcoming IPOs.
@@ -733,8 +733,8 @@ export default function IpoTracker({
                     <p className={`font-display tabular-nums text-[10px] min-w-[90px] font-semibold ${
                       v.gmp.dir === "up" ? "text-signal-buy" : v.gmp.dir === "down" ? "text-signal-sell" : "text-mist/60"
                     }`}>
-                      {v.gmp.dir === "up" && <i className="v7-arrow" aria-hidden="true">▲</i>}
-                      {v.gmp.dir === "down" && <i className="v7-arrow" aria-hidden="true">▼</i>}
+                      {v.gmp.dir === "up" && <i className="mk-arrow" aria-hidden="true">▲</i>}
+                      {v.gmp.dir === "down" && <i className="mk-arrow" aria-hidden="true">▼</i>}
                       {v.gmp.text}
                     </p>
                   )}

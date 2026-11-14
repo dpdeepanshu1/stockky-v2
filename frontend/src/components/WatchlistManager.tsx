@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { EmptyState } from "./ui/EmptyState";   // group 463
 import WatchlistPulse from "./WatchlistPulse";   // design v5
 import { api } from "../api";
-import { Tabs } from "./kit";   // E540
+import { Button, Tabs } from "./kit";   // E540
 import { WATCH_SORTS, dropSymbol, moveSymbol, sortWatchlist, type WatchSort } from "../watchlistOrder";   // E540
 import { AddedMap, STORAGE_KEY, formatPct, isBigMove, label, parseAdded, pctSince, prune, tone, withBaseline, checkSymbol } from "../watchlistGain";   // E28
 
@@ -114,18 +114,13 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
               autoComplete="off"
             />
           </div>
-          <button type="button" onClick={() => add()} className="btn-terminal">
+          <Button variant="ghost" onClick={() => add()}>
             Add
-          </button>
+          </Button>
           {onScanWatchlist && (
-            <button
-              type="button"
-              onClick={onScanWatchlist}
-              className="btn-terminal"
-              disabled={symbols.length === 0}
-            >
+            <Button variant="ghost" onClick={onScanWatchlist} disabled={symbols.length === 0}>
               Scan watchlist
-            </button>
+            </Button>
           )}
         </div>
 
@@ -187,7 +182,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
                         title={added[s] ? `${label(added[s])}: baseline Rs ${added[s].price.toFixed(2)}` : "no price yet"}
                         data-testid={`since-added-${s}`}
                       >
-                        {pct === null ? "no price yet" : <>{t === "up" ? <i className="v7-arrow" aria-hidden="true">▲</i> : t === "down" ? <i className="v7-arrow" aria-hidden="true">▼</i> : null}{`${formatPct(pct)} ${label(added[s])}`}</>}{isBigMove(pct) ? " ●" : ""}
+                        {pct === null ? "no price yet" : <>{t === "up" ? <i className="mk-arrow" aria-hidden="true">▲</i> : t === "down" ? <i className="mk-arrow" aria-hidden="true">▼</i> : null}{`${formatPct(pct)} ${label(added[s])}`}</>}{isBigMove(pct) ? " ●" : ""}
                       </span>
                     );
                   })()}

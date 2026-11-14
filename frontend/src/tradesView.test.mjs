@@ -51,9 +51,9 @@ assert.equal(dirOf(undefined), null); assert.equal(dirOf(0), "flat"); assert.equ
 assert.equal(levelText(1234.5), "₹1,234.5"); assert.equal(levelText(0), "—"); assert.equal(levelText(-3), "—"); assert.equal(levelText(null), "—"); assert.equal(levelText("x"), "—"); assert.equal(levelText("99.5"), "₹99.5");
 assert.equal(countText(12), "12"); assert.equal(countText(0), "0"); assert.equal(countText(undefined), "—"); assert.equal(countText(-1), "—"); assert.equal(countText("7"), "7");
 const tsx = readFileSync(new URL("./components/Trades.tsx", import.meta.url), "utf8");
-const css = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/markets.css", import.meta.url), "utf8");
 assert.ok(!/\(trade\.pnl_pct \?\? 0\) >= 0/.test(tsx) && !/\(t\.pnl_pct \?\? 0\) >= 0/.test(tsx), "a missing P&L is no longer treated as 0 (green)");
 assert.ok(!/\{Number\(t\.pnl_pct\)\}%/.test(tsx) && !/\$\{trade\.target\}/.test(tsx) && /levelText\(trade\.stop_loss\)/.test(tsx) && /countText\(trade\.quantity\)/.test(tsx), "backup list, target, stop and quantity read the helpers");
 assert.ok(/Close Position at Market/.test(tsx) && /Realized P&amp;L/.test(tsx) && /P&amp;L Amount/.test(tsx), "buttons and headings kept");
-assert.ok(/\.v7-arrow/.test(css), "arrow class exists");
+assert.ok(/\.mk-arrow/.test(css), "arrow class exists");
 console.log("tradesView ok");

@@ -6,7 +6,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 
-const css = readFileSync(new URL("./design-v4.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log("ok -", name); };
 

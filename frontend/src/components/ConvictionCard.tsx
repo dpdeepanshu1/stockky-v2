@@ -2,6 +2,7 @@ import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { ScoreRing } from "./ui/ScoreRing";          // E160: v5/v7 pieces, presentation only
 import { TradePlanBar } from "./ui/TradePlanBar";
+import { Card } from "./kit/Card";   // E550: the card is a kit Card; its inner rules are mk-cc-* in styles/markets.css
 
 /** Minimal decision-like shape so card works from scan, hot stocks, or full Decision */
 export type ConvictionData = {
@@ -112,11 +113,11 @@ function QualityGate({ data }: { data: ConvictionData }) {
   if (data.data_insufficient && !quality) quality = "low";
   if (!quality && !note) return null;
   const q = quality.toLowerCase();
-  const cls = q === "high" ? "qg-high" : q === "medium" || q === "med" ? "qg-med" : "qg-low";
+  const cls = q === "high" ? "high" : q === "medium" || q === "med" ? "med" : "low";
   return (
-    <div className={`cc-quality ${cls}`}>
-      <span className="cc-quality-badge">DATA {quality ? quality.toUpperCase() : "CHECK"}</span>
-      {note && <span className="cc-quality-note">{shortText(note, 80)}</span>}
+    <div className={`mk-cc-quality ${cls}`}>
+      <span className="mk-cc-badge">DATA {quality ? quality.toUpperCase() : "CHECK"}</span>
+      {note && <span className="mk-cc-note">{shortText(note, 80)}</span>}
     </div>
   );
 }
@@ -146,8 +147,8 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
     ) || null;
 
   return (
-    <article
-      className={`cc-card ${compact ? "cc-compact" : ""}`}
+    <Card
+      className={`mk-cc ${compact ? "compact" : ""}`}
       onClick={() => onSelect?.(data.symbol)}
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
@@ -155,25 +156,25 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         if (onSelect && (e.key === "Enter" || e.key === " ")) onSelect(data.symbol);
       }}
     >
-      <div className="cc-top">
-        <div className="cc-sym-block">
-          {rank != null && <span className="cc-rank">#{rank}</span>}
-          <span className="cc-symbol">{data.symbol}</span>
-          {data.sector && <span className="cc-sector">{data.sector}</span>}
+      <div className="mk-cc-top">
+        <div className="mk-cc-sym">
+          {rank != null && <span className="mk-cc-rank">#{rank}</span>}
+          <span className="mk-cc-symbol">{data.symbol}</span>
+          {data.sector && <span className="mk-cc-sector">{data.sector}</span>}
         </div>
-        <span className={`cc-decision ${style.color}`}>{decision}</span>
+        <span className={`mk-cc-decision ${style.color}`}>{decision}</span>
       </div>
 
       <QualityGate data={data} />
       {data.technical_thin === true && (
-        <div className="cc-quality qg-med" title="Technical read rests on a minimal / fallback price history (label only, score unchanged)">
-          <span className="cc-quality-badge">THIN TECH</span>
-          <span className="cc-quality-note">Technicals on minimal price history</span>
+        <div className="mk-cc-quality med" title="Technical read rests on a minimal / fallback price history (label only, score unchanged)">
+          <span className="mk-cc-badge">THIN TECH</span>
+          <span className="mk-cc-note">Technicals on minimal price history</span>
         </div>
       )}
 
       {(showRing || showPlan) && (
-        <div className="cc-v7-hero">
+        <div className="mk-cc-hero">
           {showRing && <ScoreRing score={scoreNum as number} size={76} />}
           {showPlan && (
             <TradePlanBar stop={data.stop_loss} entryLow={entryLow} entryHigh={entryHigh} target={data.target} price={shownPx > 0 ? shownPx : null} />
@@ -181,19 +182,19 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         </div>
       )}
 
-      <div className="cc-metrics">
+      <div className="mk-cc-grid">
         {!showRing && (
-          <div className="cc-metric">
-            <span className="cc-label">Score</span>
-            <span className="cc-value">
+          <div className="mk-cc-cell">
+            <span className="mk-cc-label">Score</span>
+            <span className="mk-cc-value">
               {score != null ? Math.round(Number(score)) : "—"}
-              <span className="cc-muted">/100</span>
+              <span className="mk-cc-muted">/100</span>
             </span>
           </div>
         )}
-        <div className="cc-metric">
-          <span className="cc-label">Price</span>
-          <span className="cc-value">
+        <div className="mk-cc-cell">
+          <span className="mk-cc-label">Price</span>
+          <span className="mk-cc-value">
             {(() => {
               const px = resolveDisplayPrice(data, data.live_price);
               // px === 0 means "no positive price found under any known
@@ -207,40 +208,40 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
           </span>
         </div>
         {data.confidence && (
-          <div className="cc-metric">
-            <span className="cc-label">Conf</span>
-            <span className="cc-value cc-muted">{data.confidence}</span>
+          <div className="mk-cc-cell">
+            <span className="mk-cc-label">Conf</span>
+            <span className="mk-cc-value mk-cc-muted">{data.confidence}</span>
           </div>
         )}
       </div>
 
-      <div className="cc-levels">
-        <div>
-          <span className="cc-label">Entry</span>
-          <span className="cc-value">
+      <div className="mk-cc-grid">
+        <div className="mk-cc-cell">
+          <span className="mk-cc-label">Entry</span>
+          <span className="mk-cc-value">
             {entryLow != null || entryHigh != null ? `₹${fmt(entryLow)}–${fmt(entryHigh)}` : "—"}
           </span>
         </div>
-        <div>
-          <span className="cc-label">Target</span>
-          <span className="cc-value text-signal-buy">
+        <div className="mk-cc-cell">
+          <span className="mk-cc-label">Target</span>
+          <span className="mk-cc-value text-signal-buy">
             ₹{fmt(data.target)}
-            {up != null && <span className="cc-up"> +{up.toFixed(1)}%</span>}
+            {up != null && <span className="mk-cc-up"> +{up.toFixed(1)}%</span>}
           </span>
         </div>
-        <div>
-          <span className="cc-label">Stop loss</span>
-          <span className="cc-value text-signal-sell">₹{fmt(data.stop_loss)}</span>
+        <div className="mk-cc-cell">
+          <span className="mk-cc-label">Stop loss</span>
+          <span className="mk-cc-value text-signal-sell">₹{fmt(data.stop_loss)}</span>
         </div>
-        <div>
-          <span className="cc-label">Horizon</span>
-          <span className="cc-value">{horizon}</span>
+        <div className="mk-cc-cell">
+          <span className="mk-cc-label">Horizon</span>
+          <span className="mk-cc-value">{horizon}</span>
         </div>
       </div>
 
       {!compact && (
         <>
-          <div className="cc-breakdown">
+          <div className="mk-cc-chips">
             {[
               ["Tech", data.technical_score],
               ["Fund", data.fundamental_score],
@@ -249,24 +250,24 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
               ["Mkt", data.market_score],
               ["Train", data.training_score],
             ].map(([label, val]) => (
-              <span key={String(label)} className="cc-chip">
-                <span className="cc-label">{label}</span>{" "}
+              <span key={String(label)} className="mk-cc-chip">
+                <span className="mk-cc-label">{label}</span>{" "}
                 <strong>{val != null ? Math.round(Number(val)) : "—"}</strong>
               </span>
             ))}
           </div>
           {typeof data.data_quality === "object" && data.data_quality?.pillars && (
-            <div className="pillar-row">
+            <div className="mk-cc-pillars">
               {Object.entries(data.data_quality.pillars).map(([k, v]) => (
-                <span key={k} className={`pillar-chip ${v ? "pass" : "fail"}`}>
+                <span key={k} className={`mk-cc-pillar ${v ? "pass" : "fail"}`}>
                   {k.toUpperCase().slice(0, 4)} {v ? "PASS" : "MISS"}
                 </span>
               ))}
             </div>
           )}
-          {blurb && <p className="cc-blurb">{blurb}</p>}
+          {blurb && <p className="mk-cc-blurb">{blurb}</p>}
           {reasons.length > 0 && (
-            <ul className="cc-reasons">
+            <ul className="mk-cc-reasons">
               {reasons.slice(0, 3).map((r, i) => (
                 <li key={i}>{shortText(r, 100)}</li>
               ))}
@@ -275,7 +276,7 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         </>
       )}
 
-      {footer && <div className="cc-footer" onClick={(e) => e.stopPropagation()}>{footer}</div>}
-    </article>
+      {footer && <div className="mk-cc-footer" onClick={(e) => e.stopPropagation()}>{footer}</div>}
+    </Card>
   );
 }

@@ -30,12 +30,12 @@ for (const k of live) assert.equal(typeof k.value, "string");
 
 // E160: card body guards (source level, no browser)
 const cc = readFileSync(new URL("./components/ConvictionCard.tsx", import.meta.url), "utf8");
-const css7 = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+const cssMk = readFileSync(new URL("./styles/markets.css", import.meta.url), "utf8");
 assert.ok(/import \{ ScoreRing \} from "\.\/ui\/ScoreRing"/.test(cc) && /import \{ TradePlanBar \} from "\.\/ui\/TradePlanBar"/.test(cc), "card uses the shared ring and plan bar");
 assert.ok(/Number\.isFinite\(Number\(score\)\)/.test(cc) && !/score\s*\?\s*<ScoreRing/.test(cc), "a score of 0 still gets a ring (finite test, not truthiness)");
 assert.ok(/decision === "BUY NOW" \|\| decision === "PREPARE TO BUY"/.test(cc), "buy zone only for a buy-side call");
 assert.ok(/!compact && scoreNum != null/.test(cc) && /\{!showRing && \(/.test(cc), "compact cards and cards without a score keep the plain Score tile");
 assert.ok(cc.includes(">Stop loss<") && cc.includes(">Target<") && cc.includes(">Entry<") && cc.includes(">Horizon<"), "the text levels stay (words for the drawing)");
 assert.ok(!/PriceRoll|GlintBox|useTickGlint|requestAnimationFrame|countUp|setInterval|setTimeout|fetch\(/i.test(cc), "card stays display-only, no animated numbers");
-assert.ok(/\.cc-v7-hero\s*\{/.test(css7) && !/E160[\s\S]*animation\s*:/.test(css7.slice(css7.indexOf("E160"))), "layout rule exists and adds no animation");
+assert.ok(/\.mk-cc-hero\s*\{/.test(cssMk) && !/mk-cc-[\w-]*[^{}]*\{[^}]*animation\s*:/.test(cssMk), "layout rule exists and adds no animation");
 console.log("hotView ok");

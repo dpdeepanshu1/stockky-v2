@@ -55,3 +55,19 @@
 .cx-prog { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-basis: 100%; }
 .cx-prog-bar { display: inline-block; width: min(16rem, 100%); height: 6px; border-radius: 3px; background: rgb(var(--panel-2-rgb)); border: 1px solid rgb(var(--border-rgb)); overflow: hidden; }
 .cx-prog-bar i { display: block; height: 100%; background: rgb(var(--accent-rgb)); }
+
+/* ── calibration pieces on the kit (round 8b, E547): chip, message, good-tone card ───────────────────────────────────── */
+.k-card.cx-good { border-color: rgb(var(--buy-rgb) / 0.55); background: rgb(var(--buy-rgb) / 0.06); }
+.cx-chip { --c: var(--muted-rgb); --ink: var(--muted-rgb); display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 10px; border-radius: 999px; border: 1px solid rgb(var(--border-strong-rgb)); background: transparent; font: inherit; font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.cx-chip.good { --c: var(--buy-rgb); --ink: 3 84 61; border-color: rgb(var(--c) / 0.5); color: rgb(var(--c)); }
+.cx-chip.warn { --c: var(--warn-rgb); --ink: 102 56 0; border-color: rgb(var(--c) / 0.5); color: rgb(var(--c)); }
+.cx-chip.bad { --c: var(--sell-rgb); --ink: 138 27 43; border-color: rgb(var(--c) / 0.5); color: rgb(var(--c)); }
+html.light .cx-chip.good, html.light .cx-chip.warn, html.light .cx-chip.bad { color: rgb(var(--ink)); }
+.cx-chip.on { font-weight: 700; background: rgb(var(--c) / 0.14); border-color: rgb(var(--c)); }
+button.cx-chip { cursor: pointer; }
+button.cx-chip:hover { background: rgb(var(--panel-2-rgb)); }
+button.cx-chip:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 2px; }
+.cx-msg { padding: 8px 12px; border-radius: var(--k-r-ctl); border: 1px solid rgb(var(--border-strong-rgb)); background: rgb(var(--panel-2-rgb)); font-size: 0.8125rem; color: rgb(var(--fg-rgb)); }
+.cx-msg.err { border-color: rgb(var(--sell-rgb) / 0.55); background: rgb(var(--sell-rgb) / 0.08); }
+.cx-msg.ok { border-color: rgb(var(--buy-rgb) / 0.55); background: rgb(var(--buy-rgb) / 0.08); }
+.cx-msg.warn { border-color: rgb(var(--warn-rgb) / 0.55); background: rgb(var(--warn-rgb) / 0.08); }

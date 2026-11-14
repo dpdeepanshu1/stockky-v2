@@ -75,7 +75,7 @@ const bareAlert = alertRowView({ target_price: "x" });
 assert.deepEqual(bareAlert, { symbol: "—", glyph: "", word: "", target: "—", fired: null }); assert.deepEqual(alertRowView(null), bareAlert);
 for (const txt of [bareAlert.symbol, bareAlert.target]) assert.ok(!/undefined|NaN|null/.test(txt));
 const dfx = readFileSync(new URL("./components/DataFeed.tsx", import.meta.url), "utf8");
-const dcss = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+const dcss = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
 assert.ok(/checkAlertTarget\(alertSym, alertTarget\)/.test(dfx) && !/target_price: Number\(alertTarget\)/.test(dfx), "add handler validates before sending");
 assert.ok(/alertRowView\(a\)/.test(dfx) && !/\{a\.symbol\} \{a\.direction\} ₹\{a\.target_price\}/.test(dfx) && /Remove/.test(dfx) && /Check now/.test(dfx), "rows read the row view; Remove and Check now stay");
 assert.ok(!/animation\s*:/.test(dcss.slice(dcss.indexOf("E163"))), "E163 CSS adds no animation");

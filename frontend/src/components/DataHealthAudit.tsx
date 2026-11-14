@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { Button, DataTable, Empty, SkeletonLines } from "./kit";   // E544
 
 interface IncompleteStock {
   symbol: string;
@@ -167,40 +168,20 @@ export default function DataHealthAudit() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void fetchAudit()}
-            disabled={loading || batchBusy}
-            className="scan-action-btn"
-          >
+          <Button variant="ghost" size="sm" onClick={() => void fetchAudit()} disabled={loading || batchBusy}>
             {loading ? "Auditing…" : error ? "🔄 Retry Audit" : "🔄 Refresh Audit"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleRepairBatch()}
-            disabled={loading || batchBusy || refillRunning || (stats?.incomplete_count ?? 0) === 0}
-            className="scan-action-btn scan-action-trade"
-          >
+          </Button>
+          <Button variant="soft" size="sm" onClick={() => void handleRepairBatch()} disabled={loading || batchBusy || refillRunning || (stats?.incomplete_count ?? 0) === 0}>
             {batchBusy ? "Repairing…" : `⚡ Auto-Repair${stats?.incomplete_stocks?.length ? ` (${Math.min(25, stats.incomplete_stocks.length)})` : ""}`}
-          </button>
+          </Button>
           {refillRunning ? (
-            <button
-              type="button"
-              onClick={() => void handleRefillAllStop()}
-              className="scan-action-btn scan-action-danger"
-            >
+            <Button variant="danger" size="sm" onClick={() => void handleRefillAllStop()}>
               ⏹ Stop Refill
-            </button>
+            </Button>
           ) : (
-            <button
-              type="button"
-              onClick={() => void handleRefillAll()}
-              disabled={loading || batchBusy || (stats?.incomplete_count ?? 0) === 0}
-              className="scan-action-btn scan-action-trade"
-              title="Repairs every incomplete record in the background, in rate-safe batches — no need to click Repair repeatedly."
-            >
+            <Button variant="soft" size="sm" onClick={() => void handleRefillAll()} disabled={loading || batchBusy || (stats?.incomplete_count ?? 0) === 0} title="Repairs every incomplete record in the background, in rate-safe batches — no need to click Repair repeatedly.">
               🚀 Refill All ({stats?.incomplete_count ?? 0})
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -275,65 +256,34 @@ export default function DataHealthAudit() {
         </span>
       </div>
 
-      <div className="rounded-2xl border border-slate overflow-hidden scan-table-wrap">
-        <table className="w-full text-sm font-display tabular-nums">
-          <thead>
-            <tr className="border-b border-slate bg-graphite">
-              <th className="text-left px-4 py-3 text-[10px] text-mist uppercase tracking-widest">Symbol</th>
-              <th className="text-left px-4 py-3 text-[10px] text-mist uppercase tracking-widest">Price</th>
-              <th className="text-left px-4 py-3 text-[10px] text-mist uppercase tracking-widest">Missing</th>
-              <th className="text-right px-4 py-3 text-[10px] text-mist uppercase tracking-widest">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length > 0 ? (
-              rows.map((item) => (
-                <tr key={item.symbol} className="border-b border-slate/40 hover:bg-graphite transition">
-                  <td className="px-4 py-2.5 text-paper font-semibold">{item.symbol}</td>
-                  <td className="px-4 py-2.5">
-                    {item.current_price > 0 ? (
-                      <span className="text-paper">₹{Number(item.current_price).toLocaleString("en-IN")}</span>
-                    ) : (
-                      <span className="text-signal-sell">0 (missing)</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex flex-wrap gap-1.5">
-                      {item.missing_fields.map((field) => (
-                        <span
-                          key={field}
-                          className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-signal-sell/60 text-signal-sell border border-signal-sell/40"
-                        >
-                          {field}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2.5 text-right">
-                    <button
-                      type="button"
-                      onClick={() => void handleRepairSingle(item.symbol)}
-                      disabled={repairingSym === item.symbol || batchBusy}
-                      className="scan-action-btn"
-                    >
-                      {repairingSym === item.symbol ? "Patching…" : "Repair"}
-                    </button>
-                  </td>
-                </tr>
-              ))
-            ) : (
-              <tr>
-                <td colSpan={4} className="text-center py-10 text-signal-buy font-medium">
-                  {loading
-                    ? "Loading audit…"
-                    : (stats?.total_universe ?? 0) === 0
-                      ? "No feed records yet — run Data Feed first, then Refresh Audit."
-                      : "🎉 All tracked feed records look complete for required fields."}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <div className="scan-table-wrap">
+        <DataTable
+          rows={rows}
+          rowKey={(item) => item.symbol}
+          empty={
+            loading ? <SkeletonLines rows={4} /> : (stats?.total_universe ?? 0) === 0
+              ? <Empty title="No feed records yet" hint="Run Data Feed first, then Refresh Audit." />
+              : <Empty title="All tracked feed records look complete for required fields." />
+          }
+          columns={[
+            { key: "sym", header: "Symbol", render: (item) => <b>{item.symbol}</b> },
+            { key: "price", header: "Price", render: (item) => item.current_price > 0
+              ? <span>₹{Number(item.current_price).toLocaleString("en-IN")}</span>
+              : <span className="text-signal-sell">0 (missing)</span> },
+            { key: "missing", header: "Missing", render: (item) => (
+              <div className="flex flex-wrap gap-1.5">
+                {item.missing_fields.map((field) => (
+                  <span key={field} className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-signal-sell/60 text-signal-sell border border-signal-sell/40">{field}</span>
+                ))}
+              </div>
+            ) },
+            { key: "act", header: "Action", align: "right", render: (item) => (
+              <Button variant="ghost" size="sm" onClick={() => void handleRepairSingle(item.symbol)} disabled={repairingSym === item.symbol || batchBusy}>
+                {repairingSym === item.symbol ? "Patching…" : "Repair"}
+              </Button>
+            ) },
+          ]}
+        />
       </div>
     </div>
   );

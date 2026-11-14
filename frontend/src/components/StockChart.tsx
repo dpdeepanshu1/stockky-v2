@@ -24,6 +24,7 @@ import {
 } from "recharts";
 import { api, StockHistory } from "../api";
 import StockCandleBlock from "./StockCandleBlock";
+import { Button } from "./kit/Button";
 
 interface Props {
   symbol: string;
@@ -183,9 +184,9 @@ export default function StockChart({ symbol, compact = false }: Props) {
           style={{ color: colors.muted }}
         >
           <span>{error || "No chart data"}</span>
-          <button type="button" className="btn-terminal text-[10px]" onClick={() => fetchHistory()}>
+          <Button variant="ghost" size="sm" onClick={() => fetchHistory()}>
             Retry chart
-          </button>
+          </Button>
         </div>
       ) : (
         /* recharts' CategoricalChartProps type doesn't declare

@@ -13,6 +13,7 @@
  */
 
 import React, { useMemo } from "react";
+import { ProgressBar } from "./ProgressBar";   // E545
 
 type StageKey =
   | "idle"
@@ -118,7 +119,7 @@ export default function TrainingProgressPanel({
   if (!active && !done && !failed && idx < 0) return null;
 
   return (
-    <div className="rounded-xl border border-slate/80 bg-graphite/80 p-4 mb-4">
+    <div className="k-card mb-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-paper tracking-wide">{title}</h3>
         <div className="text-xs font-display tabular-nums text-signal-prepare">
@@ -126,13 +127,8 @@ export default function TrainingProgressPanel({
         </div>
       </div>
 
-      <div className="h-1.5 w-full rounded bg-ink overflow-hidden mb-3">
-        <div
-          className={`h-full transition-all duration-500 ${
-            failed ? "bg-signal-hold" : done ? "bg-signal-buy" : "bg-signal-prepare"
-          }`}
-          style={{ width: `${progressPct}%` }}
-        />
+      <div className="mb-3">
+        <ProgressBar pct={progressPct} label="Training progress" />
       </div>
 
       <div className="flex justify-between text-[11px] text-mist font-display tabular-nums mb-3">
@@ -145,15 +141,7 @@ export default function TrainingProgressPanel({
           const state = done || i < idx ? "done" : i === idx ? "active" : "pending";
           return (
             <div key={s.key} className="flex items-start gap-2 py-1">
-              <div
-                className={`mt-0.5 h-2 w-2 rounded-full shrink-0 ${
-                  state === "done"
-                    ? "bg-signal-buy"
-                    : state === "active"
-                    ? "bg-signal-prepare animate-pulse"
-                    : "bg-mist"
-                }`}
-              />
+              <span className={`mk-stage-dot ${state}`} aria-hidden="true">{state === "done" ? "✓" : state === "active" ? "▸" : "○"}</span>
               <div className="min-w-0">
                 <div
                   className={`text-xs ${
@@ -161,6 +149,7 @@ export default function TrainingProgressPanel({
                   }`}
                 >
                   {s.label}
+                  <span className="mk-stage-word"> · {state === "done" ? "done" : state === "active" ? "in progress" : "waiting"}</span>
                 </div>
                 {state === "active" && (
                   <div className="text-[11px] text-mist truncate">

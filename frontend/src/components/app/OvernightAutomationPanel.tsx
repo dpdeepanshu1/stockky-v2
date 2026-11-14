@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { setVisibleInterval } from "../../visibleInterval";
 import { apiUrl } from "../../api";
+import { Button } from "../kit/Button";
 
 // 2026-09-11 fix — Oracle overnight automation: toggle + manual "run now"
 // buttons for the two overnight phases (see api-gateway's /ops/overnight/*
@@ -72,14 +73,9 @@ export function OvernightAutomationPanel() {
       </p>
 
       <div className="flex items-center gap-3 mb-3">
-        <button
-          type="button"
-          className="btn-terminal text-xs"
-          onClick={toggleEnabled}
-          disabled={!config || saving}
-        >
+        <Button variant="ghost" size="sm" onClick={toggleEnabled} disabled={!config || saving}>
           {config?.enabled ? "✅ Enabled — click to disable" : "⛔ Disabled — click to enable"}
-        </button>
+        </Button>
         {config && (
           <span className="mono text-[11px] text-mist/60">
             {config.datafeed_time} IST · {config.premarket_time} IST · {config.rest_between_steps_sec}s rest
@@ -88,22 +84,12 @@ export function OvernightAutomationPanel() {
       </div>
 
       <div className="flex flex-wrap gap-2 mb-2">
-        <button
-          type="button"
-          className="btn-terminal text-xs"
-          onClick={() => runNow("datafeed")}
-          disabled={!!running || isRunning}
-        >
+        <Button variant="ghost" size="sm" onClick={() => runNow("datafeed")} disabled={!!running || isRunning}>
           {running === "datafeed" ? "Starting…" : "▶ Run Data Feed + Repair Now"}
-        </button>
-        <button
-          type="button"
-          className="btn-terminal text-xs"
-          onClick={() => runNow("premarket")}
-          disabled={!!running || isRunning}
-        >
+        </Button>
+        <Button variant="ghost" size="sm" onClick={() => runNow("premarket")} disabled={!!running || isRunning}>
           {running === "premarket" ? "Starting…" : "▶ Run Premarket Feed + Repair Now"}
-        </button>
+        </Button>
       </div>
 
       {status && (

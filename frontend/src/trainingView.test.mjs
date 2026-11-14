@@ -59,7 +59,7 @@ const rb = predictionRowView({ price: "x", outcomes: "no" }); assert.equal(rb.pr
 assert.equal(predictionRowView({ price: 0 }).price, "—"); assert.equal(predictionRowView(null).price, "—");
 for (const txt of [rb.price, rb.outcomes, row.outcomes]) assert.ok(!/undefined|NaN|null|₹—|—%/.test(txt));
 const tsx = readFileSync(new URL("./components/Training.tsx", import.meta.url), "utf8");
-const css = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
 assert.ok(/predictionRowView\(p\)/.test(tsx) && /fmtMetric\(key, metrics\[key\]\)/.test(tsx) && !/p\.price\?\.toFixed/.test(tsx) && !/formatValue\(/.test(tsx), "cells read the helpers, no raw toFixed on API values");
 assert.ok(!/p\.t1_success === 1 \? "✅"/.test(tsx) && /T\+1 Success/.test(tsx) && /T\+5 Success/.test(tsx), "old glyph chain gone, headings kept");
 assert.ok(!/animation\s*:/.test(css.slice(css.indexOf("E164"))), "E164 CSS adds no animation");

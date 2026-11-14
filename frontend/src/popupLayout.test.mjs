@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const css = readFileSync(new URL("./design-v3.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
 for (const sel of [".terminal-main > *", ".animate-fadeIn"]) {
   const line = css.split("\n").find((l) => l.startsWith(sel + " {") && l.includes("animation:"));
   assert.ok(line, `${sel} animation rule not found`);

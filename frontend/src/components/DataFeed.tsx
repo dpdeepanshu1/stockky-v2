@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import Pipeline from "./Pipeline";
 import { KpiStrip } from "./ui/KpiStrip";
-import { Button } from "./kit";   // E542
+import { Button, ErrorState } from "./kit";   // E542, E544
+import { ProgressBar } from "./ProgressBar";   // E544
 import { feedKpis, checkAlertTarget, alertRowView } from "./feedView";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 
@@ -397,12 +398,7 @@ export default function DataFeed() {
 
         {(status === "running" || status === "stopped" || (total > 0 && processed > 0)) && (
           <div className="mt-5 space-y-3">
-            <div className="h-2 rounded-full bg-slate/40 overflow-hidden">
-              <div
-                className="h-full bg-signal-hold/80 transition-all duration-500"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
+            <ProgressBar pct={pct} label="Data feed progress" />
             <div className="flex flex-wrap gap-4 font-display tabular-nums text-[11px] text-mist">
               <span>Elapsed {fmtSec(job?.elapsed_sec)}</span>
               <span>Remaining ~{fmtSec(job?.estimated_remaining_sec)}</span>
@@ -428,14 +424,10 @@ export default function DataFeed() {
         )}
 
         {banner && (
-          <div className="mt-4 rounded-2xl border border-signal-buy/40 bg-signal-buy/10 px-3 py-2 font-display tabular-nums text-xs text-white">
-            ✅ {banner}
-          </div>
+          <p className="mk-note ok" role="status">✅ {banner}</p>
         )}
         {err && (
-          <div className="mt-4 rounded-2xl border border-signal-sell/40 bg-signal-sell/10 px-3 py-2 font-display tabular-nums text-xs text-white">
-            {err}
-          </div>
+          <div className="mt-4"><ErrorState title={err} /></div>
         )}
         {meta?.last_message && !banner && (
           <p className="mt-3 font-display tabular-nums text-[11px] text-mist/60">{meta.last_message}</p>

@@ -1,17 +1,13 @@
 // group 442: tiny shared pieces of the Real Money Calibration page.
 import type { ReactNode } from "react";
 import type { RunStatus } from "../../calibrationApi";
+import { Button, Card as KitCard, CardHeader, StatusPill as KitPill } from "../kit";
+import type { PillState } from "../kit";
 
-const PILL: Record<string, string> = {
-  success: "border-signal-buy text-signal-buy",
-  attention: "border-signal-hold text-signal-hold",
-  failed: "border-signal-sell text-signal-sell",
-  timeout: "border-signal-sell text-signal-sell",
-  blocked: "border-signal-hold text-signal-hold",
-  cancelled: "border-slate text-mist",
-  running: "border-signal-buy text-signal-buy animate-pulse",
-  queued: "border-slate text-mist",
-  never: "border-slate text-mist",
+// run status -> kit pill state. Each state has its own dot shape (kit), and the label says the same in words, so it is never colour only.
+const RUN_STATE: Record<string, PillState> = {
+  success: "live", attention: "paused", failed: "offline", timeout: "offline", blocked: "paused",
+  cancelled: "closed", running: "info", queued: "closed", never: "closed",
 };
 const LABEL: Record<string, string> = { success: "OK", attention: "LOOK", failed: "FAILED", timeout: "TIMEOUT", blocked: "BLOCKED", cancelled: "CANCELLED", running: "RUNNING", queued: "QUEUED", never: "NEVER RUN" };
 
@@ -25,44 +21,38 @@ const MEANING: Record<string, string> = {
 
 export function StatusPill({ status }: { status: RunStatus | "never" | null | undefined }) {
   const s = status || "never";
-  return <span title={MEANING[s]} className={`inline-block rounded-lg border px-1.5 py-0.5 text-[10px] font-bold tracking-wide ${PILL[s] || PILL.never}`}>{LABEL[s] || s}</span>;
+  return <KitPill state={RUN_STATE[s] || "closed"} title={MEANING[s]}>{LABEL[s] || s}</KitPill>;
 }
 
+// E547 (round 8b): Card, Btn and the pills are now thin wrappers over the kit (Card, CardHeader, Button, StatusPill); Chip and Msg use cx- classes in styles/control.css.
 export function Card({ title, right, children, tone }: { title?: ReactNode; right?: ReactNode; children: ReactNode; tone?: "warn" | "bad" | "good" }) {
-  const border = tone === "bad" ? "border-signal-sell" : tone === "warn" ? "border-signal-hold" : tone === "good" ? "border-signal-buy" : "border-slate";
+  const kitTone = tone === "bad" ? "sell" : tone === "warn" ? "warn" : "default";
   return (
-    <section className={`rounded-2xl border ${border} bg-graphite p-3 text-[12px]`}>
-      {(title || right) && (
-        <header className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-[11px] font-bold uppercase tracking-widest text-mist">{title}</h3>
-          <div className="flex flex-wrap items-center gap-2">{right}</div>
-        </header>
-      )}
+    <KitCard tone={kitTone} className={`text-[12px]${tone === "good" ? " cx-good" : ""}`}>
+      {(title || right) && <CardHeader title={title} action={right} />}
       {children}
-    </section>
+    </KitCard>
   );
 }
 
 /** A small pill that can act as a toggle (filter chips). */
 export function Chip({ children, onClick, active, tone, title }: { children: ReactNode; onClick?: () => void; active?: boolean; tone?: "good" | "warn" | "bad"; title?: string }) {
-  const c = tone === "bad" ? "border-signal-sell text-signal-sell" : tone === "warn" ? "border-signal-hold text-signal-hold" : tone === "good" ? "border-signal-buy text-signal-buy" : "border-slate text-mist";
-  const base = `inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] ${c} ${active ? "bg-white/10 font-bold" : ""}`;
+  const base = `cx-chip${tone ? ` ${tone}` : ""}${active ? " on" : ""}`;
   return onClick
-    ? <button type="button" title={title} aria-pressed={!!active} onClick={onClick} className={`${base} hover:bg-white/5`}>{children}</button>
+    ? <button type="button" title={title} aria-pressed={!!active} onClick={onClick} className={base}>{children}</button>
     : <span title={title} className={base}>{children}</span>;
 }
 
 export function Btn({ children, onClick, disabled, primary, small, title }: { children: ReactNode; onClick?: () => void; disabled?: boolean; primary?: boolean; small?: boolean; title?: string }) {
   return (
-    <button type="button" title={title} onClick={onClick} disabled={disabled} className={`${primary ? "btn-primary-term" : "btn-terminal"} ${small ? "!px-2 !py-1 !text-[11px]" : ""}`}>
+    <Button variant={primary ? "primary" : "ghost"} size={small ? "sm" : "md"} title={title} onClick={() => onClick?.()} disabled={disabled}>
       {children}
-    </button>
+    </Button>
   );
 }
 
 export function Msg({ kind, children }: { kind: "err" | "ok" | "info" | "warn"; children: ReactNode }) {
-  const c = kind === "err" ? "border-signal-sell text-signal-sell" : kind === "ok" ? "border-signal-buy text-signal-buy" : kind === "warn" ? "border-signal-hold text-signal-hold" : "border-slate text-mist";
-  return <div className={`rounded-xl border ${c} px-3 py-2 text-[12px]`} role={kind === "err" ? "alert" : "status"}>{children}</div>;
+  return <div className={`cx-msg ${kind}`} role={kind === "err" ? "alert" : "status"}>{children}</div>;
 }
 
 export function money(n: number | null | undefined): string {

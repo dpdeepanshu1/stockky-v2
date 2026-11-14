@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
 import { api } from "../api";
+import { Button, DataTable, Empty, ErrorState, StatusPill, type PillState } from "./kit";   // E545
 
 type Upstream = {
   id: string;
@@ -40,11 +41,12 @@ type RateLimitSnapshot = {
   generated_at: number;
 };
 
-function levelClass(level: string) {
-  if (level === "critical") return "text-signal-sell border-signal-sell/40 bg-signal-sell/10";
-  if (level === "warn" || level === "degraded") return "text-signal-hold border-signal-hold/40 bg-signal-hold/10";
-  if (level === "watch") return "text-signal-prepare border-signal-prepare/30 bg-signal-prepare/5";
-  return "text-signal-buy border-signal-buy/30 bg-signal-buy/5";
+// E545: a level is a status pill (words + its own dot shape), not only a coloured box
+function levelState(level: string): PillState {
+  if (level === "critical") return "offline";
+  if (level === "warn" || level === "degraded") return "paused";
+  if (level === "watch") return "info";
+  return "live";
 }
 
 function fmtTime(ts: number) {
@@ -95,21 +97,19 @@ export default function RateLimitDashboard() {
             {data?.neon_backed ? " · Neon-backed" : data?.redis_backed ? " · Redis-backed" : " · process memory"}
           </p>
         </div>
-        <button type="button" className="btn-terminal text-xs" onClick={load} disabled={loading}>
+        <Button variant="ghost" size="sm" onClick={load} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        </Button>
       </div>
 
-      {error && (
-        <p className="mono text-xs text-signal-sell mb-0">{error}</p>
-      )}
+      {error && <ErrorState title={error} onRetry={load} />}
 
       {data && (
         <>
-          <div className={`terminal-panel border rounded-xl px-3 py-2 ${levelClass(data.overall)}`}>
+          <div className="k-card quiet">
             <div className="flex items-center justify-between gap-2 flex-wrap">
-              <span className="mono text-sm font-medium uppercase tracking-wider">
-                Overall: {data.overall}
+              <span className="mono text-sm font-medium">
+                Overall: <StatusPill state={levelState(data.overall)}>{data.overall}</StatusPill>
               </span>
               <span className="mono text-[10px] opacity-80">
                 {data.events_1h} events · 429={data.by_status_1h?.["429"] || 0} · 503={data.by_status_1h?.["503"] || 0}
@@ -119,13 +119,10 @@ export default function RateLimitDashboard() {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {data.upstreams?.map((u) => (
-              <div
-                key={u.id}
-                className={`terminal-panel border rounded-xl px-3 py-2 ${levelClass(u.level)}`}
-              >
+              <div key={u.id} className="k-card quiet">
                 <div className="flex justify-between items-baseline gap-2">
                   <span className="mono text-xs font-medium">{u.label}</span>
-                  <span className="mono text-[10px] uppercase">{u.level}</span>
+                  <StatusPill state={levelState(u.level)}>{u.level}</StatusPill>
                 </div>
                 <p className="mono text-[11px] opacity-80 mb-0 mt-1">
                   {u.events_1h} hits/1h
@@ -138,15 +135,15 @@ export default function RateLimitDashboard() {
           </div>
 
           {data.circuits && data.circuits.length > 0 && (
-            <div className="terminal-panel">
+            <div className="k-card quiet">
               <h4 className="mono text-[10px] text-mist uppercase tracking-widest mb-2">Circuits</h4>
               <div className="space-y-1">
                 {data.circuits.map((c, i) => (
                   <div key={c.name || i} className="flex justify-between mono text-[11px] gap-2">
                     <span>{c.name || "—"}</span>
-                    <span className={c.state === "open" ? "text-signal-sell" : c.state === "half_open" ? "text-signal-hold" : "text-signal-buy"}>
+                    <StatusPill state={c.state === "open" ? "offline" : c.state === "half_open" ? "paused" : "live"}>
                       {c.state || "?"}{typeof c.failures === "number" ? ` (${c.failures} fails)` : ""}
-                    </span>
+                    </StatusPill>
                   </div>
                 ))}
               </div>
@@ -161,37 +158,21 @@ export default function RateLimitDashboard() {
             </ul>
           )}
 
-          <div className="terminal-panel overflow-x-auto">
+          <div className="k-card quiet">
             <h4 className="mono text-[10px] text-mist uppercase tracking-widest mb-2">Recent events</h4>
-            {(!data.recent_events || data.recent_events.length === 0) && (
-              <p className="mono text-xs text-mist/50 mb-0">No rate-limit events recorded yet.</p>
-            )}
-            <table className="w-full text-left mono text-[10px]">
-              <thead>
-                <tr className="text-mist/50 border-b border-slate/40">
-                  <th className="py-1 pr-2 font-normal">IST</th>
-                  <th className="py-1 pr-2 font-normal">Src</th>
-                  <th className="py-1 pr-2 font-normal">Code</th>
-                  <th className="py-1 pr-2 font-normal">Symbol</th>
-                  <th className="py-1 font-normal">Path / detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(data.recent_events || []).map((e, i) => (
-                  <tr key={i} className="border-b border-slate/20 align-top">
-                    <td className="py-1 pr-2 whitespace-nowrap">{fmtTime(e.ts)}</td>
-                    <td className="py-1 pr-2">{e.source}</td>
-                    <td className={`py-1 pr-2 ${e.status === 429 || e.status === 503 ? "text-signal-hold" : ""}`}>
-                      {e.status}
-                    </td>
-                    <td className="py-1 pr-2">{e.symbol || "—"}</td>
-                    <td className="py-1 text-mist/70 max-w-[200px] truncate" title={e.detail || e.path}>
-                      {e.path || e.detail || "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <DataTable
+              dense
+              rows={data.recent_events || []}
+              rowKey={(e) => `${e.ts}-${e.source}-${e.status}-${e.symbol || ""}-${e.path || ""}`}
+              empty={<Empty title="No rate-limit events recorded yet." />}
+              columns={[
+                { key: "ts", header: "IST", render: (e) => fmtTime(e.ts) },
+                { key: "src", header: "Src", render: (e) => e.source },
+                { key: "code", header: "Code", render: (e) => (e.status === 429 || e.status === 503 ? <b>{e.status}</b> : e.status) },
+                { key: "sym", header: "Symbol", render: (e) => e.symbol || "—" },
+                { key: "path", header: "Path / detail", render: (e) => <span title={e.detail || e.path}>{e.path || e.detail || "—"}</span> },
+              ]}
+            />
           </div>
         </>
       )}

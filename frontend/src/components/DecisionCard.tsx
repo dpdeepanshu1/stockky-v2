@@ -14,6 +14,7 @@ import { PriceLevelBar, ScoreBar, ReasonList, MetricItem, EventScoreBadge } from
 import { DecisionTop } from "./decision/DecisionTop";
 import { isLongIdea } from "./decision/planView";
 import { Tabs } from "./kit/Tabs";
+import { Button } from "./kit/Button";
 export { HorizonStrip } from "./decision/Bits";   // E536: kept as an export of this module
 import { decisionToSnapshot, policyRecord, waitForEntryText, prepareTriggerText, retestBadge } from "../structureView";
 
@@ -577,13 +578,9 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
               </ul>
             )}
             {recentNewsItems.length > 3 && (
-              <button
-                type="button"
-                className="btn-terminal text-[10px]"
-                onClick={() => setExpandedNewsIndex(expandedNewsIndex === -1 ? null : -1)}
-              >
+              <Button variant="ghost" size="sm" onClick={() => setExpandedNewsIndex(expandedNewsIndex === -1 ? null : -1)}>
                 {expandedNewsIndex === -1 ? "Hide full news" : "Full news — click here"}
-              </button>
+              </Button>
             )}
             {expandedNewsIndex === -1 && recentNewsItems.length > 3 && (
               <ul className="mt-2 space-y-1.5 border-t border-slate/40 pt-2">

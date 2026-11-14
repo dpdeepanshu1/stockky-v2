@@ -8,7 +8,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { KpiStrip } from "./ui/KpiStrip";
-import { Tabs } from "./kit";   // E540
+import { Button, Tabs } from "./kit";   // E540
 import { tradesKpis, pnlView, dirOf, levelText, countText } from "./tradesView";
 import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
@@ -22,7 +22,7 @@ const fmtMoney = (n: number | null | undefined) =>
 const fmtPct = (n: number | null | undefined) => pnlView(n).text;   // E165: rounded to 2 decimals, dash when missing
 // E165: colour + arrow only when the value is a real number; missing is neutral, never "up"
 const dirCls = (d: "up" | "down" | "flat" | null) => (d === "up" ? "text-signal-buy" : d === "down" ? "text-signal-sell" : "text-mist/60");
-const dirArrow = (d: "up" | "down" | "flat" | null) => (d === "up" ? <i className="v7-arrow" aria-hidden="true">▲</i> : d === "down" ? <i className="v7-arrow" aria-hidden="true">▼</i> : null);
+const dirArrow = (d: "up" | "down" | "flat" | null) => (d === "up" ? <i className="mk-arrow" aria-hidden="true">▲</i> : d === "down" ? <i className="mk-arrow" aria-hidden="true">▼</i> : null);
 
 /** Resolve entry/exit/last from trade row without ₹NaN / ₹0 ghosts. */
 function safeTradePrice(t: any, preferred?: "entry" | "exit" | "last"): number {
@@ -451,9 +451,9 @@ export default function Trades() {
             </label>
           </div>
           <div className="flex gap-2">
-            <button type="button" className="btn-terminal" disabled={manualBusy} onClick={submitManualTrade}>
+            <Button variant="ghost" disabled={manualBusy} onClick={submitManualTrade}>
               {manualBusy ? "Opening…" : "Open paper trade"}
-            </button>
+            </Button>
             <button type="button" className="text-xs font-display tabular-nums text-mist border border-slate/40 rounded-xl px-3 py-2" onClick={() => setShowManual(false)}>
               Cancel
             </button>

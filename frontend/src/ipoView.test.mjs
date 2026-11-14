@@ -54,8 +54,8 @@ assert.deepEqual(ipoRowView({ stage: "pre_listing", gmp: -4, gmp_pct_of_issue: -
 assert.deepEqual(ipoRowView({ stage: "upcoming", gmp: 0 }).gmp, { text: "GMP ₹0", dir: "flat" }); assert.equal(ipoRowView({ stage: "upcoming", gmp: null }).gmp, null);
 // source guards
 const tsx = readFileSync(new URL("./components/IpoTracker.tsx", import.meta.url), "utf8");
-const css = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/markets.css", import.meta.url), "utf8");
 assert.ok(/ipoRowView\(ipo\)/.test(tsx) && !/Issue ₹\{ipo\.issue_price\}/.test(tsx) && !/Lists \$\{ipo\.listing_date\}/.test(tsx), "row face reads the row view");
-assert.ok(/v7-ipo-row/.test(tsx) && /aria-label=\{`Score /.test(tsx) && /Hide detail/.test(tsx) && /Scan for Buy/.test(tsx), "state edge, spoken score label, detail toggle and buy button stay");
-assert.ok(!/animation\s*:/.test(css.slice(css.indexOf("E162"))), "E162 CSS adds no animation");
+assert.ok(/mk-ipo-row/.test(tsx) && /aria-label=\{`Score /.test(tsx) && /Hide detail/.test(tsx) && /Scan for Buy/.test(tsx), "state edge, spoken score label, detail toggle and buy button stay");
+assert.ok(!/animation\s*:/.test(css.slice(css.indexOf("row faces"))), "E162 CSS adds no animation");
 console.log("ipoView ok");

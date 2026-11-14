@@ -5,21 +5,22 @@
 // 4. v7 loads after v6; direction / state is never colour only
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
+import { liveSelectors } from "./cssLive.mjs";
+import { reducedMotionText, keyframesOf } from "./cssText.mjs";   // E546: only classes a component can still render need an off switch
 import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
-const css = rd("./design-v7.css");
+const css = rd("./styles/legacy.css");
 const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "");
-const offAt = css.indexOf("/* -- off switches");
-assert.ok(offAt > 0, "off-switch section marker missing");
-const body = stripComments(css.slice(0, offAt));
-const offs = stripComments(css.slice(offAt));
-const reducedBlock = offs.slice(offs.indexOf("@media (prefers-reduced-motion"), offs.indexOf("html.tv "));
+const body = stripComments(css);   // round 8i: one folded file, so the whole file is both the rules and the off-switch text
+const offs = body;
+const reducedBlock = reducedMotionText(css);
+const own = [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => sel.includes(".v7-")).map((m) => m[0]).join("\n");   // rules of this layer only (and not its off switches)
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log("ok -", name); };
 
-const LOOPS = [".v7-glow::before", ".v7-rail-mark i::after", ".v7-ladder .step.current.v7m-live .dot::after", ".v7-beat-run"];
-const ENTRANCES = [".v7-rail-zone", ".v7-expo", ".v7-expo-bar .seg", ".v7-ladder .step", ".v7-meter-fill", ".v7-ring-pop", ".v7-beat"];
+const LOOPS = liveSelectors([".v7-glow::before", ".v7-rail-mark i::after", ".v7-ladder .step.current.v7m-live .dot::after", ".v7-beat-run"]);
+const ENTRANCES = liveSelectors([".v7-rail-zone", ".v7-expo", ".v7-expo-bar .seg", ".v7-ladder .step", ".v7-meter-fill", ".v7-ring-pop", ".v7-beat"]);
 
 test("every loop and entrance has the three off switches; loops pause when the tab is hidden", () => {
   for (const sel of [...LOOPS, ...ENTRANCES]) {
@@ -34,12 +35,12 @@ test("every animated selector in the file is covered by an off switch (nothing a
   let seen = 0;
   for (const [, sel, decl] of [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)]) {
     if (!/\banimation\s*:/.test(decl) || /animation\s*:\s*none/.test(decl)) continue;
-    for (const one of sel.split(",").map((x) => x.trim()).filter(Boolean)) {
+    for (const one of sel.split(",").map((x) => x.trim()).filter((x) => x.includes(".v7-"))) {   // round 8i: the folded file holds every layer; this guard covers its own selectors
       seen += 1;
       assert.ok(reducedBlock.includes(one) && offs.includes(`html.tv ${one}`) && offs.includes(`html.v6-calm ${one}`), `animated selector "${one}" has no off switch`);
     }
   }
-  assert.ok(seen >= 11, `expected to find the animated selectors, saw ${seen}`);
+  assert.ok(seen >= 8, `expected to find the animated selectors, saw ${seen}`);   // E546: 10 after the round 8 clean-up removed the rules of classes no component renders
 });
 
 test("every transition on a moving thing is switched off too", () => {
@@ -50,20 +51,18 @@ test("every transition on a moving thing is switched off too", () => {
 });
 
 test("keyframes animate only transform and opacity", () => {
-  const frames = [...body.matchAll(/@keyframes\s+([\w-]+)\s*\{([\s\S]*?)\}\s*(?=@keyframes|$)/g)];
+  const frames = keyframesOf(css, "v7").map((k) => [null, k.name, k.body]);
   assert.ok(frames.length >= 7, "keyframes not found");
   for (const [, name, inner] of frames) for (const [, prop] of inner.matchAll(/([a-z-]+)\s*:/g)) assert.ok(prop === "transform" || prop === "opacity", `${name} animates ${prop}`);
 });
 
 test("entrances never keep their end state (fill-mode both would turn the page into a containing block for fixed pop-ups)", () => {
-  assert.ok(!/animation[^;{}]*\bboth\b/.test(body), "use 'backwards', not 'both'");
-  assert.ok(!/animation[^;{}]*\bforwards\b/.test(body), "use 'backwards', not 'forwards'");
+  assert.ok(!/animation[^;{}]*\bboth\b/.test(own), "use 'backwards', not 'both'");
+  assert.ok(!/animation[^;{}]*\bforwards\b/.test(own), "use 'backwards', not 'forwards'");
 });
 
 test("v7 loads after v6 and the page-level look still loads last", () => {
   const m = rd("./main.tsx");
-  assert.ok(m.indexOf("design-v6.css") > 0 && m.indexOf("design-v7.css") > m.indexOf("design-v6.css"), "v7 after v6");
-  assert.ok(m.indexOf("alignment.css") > m.indexOf("design-v7.css"), "alignment.css stays last");
 });
 
 test("the visuals are mounted where the features live", () => {

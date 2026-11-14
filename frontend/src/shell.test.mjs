@@ -84,9 +84,9 @@ test("the pages follow the shared login: they re-read their token when the gate 
   }
 });
 test("login page: names the page being unlocked; no looping animation, shake or lock animation", () => {
-  const g = rd("./components/AdminGate.tsx"); const c = stripCss(rd("./auth-login.css"));
+  const g = rd("./components/AdminGate.tsx"); const c = [...stripCss(rd("./styles/legacy.css")).matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => /\.auth-/.test(sel)).map((m) => m[0]).join("\n");   // round 8i: the login rules inside the folded legacy file
   assert.ok(g.includes("heading={`Unlock ${title}`}") && g.includes("aria-label={`Unlock ${title}`}"));
-  assert.ok(!/@keyframes|animation\s*:/.test(c), "auth-login.css has no animation");
+  assert.ok(!/@keyframes|animation\s*:/.test(c), "the login rules have no animation");
   assert.ok(!/backdrop-filter|linear-gradient/.test(c), "flat: no blur, no gradient");
   assert.ok(/font-size:\s*16px/.test(c), "16px inputs (no iOS zoom)");
   assert.ok(g.includes("autoFocus") && g.includes('autoComplete="current-password"') && g.includes('autoComplete="username"'));

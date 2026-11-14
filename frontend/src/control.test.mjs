@@ -179,3 +179,25 @@ test("the chain never uses the profit / loss colours for calls and puts; the ATM
   assert.ok(/\.cx-prog-bar i \{[^}]*width/.test(css) === false, "the bar width comes from the page, not a fixed CSS value");
 });
 console.log(`${n} control tests passed`);
+test("calibration/ui.tsx sits on the kit (round 8b, E547): Card, Btn and the run pill wrap kit parts, no old-layer class is left, signatures are unchanged", () => {
+  const s = rd("./components/calibration/ui.tsx");
+  assert.ok(/from "\.\.\/kit"/.test(s) && /<KitCard/.test(s) && /<CardHeader/.test(s) && /<Button variant=/.test(s) && /<KitPill state=/.test(s));
+  assert.ok(!/btn-terminal|btn-primary-term|bg-graphite|animate-pulse/.test(s), "an old-layer class is back");
+  for (const name of ["StatusPill", "Card", "Chip", "Btn", "Msg", "money", "pnlClass"]) assert.ok(new RegExp(`export (function|const) ${name}\\b`).test(s), `${name} export lost`);
+  assert.ok(/role=\{kind === "err" \? "alert" : "status"\}/.test(s), "Msg keeps its alert / status role");
+  const css = stripCss(rd("./styles/control.css"));
+  for (const c of ["cx-chip", "cx-msg", "cx-good"]) assert.ok(css.includes(`.${c}`), `.${c} missing`);
+});
+test("round 8c (E548): no component uses btn-terminal any more; the nine former users render the kit Button", () => {
+  for (const f of ["DecisionCard", "ui/ErrorBoundary", "Trades", "WatchlistManager", "app/OvernightAutomationPanel", "ServiceManager", "StockChart", "StockCandleBlock", "ScanPanel"]) {
+    const s = rd(`./components/${f}.tsx`);
+    assert.ok(!/btn-terminal/.test(s) && /<Button\b/.test(s) && /import \{[^}]*\bButton\b[^}]*\} from "\.{1,2}\/kit/.test(s), `${f} still has an old button or no kit import`);
+  }
+});
+test("round 8d (E549): scan-action buttons are kit Buttons, SubTabs is the kit Tabs, the old subtabs and v6-kpi rules are gone", () => {
+  for (const f of ["DataHealthAudit", "ScanPanel"]) { const s = rd(`./components/${f}.tsx`); assert.ok(!/scan-action-btn/.test(s) && /<Button variant=/.test(s), `${f} still has an old action button`); }
+  const st = rd("./components/ui/SubTabs.tsx");
+  assert.ok(/from "\.\.\/kit\/Tabs"/.test(st) && /SubTabs = Tabs/.test(st) && !/useLayoutEffect|className=/.test(st));
+  const old = ["styles/base.css", "styles/legacy.css"].map((f) => rd(`./${f}`)).join("\n");
+  assert.ok(!/\.subtab\b|\.subtabs\b|\.scan-action-btn|\.v6-kpi\b/.test(old), "an old rule is back");
+});

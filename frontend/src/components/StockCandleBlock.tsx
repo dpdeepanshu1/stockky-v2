@@ -10,6 +10,7 @@ import {
 import { setVisibleInterval } from "../visibleInterval";
 import CandleChart from "./CandleChart";
 import PatternBadges from "./PatternBadges";
+import { Button } from "./kit/Button";
 
 const cache = new Map<string, { at: number; ctx: ChartCtx }>();
 const inflight = new Map<string, Promise<ChartCtx>>();
@@ -118,7 +119,7 @@ export default function StockCandleBlock({ symbol, levels = [], defaultOpen = tr
       ) : (
         <div className="flex items-center justify-between gap-2 text-[10px] font-display text-mist" style={{ minHeight: 48 }}>
           <span>{missingText(symbol, tf, ctx?.reason)}</span>
-          <button type="button" className="btn-terminal text-[10px]" onClick={() => run(true)}>Retry</button>
+          <Button variant="ghost" size="sm" onClick={() => run(true)}>Retry</Button>
         </div>
       )}
     </div>

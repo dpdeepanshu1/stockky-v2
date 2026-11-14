@@ -4,9 +4,9 @@ import type { ReactNode } from "react";
 export type PillState = "live" | "armed" | "paused" | "offline" | "closed" | "info";
 export const PILL_LABEL: Record<PillState, string> = { live: "Live", armed: "Armed", paused: "Paused", offline: "Offline", closed: "Closed", info: "Info" };
 
-export function StatusPill({ state, children }: { state: PillState; children?: ReactNode }) {
+export function StatusPill({ state, children, title }: { state: PillState; children?: ReactNode; title?: string }) {
   return (
-    <span className={`k-pill ${state}`} role="status">
+    <span className={`k-pill ${state}`} role="status" title={title}>
       <i aria-hidden="true" />
       {children ?? PILL_LABEL[state]}
     </span>

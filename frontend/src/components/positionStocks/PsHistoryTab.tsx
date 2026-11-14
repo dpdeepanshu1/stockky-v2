@@ -13,7 +13,7 @@ export function PsHistoryTab({ s }: { s: PsState }) {
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <div className="flex items-center justify-between mb-3">
           <p className="dash-section-title">Trade History — Buy vs Sell, Win Rate</p>
-          {/* this session: Today/Last-3-days subtabs the user asked for.
+          {/* this session: Today/Last-3-days sub-tabs the user asked for.
               Backend also only retains 3 days (see config.
               TRADE_HISTORY_RETENTION_DAYS + orders/reconcile.py::
               run_retention_cleanup()), so "3d" is effectively "all". */}
@@ -113,7 +113,7 @@ export function PsHistoryTab({ s }: { s: PsState }) {
                       <th className="py-1 pr-3">Closed</th>
                       {/* AUDIT ADD (session22 cont'd): the table had no
                           order-ID column at all — dhan_super_order_id was
-                          only ever shown in the Overview subtab's
+                          only ever shown in the Overview sub-tab's
                           PositionRow cards, not here, even though the
                           backend now returns entry and exit order ids too
                           (see main.py::trades_history). */}

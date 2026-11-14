@@ -21,7 +21,7 @@ export function usePositionStocks() {
   }, [status, ledger]);
   useEffect(() => () => publishModeStrip("positionstocks", null), []);
   const [tradeHistory, setTradeHistory] = useState<ScalpTradeHistory | null>(null);
-  // this session — Trade History Today/Last-3-days subtabs the user asked
+  // this session — Trade History Today/Last-3-days sub-tabs the user asked
   // for. Defaults to "3d" since that's the full depth the backend retains
   // anyway (orders/reconcile.py::run_retention_cleanup(),
   // config.TRADE_HISTORY_RETENTION_DAYS).
@@ -188,7 +188,7 @@ export function usePositionStocks() {
   }, [subTab, loadCumCharges]);
 
   // ADDED (session48 — "no live process shows and no stock name shows"):
-  // polls GET /pipeline/status every 2s while the Pipeline subtab is open,
+  // polls GET /pipeline/status every 2s while the Pipeline sub-tab is open,
   // same cadence/pattern as real-trade-service's own live pipeline poll.
   // Stops the moment the tab isn't open, same as every other tab-scoped
   // poll in this file.

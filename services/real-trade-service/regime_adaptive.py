@@ -231,6 +231,11 @@ def fetch_index_closes() -> List[float]:
     return [b[4] for b in _candles.candles_to_bars((r.json() or {}).get("candles") or [])]
 
 
+def result_params() -> Tuple[int, int]:
+    """(days of closed REAL trades to read, minimum trades before the results count): the two settings refresh() uses. Round 512: market_research reuses them."""
+    return (env_int_safe("REGIME_ADAPTIVE_RESULT_DAYS", 60, positive=True), env_int_safe("REGIME_ADAPTIVE_MIN_TRADES", 15, lo=0))
+
+
 def closed_real_pnls(db: Any, days: int) -> List[float]:
     """realized_pnl of REAL positions closed in the last `days` days."""
     import models

@@ -18,6 +18,7 @@ import TestsPanel from "./calibration/TestsPanel";
 import RunAllBar from "./calibration/RunAllBar";
 import AutoCalibPanel from "./calibration/AutoCalibPanel";
 import WeatherPanel from "./calibration/WeatherPanel";
+import MarketResearchPanel from "./calibration/MarketResearchPanel";
 import ShortSellingPanel from "./calibration/ShortSellingPanel";
 import SwingPanel from "./calibration/SwingPanel";
 import ReconcilePanel from "./calibration/ReconcilePanel";
@@ -30,7 +31,7 @@ import { RunsPanel, RunWindow } from "./calibration/RunsPanel";
 import { RunnerBanner, RunnerProvider, useRunner } from "./calibration/RunnerContext";
 import { Btn, Card, Msg } from "./calibration/ui";
 
-type Section = "switches" | "alerts" | "auto" | "weather" | "short" | "tape" | "setups" | "swing" | "reconcile" | "probes" | "trades" | "plan" | "tests" | "runs";
+type Section = "switches" | "alerts" | "auto" | "weather" | "research" | "short" | "tape" | "setups" | "swing" | "reconcile" | "probes" | "trades" | "plan" | "tests" | "runs";
 
 const SVC_ITEMS: { id: Svc | "fno" | "all"; label: string }[] = [{ id: "rt", label: "Real Trade" }, { id: "ps", label: "Position Stocks Service" }, { id: "fno", label: "F&O Options" }, { id: "all", label: "All services" }];
 const SECTIONS: { id: Section; label: string }[] = [
@@ -38,6 +39,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "alerts", label: "Alert switches" },
   { id: "auto", label: "Auto-calibration" },
   { id: "weather", label: "Market Weather" },
+  { id: "research", label: "Market research" },
   { id: "short", label: "Short selling" },
   { id: "tape", label: "Order-flow tape" },
   { id: "setups", label: "Setup scorecard" },
@@ -136,11 +138,12 @@ function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />
       <SessionNotice />
-      {section !== "runs" && section !== "alerts" && section !== "weather" && section !== "swing" && section !== "reconcile" && section !== "tape" && section !== "setups" && section !== "probes" && <RunAllBar svc={svc} />}
+      {section !== "runs" && section !== "alerts" && section !== "weather" && section !== "research" && section !== "swing" && section !== "reconcile" && section !== "tape" && section !== "setups" && section !== "probes" && <RunAllBar svc={svc} />}
       {section === "switches" && <SwitchesPanel svc={svc} />}
       {section === "alerts" && <SwitchesPanel svc="sch" />}
       {section === "auto" && <AutoCalibPanel />}
       {section === "weather" && <WeatherPanel />}
+      {section === "research" && <MarketResearchPanel />}
       {section === "short" && <ShortSellingPanel />}
       {section === "tape" && <TapePanel svc={svc} />}
       {section === "setups" && <SetupScorecardPanel svc={svc} />}

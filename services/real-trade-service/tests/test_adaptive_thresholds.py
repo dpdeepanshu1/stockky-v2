@@ -366,3 +366,46 @@ class TestThresholdAgeNoteEffectiveGate:
 
     def test_unknown_constant_still_empty_with_effective(self):
         assert at.threshold_age_note("NOT_A_REAL_CONSTANT", effective=36) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# round 512: market research resets the clock; the boot check waits for the first adaptive snapshot
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRound512:
+    def test_a_research_stamp_clears_the_stale_warning(self, tmp_path, monkeypatch):
+        import json as _json
+        import market_research as _mr
+        st = tmp_path / "mr.json"
+        monkeypatch.setenv("MARKET_RESEARCH_STATE_PATH", str(st))
+        monkeypatch.setenv("REGIME_ADAPTIVE_MODE", "off")      # nothing is "managed": only the review date matters
+        monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 30)
+        _mr._reset_cache()
+        assert {i["constant"] for i in at.check_threshold_staleness()} >= {"ENTRY_MIN_REWARD_RISK"}      # hard-coded 2026-10-04 is old
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        st.write_text(_json.dumps({"reviewed_date": today}))
+        _mr._reset_cache()
+        assert at.check_threshold_staleness() == []
+        assert "0d ago" in at.threshold_age_note("ENTRY_MIN_REWARD_RISK")
+        _mr._reset_cache()
+
+    def test_boot_check_is_deferred_until_the_snapshot_exists(self, monkeypatch):
+        import regime_adaptive as _ra
+        monkeypatch.setenv("REGIME_ADAPTIVE_MODE", "live")
+        monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 0)
+        _ra._reset_for_tests()
+        fake_notifier = MagicMock()
+        with patch.dict(sys.modules, {"notifier": fake_notifier}), patch.object(at, "_wait_for_adaptive_snapshot", lambda *_a, **_k: None):
+            import threading
+            before = set(threading.enumerate())
+            at.startup_staleness_warning(defer_until_snapshot=True)
+            for t in set(threading.enumerate()) - before:
+                t.join(timeout=5)
+        fake_notifier.notify_sync.assert_called_once()
+
+    def test_boot_check_runs_at_once_when_adaptive_is_off_or_called_plainly(self, monkeypatch):
+        monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 0)
+        fake_notifier = MagicMock()
+        with patch.dict(sys.modules, {"notifier": fake_notifier}):
+            at.startup_staleness_warning()
+        fake_notifier.notify_sync.assert_called_once()

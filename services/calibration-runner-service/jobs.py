@@ -435,6 +435,14 @@ def b_regime_learner(ctx, p):
                 os.path.join(ctx["exp"], "rt_latest.json"), title="Market Weather: weekly learner (proposal only)", attention=(1,))]
 
 
+def b_market_research(ctx, p):
+    """Round 512: POST real-trade /adaptive/research. The service reviews the five regime constants against the index picture, stamps the review date
+    (clears the 'Stale trading thresholds' warning), saves the record and sends its own Telegram message. trigger=runner (the weekly pack) skips when a good
+    run is younger than 5 days; manual always runs. Changes no constant, switch or order."""
+    return [_http("Run market research (real-trade)", "POST", f"{ctx['rt']}/adaptive/research?trigger={p.get('trigger', 'manual')}", auth=True,
+                  save="market_research.json", expect=(200,))]
+
+
 def _job(id, title, group, when, what, builder, params=None, heavy=False, window="any", timeout_s=900, needs=None, after=None, auto=False, cadence=None, resumable=False):
     return {"id": id, "title": title, "group": group, "when": when, "what": what, "builder": builder, "params": params or [], "heavy": heavy,
             "window": window, "timeout_s": timeout_s, "needs": needs or [], "after": after or "", "auto_elsewhere": auto, "cadence": cadence,
@@ -606,6 +614,12 @@ JOB_LIST = [
          "Verdict PROPOSE_TIGHTEN / PROPOSE_LOOSEN / NO_CHANGE / NOT_ENOUGH_DATA. Changes nothing.", b_regime_learner,
          timeout_s=300, needs=["export_records"],
          after="A CONFIRMED proposal is for you to read, then change by hand. Nothing here is applied, and none of these dials is in the calibrator's rules."),
+    _job("market_research", "Market research (regime constants review)", "weekly", "Saturday 09:00 IST (scheduled), and any time you press it",
+         "Reads the index history (7 horizons, volatility) and your recent closed real trades, works out what the adaptive rules set for the five regime constants "
+         "(entry regime score, min reward:risk, min conviction, 6-month downtrend, bullish timeframes), checks each against the governance guard-rail band, stamps the "
+         "review date (this is what clears the 'Stale trading thresholds' Telegram warning) and sends one Telegram report. Changes no constant, switch or order.", b_market_research,
+         [P("trigger", "Trigger", "choice", "manual", choices=["manual", "runner"], help="manual always runs. runner (the weekly pack) skips when a good run is younger than 5 days.")],
+         timeout_s=300, after="Verdict ATTENTION: read the reasons in the Telegram message or the Market research panel. Nothing was changed; the adaptive rules keep adjusting on their own."),
     _job("live_structure_report", "Live structure report (G4)", "ops", "Any time", "Saves GET /api/structure/report?days=60: the live observations G4 uses.", b_live_structure_report, timeout_s=120),
 ]
 JOBS: Dict[str, Dict[str, Any]] = {j["id"]: j for j in JOB_LIST}
@@ -638,6 +652,9 @@ PACKS: List[Dict[str, Any]] = [
     {"id": "weekly_calibration", "title": "Weekly calibration pack", "when": "Saturday 08:00 IST (market closed, 1-3 hours)",
      "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
      "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},
+    {"id": "weekly_market_research", "title": "Weekly market research", "when": "Saturday 09:00 IST (scheduled)",
+     "what": "Reviews the five regime constants against the market picture, stamps the review date and sends the Telegram report (Real Trade also runs it itself on Saturdays, so a stopped runner timetable does not skip a week).",
+     "jobs": [["market_research", {"trigger": "runner"}]], "stop_on_failure": False},
     {"id": "monthly_evidence", "title": "Monthly evidence pack", "when": "First Saturday of the month (market closed, several hours)",
      "what": "Legacy gates, entry rules, P8 retest, ML V2, intraday gates, setup replay (S1 to S4), TimesFM probe + combine, Kronos backtest. Needs a finished weekly calibration (history on disk).",
      "jobs": [["legacy_gate", {}], ["entry_rules", {}], ["p8_retest", {}], ["ml_v2", {}], ["intraday_gates", {}], ["setup_backtest", {}], ["tsfm_probe", {}], ["tsfm_combine", {}], ["kronos_backtest", {}]], "stop_on_failure": False},
@@ -655,6 +672,7 @@ SCHEDULE_DEFAULT: List[Dict[str, Any]] = [
     {"id": "s_overlay_clear", "pack": "overlay_clear_close", "days": [0, 1, 2, 3, 4], "time": "15:35", "enabled": True},
     {"id": "s_daily_close", "pack": "daily_close", "days": [0, 1, 2, 3, 4], "time": "16:05", "enabled": True},
     {"id": "s_friday_review", "pack": "friday_review", "days": [4], "time": "16:40", "enabled": True},
+    {"id": "s_market_research", "pack": "weekly_market_research", "days": [5], "time": "09:00", "enabled": True},
     {"id": "s_weekly_cal", "pack": "weekly_calibration", "days": [5], "time": "08:00", "enabled": False},
     {"id": "s_monthly", "pack": "monthly_evidence", "days": [5], "time": "13:00", "enabled": False, "first_week_only": True},
 ]

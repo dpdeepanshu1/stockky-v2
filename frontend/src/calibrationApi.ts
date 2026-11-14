@@ -326,6 +326,21 @@ export const controlApi = {
   audit: (svc: SwitchSvc, limit = 80) => C<{ service: string; rows: any[] }>(svc, `/audit?limit=${limit}`),
 };
 
+// ------------------------------------------------------------------ round 512: market research (real-trade-service /adaptive/research)
+export interface ResearchConstantRow { name: string; static: number | null; suggested: number | null; band: [number, number]; in_band: boolean | null; changed: boolean; note: string }
+export interface ResearchRecord {
+  ok: boolean; trigger: string; at: string; at_ist: string; reviewed_date?: string; adaptive_live?: boolean; verdict?: "OK" | "ATTENTION"; reasons?: string[];
+  picture?: { tone: number; stress: number; vol_ratio?: number | null; returns: Record<string, number | null>; sessions?: number | null };
+  feedback?: { trades?: number; win_rate?: number | null; days?: number };
+  constants?: ResearchConstantRow[]; error?: string; state_saved?: boolean;
+}
+export interface ResearchState { last: ResearchRecord | null; last_ok: ResearchRecord | null; reviewed_date: string | null; weekly: boolean; next_weekly: string; error?: string }
+/** Reads the last research record (no login needed on the service) and runs one now (admin). Research changes no constant, switch or order. */
+export const researchApi = {
+  latest: () => call<ResearchState>(serviceUrl("rt"), serviceToken("rt") || "-", "/adaptive/research"),
+  run: () => call<ResearchRecord>(serviceUrl("rt"), serviceToken("rt"), "/adaptive/research?trigger=manual", { method: "POST" }),
+};
+
 // ------------------------------------------------------------------ trades (read-only GETs of the two services)
 export const tradesApi = {
   realTrade: async (days: number) => tradesFromRealTrade(await call<any>(getRealTradeApiUrl(), serviceToken("rt"), `/positions/REAL/records?days=${days}&limit=1000&include_imported=true`)),

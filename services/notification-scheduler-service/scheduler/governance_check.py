@@ -102,11 +102,33 @@ def _adaptive_live() -> bool:
     return ((os.getenv("REGIME_ADAPTIVE_MODE") or "").strip().lower() or "live") != "off"
 
 
+def _last_research_date() -> str:
+    """Round 512: the review date stamped by the last successful market-research run (real-trade-service GET /adaptive/research), '' when unknown.
+    Best effort: no REAL_TRADE_URL, a timeout or a bad answer all mean '' and the hard-coded dates apply, exactly as before."""
+    if not NOTIFY_URL:
+        return ""
+    try:
+        import httpx
+        r = httpx.get(f"{NOTIFY_URL}/adaptive/research", timeout=5.0)
+        if r.status_code != 200:
+            return ""
+        d = str((r.json() or {}).get("reviewed_date") or "")
+        datetime.strptime(d, "%Y-%m-%d")
+        return d
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def check_stale_constants() -> list:
     stale = []
+    stamp = ""
     for name, (val, reviewed, guardrail_min, guardrail_max) in REGIME_CONSTANTS.items():
         if _adaptive_live():
             continue        # round 206: self-adjusting, a review date means nothing; the guardrail bands below still apply
+        if not stamp:
+            stamp = _last_research_date() or "-"
+        if stamp > reviewed:        # round 512: a market-research run (button / weekly) resets the 30-day clock
+            reviewed = stamp
         age = _days_since(reviewed)
         if age >= STALE_DAYS:
             stale.append({

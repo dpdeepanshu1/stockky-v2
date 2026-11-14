@@ -301,11 +301,22 @@ async def startup() -> None:
     auto_pilot.start()
     # Adaptive threshold staleness check — logs + Telegram warning if any
     # regime-dependent constant is older than ADAPTIVE_STALE_THRESHOLD_DAYS.
+    # round 512: defer_until_snapshot=True runs the check after regime_adaptive's first snapshot (45 s after boot) instead of at once,
+    # otherwise every restart flagged the five self-managed constants as stale.
     try:
         from adaptive_thresholds import startup_staleness_warning
-        startup_staleness_warning()
+        startup_staleness_warning(defer_until_snapshot=True)
     except Exception as _e:
         logger.debug("adaptive staleness check failed (non-fatal): %s", _e)
+    # round 512: weekly automatic market research (Saturday 09:00 IST, catch-up when the last good run is older than 8 days). MARKET_RESEARCH_WEEKLY=off stops it.
+    try:
+        import asyncio as _aio_mr
+        from db import get_session_factory as _get_session_factory_mr
+        import market_research as _market_research
+        globals()["_MARKET_RESEARCH_TASK"] = _aio_mr.get_running_loop().create_task(
+            _market_research.run_loop(_get_session_factory_mr()))
+    except Exception as _e:
+        logger.debug("startup market research loop not started (non-fatal): %s", _e)
     # group341: with BROKER_STOP_ENABLED off, REAL positions are protected only by this process's own exit loop (8 s). If the container is
     # killed (OOM, redeploy) or the network drops, nothing at the broker stops a loss. Say so loudly at boot instead of leaving it to a doc.
     try:
@@ -2693,6 +2704,31 @@ async def get_adaptive_regime():
         return regime_adaptive.status()
     except Exception as e:
         return {"error": str(e), "active": False}
+
+@app.get("/adaptive/research")
+async def get_market_research():
+    """Round 512: the last market-research record (verdict, market picture, the five constants against their guard-rail bands) and the next weekly run."""
+    try:
+        import market_research
+        return market_research.latest()
+    except Exception as e:
+        return {"error": str(e), "last": None, "last_ok": None}
+
+
+@app.post("/adaptive/research")
+async def run_market_research(trigger: str = "manual", admin: str = Depends(require_admin)):
+    """Round 512: run market research now (the Real Money Calibration button, and the runner's weekly timetable with trigger=runner). Reviews the five
+    regime constants against the index picture, stamps the review date (so the stale-threshold warning clears), and sends one Telegram message.
+    It changes no constant, switch or order."""
+    import asyncio
+    import market_research
+    from db import get_session_factory
+    rep = await asyncio.to_thread(market_research.run_research, get_session_factory(), trigger)
+    if not rep.get("ok"):
+        # 409 = another run is in progress; 502 = the index data could not be read (nothing stamped). The page and the runner show the reason.
+        raise HTTPException(status_code=409 if rep.get("busy") else 502, detail=rep.get("error") or "market research failed")
+    return rep
+
 
 @app.get("/adaptive/market-params/status")
 async def get_adaptive_market_params_status(db: Session = Depends(get_db)):

@@ -98,7 +98,7 @@ assert.equal(fmtDur(7200), "2.0 h");
 const jobsPy = readFileSync(new URL("../../services/calibration-runner-service/jobs.py", import.meta.url), "utf8");
 const jobIds = new Set([...jobsPy.matchAll(/_job\("([a-z0-9_]+)"/g)].map((m) => m[1]));
 const packIds = new Set([...jobsPy.matchAll(/\{"id": "([a-z0-9_]+)", "title": "[^"]+", "when"/g)].map((m) => m[1]));
-assert.ok(jobIds.size >= 30 && packIds.size === 11, `${jobIds.size} jobs ${packIds.size} packs`);
+assert.ok(jobIds.size >= 30 && packIds.size === 12, `${jobIds.size} jobs ${packIds.size} packs`);
 for (const sec of PLAN) for (const row of sec.rows) {
   if (row.pack) assert.ok(packIds.has(row.pack), `unknown pack ${row.pack}`);
   for (const j of row.jobs || []) assert.ok(jobIds.has(j), `unknown job ${j}`);
@@ -142,7 +142,7 @@ for (const svc of ["rt", "ps"]) { const r = planRunAll(realCat, svc, true); asse
 const bar = readFileSync(new URL("./components/calibration/RunAllBar.tsx", import.meta.url), "utf8");
 assert.match(bar, /Run all test cases/);
 const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
-assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && section !== \"swing\" && section !== \"reconcile\" && section !== \"tape\" && section !== \"setups\" && section !== \"probes\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51), Market Weather (not per service) and the read-only status sections (Swing lane, Reconciliation and Status probes from E144, Order-flow tape from E271 and Setup scorecard from E272: they start no test)");
+assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && section !== \"research\" && section !== \"swing\" && section !== \"reconcile\" && section !== \"tape\" && section !== \"setups\" && section !== \"probes\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51), Market Weather (not per service) and the read-only status sections (Swing lane, Reconciliation and Status probes from E144, Order-flow tape from E271 and Setup scorecard from E272: they start no test)");
 // E51: the scheduler's alert switches go through the gateway proxy, never straight to the scheduler
 assert.match(tab, /section === \"alerts\" && <SwitchesPanel svc=\"sch\" \/>/);
 assert.match(api, /`\/scheduler-control\$\{path\}`/, "alert switches use the gateway proxy path");

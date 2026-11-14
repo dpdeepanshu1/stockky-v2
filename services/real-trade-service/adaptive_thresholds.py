@@ -179,6 +179,15 @@ def _history_regime_threshold(db: Session) -> tuple[int, str]:
 
 # ── Staleness checking ────────────────────────────────────────────────────────
 
+def _reviewed(name: str, hard_coded: str) -> str:
+    """Round 512: the later of the hard-coded review date and the last successful market-research run (market_research.py)."""
+    try:
+        import market_research
+        return market_research.last_reviewed(name, hard_coded)
+    except Exception:  # noqa: BLE001 - research is optional; the hard-coded date still applies
+        return hard_coded
+
+
 def _days_since(date_str: str) -> int:
     try:
         reviewed = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -201,6 +210,7 @@ def check_threshold_staleness() -> list[dict]:
     for name, (value, reviewed_date) in _REGIME_CONSTANTS.items():
         if _ra is not None and (_ra.is_managed(name) or name in _ra.RETIRED):
             continue        # round 206: this constant is re-set from the market every 15 minutes; a review date means nothing
+        reviewed_date = _reviewed(name, reviewed_date)      # round 512: a market-research run resets the clock
         age_days = _days_since(reviewed_date)
         if age_days >= STALE_THRESHOLD_DAYS:
             stale.append({
@@ -256,9 +266,43 @@ def _stale_notice_record(stale: list[dict], now: float | None = None) -> None:
         pass    # an unwritable state file only means the next boot may notify again
 
 
-def startup_staleness_warning() -> None:
+def _wait_for_adaptive_snapshot(max_wait_s: float, poll_s: float = 5.0) -> None:
+    """Block until regime_adaptive has a fresh snapshot, REGIME_ADAPTIVE_MODE is off, or `max_wait_s` has passed."""
+    try:
+        import regime_adaptive as _ra
+        waited = 0.0
+        while _ra.mode() == "live" and _ra._fresh_snapshot() is None and waited < max_wait_s:
+            time.sleep(poll_s)
+            waited += poll_s
+    except Exception:  # noqa: BLE001 - no regime_adaptive module: just run the check
+        pass
+
+
+def startup_staleness_warning(defer_until_snapshot: bool = False) -> None:
     """Log (and optionally Telegram-notify) stale constants at service boot.
-    Called from main.py startup event — never blocks boot."""
+    Called from main.py startup event — never blocks boot.
+
+    Round 512: main.py passes defer_until_snapshot=True. At boot regime_adaptive has no snapshot yet (its first refresh is 45 s later), so
+    is_managed() was False for all five constants and every restart sent "Stale trading thresholds detected" for constants that adapt
+    themselves. With the flag the check runs on a daemon thread after the first snapshot exists (waits at most ADAPTIVE_STARTUP_GRACE_S,
+    default 240 s; REGIME_ADAPTIVE_MODE=off needs no wait). Without the flag (tests, other callers) it runs at once, as before."""
+    if defer_until_snapshot:
+        try:
+            import regime_adaptive as _ra
+            if _ra.mode() == "live" and _ra._fresh_snapshot() is None:
+                import threading
+
+                def _later() -> None:
+                    try:
+                        _wait_for_adaptive_snapshot(env_float_safe("ADAPTIVE_STARTUP_GRACE_S", 240.0, lo=0))
+                        startup_staleness_warning()
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("deferred staleness check failed (non-fatal): %s", e)
+
+                threading.Thread(target=_later, name="stale-check-after-snapshot", daemon=True).start()
+                return
+        except Exception:  # noqa: BLE001 - cannot tell: fall through to the immediate check
+            pass
     stale = check_threshold_staleness()
     if not stale:
         logger.info("adaptive_thresholds: all regime constants reviewed within %dd", STALE_THRESHOLD_DAYS)
@@ -282,7 +326,8 @@ def startup_staleness_warning() -> None:
                 f"(set {item['last_reviewed']}, {item['age_days']}d ago)"
             )
         lines.append(
-            "Re-run market research and update these if the regime has changed. "
+            "Run Market research (Real Money Calibration page, button 'Run market research now'; it also runs every "
+            "Saturday 09:00 IST) to review them and reset this warning. "
             "Adaptive gate will self-adjust regardless — this warning is for the "
             "non-adaptive constants."
         )
@@ -310,6 +355,7 @@ def threshold_age_note(constant_name: str, effective=None) -> str:
     if entry is None:
         return ""
     value, reviewed_date = entry
+    reviewed_date = _reviewed(constant_name, reviewed_date)
     age_days = _days_since(reviewed_date)
     if effective is not None and effective != value:
         return f"(static default {value}, set {reviewed_date}, {age_days}d ago)"
@@ -361,7 +407,7 @@ def adaptive_status(db: Session) -> dict:
         "stale_constants":            stale,
         "regime_adaptive":            _regime_adaptive_status(),
         "regime_constants": {
-            name: {"value": val, "last_reviewed": reviewed, "age_days": _days_since(reviewed)}
+            name: {"value": val, "last_reviewed": _reviewed(name, reviewed), "age_days": _days_since(_reviewed(name, reviewed))}
             for name, (val, reviewed) in _REGIME_CONSTANTS.items()
         },
         "advice": (

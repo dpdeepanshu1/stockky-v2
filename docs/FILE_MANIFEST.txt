@@ -174,6 +174,7 @@ frontend/src/components/calibration/AllServicesPanel.tsx
 frontend/src/components/calibration/AutoCalibPanel.tsx
 frontend/src/components/calibration/FnoCalibration.tsx
 frontend/src/components/calibration/JobCard.tsx
+frontend/src/components/calibration/MarketResearchPanel.tsx
 frontend/src/components/calibration/ReconcilePanel.tsx
 frontend/src/components/calibration/RunAllBar.tsx
 frontend/src/components/calibration/RunPlanPanel.tsx
@@ -410,7 +411,6 @@ scripts/flow_tape_report.py
 scripts/fno_charges_compare.py
 scripts/fno_eod_backtest.py
 scripts/fno_export_candles.py
-scripts/fno_rolling_index_candles.py
 scripts/fno_live_check.py
 scripts/fno_real_order_probe.py
 scripts/fno_replay_backtest.py
@@ -418,6 +418,7 @@ scripts/fno_replay_vm.sh
 scripts/fno_rolling_backtest.py
 scripts/fno_rolling_check.py
 scripts/fno_rolling_fetch.py
+scripts/fno_rolling_index_candles.py
 scripts/fno_rolling_probe.py
 scripts/fno_sim_backtest.py
 scripts/freeze_constraints.sh
@@ -1103,6 +1104,7 @@ services/calibration-runner-service/tests/test_regime_shadow_report.py
 services/calibration-runner-service/tests/test_round16_audit.py
 services/calibration-runner-service/tests/test_round229_fno_backtests_job.py
 services/calibration-runner-service/tests/test_round298_is_admin.py
+services/calibration-runner-service/tests/test_round512_market_research_job.py
 services/calibration-runner-service/tests/test_runner_engine.py
 services/calibration-runner-service/tests/test_short_history_replay.py
 services/calibration-runner-service/tests/test_weather.py
@@ -2313,6 +2315,7 @@ services/real-trade-service/market_feed/__init__.py
 services/real-trade-service/market_feed/feed.py
 services/real-trade-service/market_feed/feed.py.ubuntu-backup
 services/real-trade-service/market_feed/held_coverage.py
+services/real-trade-service/market_research.py
 services/real-trade-service/models.py
 services/real-trade-service/notifier.py
 services/real-trade-service/offline_test_harness.py
@@ -2757,6 +2760,7 @@ services/real-trade-service/tests/test_round224_vs_reject_summary.py
 services/real-trade-service/tests/test_round226_account_wide_today.py
 services/real-trade-service/tests/test_round242_capital_board.py
 services/real-trade-service/tests/test_round323_atr_nan.py
+services/real-trade-service/tests/test_round512_market_research.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

@@ -38,6 +38,7 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
   {
     id: "saturday", title: "Saturday morning (market closed)", blurb: "The heavy evidence run. Needs the machine quiet: it is refused during market hours unless you confirm.",
     rows: [
+      { when: "09:00 IST (scheduled; also runs by itself in Real Trade)", what: "Market research: reviews the five regime constants against the market picture and your recent real trades, stamps the review date, sends one Telegram report", pack: "weekly_market_research", note: "This is what clears the 'Stale trading thresholds' warning. The button is on the Market research section. It changes no setting." },
       { when: "08:00 IST", what: "Full calibration: history for 3 seeds, A/B replay, G1, walk-forward, G2 / G3 / G4, env-line pack, board parity, then a switches + metrics snapshot and its comparison with the last run", pack: "weekly_calibration", note: "1 to 3 hours. A seed whose download mostly failed is not counted (calibration_status says which to re-run)." },
       { when: "after it", what: "G2 / G3 / G4 verdict on every complete seed", jobs: ["gate_check"] },
       { when: "after it, and before / after any settings change", what: "Snapshot the switches + A/B metrics, then compare the last two snapshots", jobs: ["calibration_snapshot", "calibration_compare"], note: "The weekly pack already does both. Changes nothing." },

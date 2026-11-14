@@ -78,48 +78,62 @@ def test_a_missing_vix_is_not_an_error_and_a_dead_market_data_is(tmp_path, capsy
     assert "is market-data-service running" in capsys.readouterr().err
 
 
-def test_the_vm_replay_wrapper_exports_on_the_host_and_replays_inside_the_container(tmp_path):
-    """Round 503: scripts/fno_replay_vm.sh with a fake `docker` and a stub market-data: the replay is run through `docker compose exec` on fno-options-service, pointed at the container's own paths."""
-    import shutil
-    import subprocess
-    if not shutil.which("bash"):
-        return
+FAKE_DOCKER = r"""#!/usr/bin/env bash
+case "$*" in
+  "compose ps -q fno-options-service") [ -n "${FAKE_PS-x}" ] && [ "${FAKE_PS-x}" != "none" ] && echo abc123; exit 0;;
+  "compose exec -T fno-options-service sh -c"*) echo "40M /data/fno/snapshots/2026-11-12"; exit 0;;
+  "inspect -f {{.Config.Image}} abc123") echo stockky-v2-fno-options-service; exit 0;;
+  inspect*) echo /var/lib/docker/volumes/stockky-v2_fno-data/_data; exit 0;;
+esac
+printf "%s
+" "$@" > "$FAKE_LOG"
+exit ${FAKE_RC:-0}
+"""
+
+
+def _wrapper_env(tmp_path, base, **extra):
     fake = tmp_path / "bin"
-    fake.mkdir()
-    log = tmp_path / "docker_args.txt"
-    (fake / "docker").write_text('#!/usr/bin/env bash\n[ "$2" = "ps" ] && { echo abc123; exit 0; }\nprintf "%s\\n" "$@" > "' + str(log) + '"\n')
+    fake.mkdir(exist_ok=True)
+    (fake / "docker").write_text(FAKE_DOCKER)
     (fake / "docker").chmod(0o755)
+    return dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], MARKET_DATA_URL_HOST=base, REPLAY_INPUTS=str(tmp_path / "in"), REPLAY_OUT=str(tmp_path / "out"),
+                FAKE_LOG=str(tmp_path / "docker_args.txt"), **extra)
+
+
+def _run_wrapper(tmp_path, args=(), **extra):
+    import subprocess
     srv, _, base = _stub()
     try:
-        env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], MARKET_DATA_URL_HOST=base, REPLAY_INPUTS=str(tmp_path / "in"))
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fno_replay_vm.sh")
-        r = subprocess.run(["bash", script, "--from", "2026-11-11"], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run(["bash", script, *args], env=_wrapper_env(tmp_path, base, **extra), capture_output=True, text=True, timeout=60)
     finally:
         srv.shutdown()
+
+
+def test_the_vm_replay_wrapper_runs_the_replay_in_its_own_capped_container_not_the_live_one(tmp_path):
+    """Round 505: scripts/fno_replay_vm.sh with a fake `docker` and a stub market-data. Round 503 used `docker compose exec` in the live container; a memory kill (137) restarted the service."""
+    import shutil
+    if not shutil.which("bash"):
+        return
+    r = _run_wrapper(tmp_path, ["--from", "2026-11-11"])
     assert r.returncode == 0, r.stderr
-    assert "== replaying inside fno-options-service" in r.stdout and "== replay finished, exit code 0" in r.stdout
-    args = log.read_text().split("\n")
-    assert args[:3] == ["compose", "exec", "-T"] and "fno-options-service" in args and "--snapshots" in args and "/data/fno" in args
-    assert "/data/fno_real_probe/replay_inputs/nifty_d.csv" in args and "NIFTY,SENSEX" in args and args[-3:-1] == ["--from", "2026-11-11"]
+    assert "== replaying in a separate container" in r.stdout and "== replay finished, exit code 0" in r.stdout and "40M /data/fno/snapshots/2026-11-12" in r.stdout
+    args = (tmp_path / "docker_args.txt").read_text().split("\n")
+    assert args[0] == "run" and "--rm" in args and "exec" not in args                      # a throw-away container, never `compose exec` for the replay itself
+    assert args[args.index("--memory") + 1] == "3g" and args[args.index("--memory-swap") + 1] == "3g" and args[args.index("--network") + 1] == "none"
+    assert "/var/lib/docker/volumes/stockky-v2_fno-data/_data:/data/fno:ro" in args           # the recordings are read-only
+    assert any(a.endswith("services/fno-options-service:/app:ro") for a in args) and "stockky-v2-fno-options-service" in args
+    assert "--snapshots" in args and "/data/fno" in args and "/data/fno_real_probe/replay_inputs/nifty_d.csv" in args and "NIFTY,SENSEX" in args
+    assert args[args.index("--out") + 1] == "/data/fno_real_probe/replay_out" and args[-3:-1] == ["--from", "2026-11-11"] and "--set" not in args
     assert (tmp_path / "in" / "nifty_d.csv").exists() and (tmp_path / "in" / "sensex_d.csv").exists()
 
 
-def test_the_vm_replay_wrapper_reports_a_failed_replay_and_a_stopped_container(tmp_path):
+def test_the_vm_replay_wrapper_reports_a_killed_replay_and_a_stopped_service(tmp_path):
     import shutil
-    import subprocess
     if not shutil.which("bash"):
         return
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    (fake / "docker").write_text('#!/usr/bin/env bash\n[ "$2" = "ps" ] && { [ -n "$FAKE_PS" ] && echo abc123; exit 0; }\nexit ${FAKE_RC:-0}\n')
-    (fake / "docker").chmod(0o755)
-    srv, _, base = _stub()
-    try:
-        env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], MARKET_DATA_URL_HOST=base, REPLAY_INPUTS=str(tmp_path / "in"))
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fno_replay_vm.sh")
-        down = subprocess.run(["bash", script], env=dict(env, FAKE_PS=""), capture_output=True, text=True, timeout=60)
-        killed = subprocess.run(["bash", script], env=dict(env, FAKE_PS="1", FAKE_RC="137"), capture_output=True, text=True, timeout=60)
-    finally:
-        srv.shutdown()
+    down = _run_wrapper(tmp_path, FAKE_PS="none")
     assert down.returncode == 1 and "is not running" in down.stderr
-    assert killed.returncode == 137 and "exit code 137" in killed.stdout and "137 = the container killed it" in killed.stderr
+    killed = _run_wrapper(tmp_path, FAKE_RC="137", REPLAY_MEM="5g")
+    assert killed.returncode == 137 and "exit code 137" in killed.stdout and "the live service is untouched" in killed.stderr
+    assert (tmp_path / "docker_args.txt").read_text().split("\n")[(tmp_path / "docker_args.txt").read_text().split("\n").index("--memory") + 1] == "5g"

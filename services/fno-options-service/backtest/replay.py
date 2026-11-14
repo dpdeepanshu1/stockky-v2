@@ -5,10 +5,11 @@ Engine with a replay Provider and an injected clock, then reads the closed trade
 are built from the recorded spot. Reliability: real premiums, real bids and asks; limited to the days that were recorded."""
 from __future__ import annotations
 
+import bisect
 import copy
 from datetime import datetime, time as dtime
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import config as live_config
 from fno import engine as eng, recorder, store as st
@@ -26,27 +27,77 @@ def make_cfg(overrides: Optional[Dict[str, Any]] = None) -> SimpleNamespace:
     return ns
 
 
+class _SnapIndex:
+    """Round 504 (E525): the snapshots of ONE underlying and day as small per-snapshot values (ts, spot, vix, expiry) plus a loader for the full snapshot. The provider asks 'what is the
+    newest snapshot at time t' with bisect, so a replay tick no longer rebuilds a list of every snapshot so far (that was O(n^2)), and with a file loader a snapshot is parsed only when
+    the engine asks for its chain, so the whole day is never in memory at once."""
+
+    def __init__(self, metas: Sequence[tuple], loader: Callable[[int], Optional[Dict[str, Any]]]):
+        self.ts = [m[0] for m in metas]
+        self.spot = [m[1] for m in metas]
+        self.vix = [m[2] for m in metas]
+        self.exp = [m[3] for m in metas]
+        self.load = loader
+        self.by_exp: Dict[str, List[int]] = {}
+        for i, e in enumerate(self.exp):
+            if e is not None:
+                self.by_exp.setdefault(e, []).append(i)
+        self.vix_idx = [i for i, v in enumerate(self.vix) if v]
+        self._cache: Dict[int, Optional[Dict[str, Any]]] = {}
+
+    @classmethod
+    def from_list(cls, snaps: Sequence[Dict[str, Any]]) -> "_SnapIndex":
+        rows = sorted(snaps, key=lambda s: s["ts"])
+        return cls([(s["ts"], (s.get("chain") or {}).get("spot"), s.get("vix"), (s.get("chain") or {}).get("expiry")) for s in rows], lambda i: rows[i])
+
+    @classmethod
+    def from_file(cls, root: str, day: str, und: str) -> "_SnapIndex":
+        path, rows = recorder.index_day(root, day, und)
+        return cls([(m[0], m[2], m[3], m[4]) for m in rows], lambda i: recorder.read_at(path, rows[i][1]))
+
+    def count_upto(self, t: float) -> int:
+        return bisect.bisect_right(self.ts, t)
+
+    def snap(self, i: int) -> Optional[Dict[str, Any]]:
+        if i not in self._cache:
+            if len(self._cache) >= 4:
+                self._cache.clear()
+            self._cache[i] = self.load(i)
+        return self._cache[i]
+
+    def __len__(self) -> int:
+        return len(self.ts)
+
+
 class ReplayProvider(Provider):
-    def __init__(self, snaps: Dict[str, List[Dict[str, Any]]], daily: Dict[str, Sequence[dict]], vix_default: float = 15.0):
-        self.snaps, self.daily_by, self.vix_default = snaps, daily, vix_default
+    def __init__(self, snaps: Dict[str, Any], daily: Dict[str, Sequence[dict]], vix_default: float = 15.0):
+        """snaps: {underlying: list of snapshot dicts} (tests) or {underlying: _SnapIndex} (replay.run, memory-light)."""
+        self.ix: Dict[str, _SnapIndex] = {u: (v if isinstance(v, _SnapIndex) else _SnapIndex.from_list(v)) for u, v in snaps.items()}
+        self.daily_by, self.vix_default = daily, vix_default
         self.ts = 0.0
+        self._bars: Dict[str, Any] = {}
 
     def set_time(self, ts: float) -> None:
         self.ts = ts
 
-    def _upto(self, und: str) -> List[Dict[str, Any]]:
-        return [s for s in self.snaps.get(und, []) if s["ts"] <= self.ts]
-
     def expiries(self, und: str) -> List[str]:
-        return sorted({s["chain"]["expiry"] for s in self._upto(und)})
+        ix = self.ix.get(und)
+        return sorted(e for e, idxs in ix.by_exp.items() if ix.ts[idxs[0]] <= self.ts) if ix else []
 
     def chain(self, und: str, expiry: str) -> Optional[Chain]:
-        for s in reversed(self._upto(und)):
-            if s["chain"]["expiry"] == expiry:
-                c = Chain.from_json(s["chain"])
-                c.fetched_at = s["ts"]
-                return c
-        return None
+        ix = self.ix.get(und)
+        idxs = ix.by_exp.get(expiry) if ix else None
+        if not idxs:
+            return None
+        pos = bisect.bisect_left(idxs, ix.count_upto(self.ts)) - 1       # the newest snapshot of this expiry at or before the replay time
+        if pos < 0:
+            return None
+        s = ix.snap(idxs[pos])
+        if s is None:
+            return None
+        c = Chain.from_json(s["chain"])
+        c.fetched_at = s["ts"]
+        return c
 
     def daily(self, und: str):
         """Daily candles of the days BEFORE the replayed day only (same rule as backtest/sim.py). A daily candle is stamped at the start of its day, so the old cut-off
@@ -55,24 +106,43 @@ class ReplayProvider(Provider):
         return [c for c in self.daily_by.get(und, []) if datetime.fromtimestamp(c["t"], IST).date() < today]
 
     def intraday(self, und: str):
-        bars: Dict[int, Dict[str, float]] = {}
-        for s in self._upto(und):
-            sp = s["chain"].get("spot")
+        ix = self.ix.get(und)
+        if not ix:
+            return []
+        n = ix.count_upto(self.ts)
+        done, bars = self._bars.get(und, (0, {}))
+        if n < done:                                                   # time went backwards (a new day, a new run): start again
+            done, bars = 0, {}
+        for i in range(done, n):
+            sp = ix.spot[i]
             if not sp:
                 continue
-            k = int(s["ts"] // 300) * 300
+            k = int(ix.ts[i] // 300) * 300
             b = bars.setdefault(k, {"t": float(k), "o": sp, "h": sp, "l": sp, "c": sp, "v": 0.0})
             b["h"], b["l"], b["c"] = max(b["h"], sp), min(b["l"], sp), sp
-        return [bars[k] for k in sorted(bars)]
+        self._bars[und] = (n, bars)
+        return [dict(bars[k]) for k in sorted(bars)]
 
     def vix(self) -> Optional[float]:
         """The most RECENT recorded VIX (by time, across both underlyings; it used to be whichever underlying was iterated last)."""
         best_ts, last = -1.0, None
-        for und in self.snaps:
-            for s in self._upto(und):
-                if s.get("vix") and s["ts"] >= best_ts:
-                    best_ts, last = s["ts"], s["vix"]
+        for ix in self.ix.values():
+            j = self._vix_pos(ix)
+            if j:
+                i = ix.vix_idx[j - 1]
+                if ix.ts[i] >= best_ts:
+                    best_ts, last = ix.ts[i], ix.vix[i]
         return last or self.vix_default
+
+    def _vix_pos(self, ix: "_SnapIndex") -> int:
+        lo, hi = 0, len(ix.vix_idx)
+        while lo < hi:                                                 # bisect over the vix rows without building a list per call
+            mid = (lo + hi) // 2
+            if ix.ts[ix.vix_idx[mid]] <= self.ts:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
 
     def lookup(self, und, expiry, strike, opt_type):
         return None
@@ -86,14 +156,14 @@ def run(root: str, days: Sequence[str], daily_by_und: Dict[str, Sequence[dict]],
     ran: List[str] = []
     warnings: List[str] = []
     for day in days:
-        snaps = {u: list(recorder.read_day(root, day, u)) for u in underlyings}
-        if not any(snaps.values()):
+        snaps = {u: _SnapIndex.from_file(root, day, u) for u in underlyings}      # round 504: indexes, not every parsed snapshot of the day
+        if not any(len(ix) for ix in snaps.values()):
             continue
         ran.append(day)
         prov = ReplayProvider(snaps, {u: daily_by_und.get(u, []) for u in underlyings}, vix_default)
         db = st.Store(":memory:")
         e = eng.Engine(db, prov, cfg, holidays=tuple(holidays))
-        stamps = sorted({s["ts"] for ss in snaps.values() for s in ss})
+        stamps = sorted({t for ix in snaps.values() for t in ix.ts})
         # The intraday bars are BUILT from these snapshots. The opening-range strategies read "the first 15 / 30 minutes" from the first bar, so a recording that starts late, or has a hole,
         # silently changes what they see. Say so instead of hiding it.
         first = datetime.fromtimestamp(stamps[0], IST)

@@ -6,7 +6,7 @@ import json
 import math
 import os
 import threading
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .models import Chain
 from .store import day_of
@@ -68,6 +68,41 @@ def read_day(root: str, day: str, underlying: str) -> Iterator[Dict[str, Any]]:
         return
     rows.sort(key=lambda r: r["ts"])
     yield from rows
+
+
+def index_day(root: str, day: str, underlying: str) -> Tuple[str, List[Tuple[float, int, Any, Any, Any]]]:
+    """Round 504 (E525): the replay's memory-light read of one day. -> (path, [(ts, byte offset of the line, spot, vix, expiry), ...] sorted by ts), the same rows read_day would yield
+    (a corrupt or unusable line is skipped) but only ONE line is parsed at a time and only five small values are kept; read_at(path, offset) loads a snapshot when it is needed.
+    read_day keeps every parsed snapshot of the day in memory: a recorded day of two underlyings was enough for the 14 Nov VM replay to be killed by the container's memory limit (exit 137)."""
+    path = snapshot_path(root, day, underlying)
+    rows: List[Tuple[float, int, Any, Any, Any]] = []
+    try:
+        with open(path, "rb") as fh:
+            off = 0
+            for raw in fh:
+                here, off = off, off + len(raw)
+                try:
+                    r = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and _is_snapshot(r):
+                    ch = r["chain"]
+                    rows.append((r["ts"], here, ch.get("spot"), r.get("vix"), ch.get("expiry")))
+    except OSError:
+        return path, []
+    rows.sort(key=lambda m: m[0])
+    return path, rows
+
+
+def read_at(path: str, offset: int) -> Optional[Dict[str, Any]]:
+    """The snapshot whose line starts at `offset` (from index_day), or None when the file or the line cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            r = json.loads(fh.readline().decode("utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return r if isinstance(r, dict) and _is_snapshot(r) else None
 
 
 def list_days(root: str) -> List[str]:

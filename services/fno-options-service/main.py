@@ -104,7 +104,7 @@ def overview(admin=Depends(require_admin)) -> Dict[str, Any]:
         opens.append({**p.to_json(), "label": p.label(), "premium": prem, "unrealized": unreal, "est_charges": est, "exit_doubt": bool(p.broker_order_ids.get("exit_doubt")), "stop_doubt": bool(p.broker_order_ids.get("sl_doubt")),
                       "unrealized_net": round(unreal - est, 2) if unreal is not None and est is not None else None})
     return {"paused": engine.is_paused(), "now": datetime.now().isoformat(timespec="seconds"), "market_open": market_open(eng.now_ist(), config.HOLIDAYS), "locks": _locks(), "day": store.day_summary(_today(), mode),
-            "open_positions": opens, "unmanaged_real": [{"id": q.id, "label": q.label()} for q in engine.unmanaged_real()], "last_tick": engine.last_tick, "runner": {"alive": runner.alive(), "error": runner.last_error, "snapshots_today": runner.snapshots_today},
+            "open_positions": opens, "unmanaged_real": [{"id": q.id, "label": q.label()} for q in engine.unmanaged_real()], "last_tick": engine.last_tick, "runner": {"alive": runner.alive(), "error": runner.last_error, "snapshots_today": runner.snapshots_today, "recording": runner.recording_status(eng.now_ist(), config.HOLIDAYS)},
             "underlyings": engine.underlyings(), "params": liveparams.current().to_json(), "param_problems": gates.param_problems(liveparams.current()),
             "switches": {"underlyings": str(config.FNO_UNDERLYINGS).upper(), "record_snapshots": bool(config.FNO_RECORD_SNAPSHOTS)}}
 
@@ -163,6 +163,9 @@ def pipeline(admin=Depends(require_admin)) -> Dict[str, Any]:
     lt = engine.last_tick
     steps.append({"step": "last engine cycle", "ok": bool(lt.get("ok")) if lt.get("ts") else None, "detail": (lt.get("error") or "") + (f" ({int(time.time() - lt['ts'])}s ago)" if lt.get("ts") else "no cycle yet")})
     steps.append({"step": "snapshots recorded today", "ok": runner.snapshots_today > 0 or not market_open(eng.now_ist(), config.HOLIDAYS), "detail": str(runner.snapshots_today)})
+    rs = runner.recording_status(eng.now_ist(), config.HOLIDAYS)      # round 507
+    steps.append({"step": "recording began at the open", "ok": None if not market_open(eng.now_ist(), config.HOLIDAYS) and not rs["first_snapshot"] else (not rs["late"]),
+                  "detail": rs["detail"] or (f"first snapshot {rs['first_snapshot']}" if rs["first_snapshot"] else "") + (f", chain misses {rs['chain_misses']}" if rs["chain_misses"] else "")})
     steps.append({"step": "recorded days available for replay", "ok": None, "detail": str(len(recorder.list_days(config.DATA_DIR)))})
     stg: List[Dict[str, Any]] = []
     try:                                                              # round 264: the same facts as ordered stages (market data > ... > reconcile); never breaks the flat list above

@@ -54,6 +54,7 @@ class Position:
     note: str = ""
     broker_order_ids: Dict[str, str] = field(default_factory=dict)
     strategy: str = "CORE"                # which strategy (fno/strategies.py) opened it; rows written before round 232 load as CORE
+    score_parts: Dict[str, float] = field(default_factory=dict)   # round 507: the daily / intraday / chain parts of the entry score, so "why CE" can be read per trade
     parent_id: Optional[int] = None       # a PARTIAL exit books the sold lots as a closed child row of the position that stays open
 
     @property

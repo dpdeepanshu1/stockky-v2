@@ -80,7 +80,7 @@ def trade_lines(trades: List[Dict[str, Any]], limit: int = MAX_TRADE_LINES) -> L
     """Round 506 (E526): one line per closed trade of a REPLAY, so the shape of the losses can be read from the text file: when it opened, what, the entry / exit premium, how far the premium
     went in our favour (best) and against us (worst) from the entry fill, where the stop sat, how long it was held, why it closed, and the net P&L."""
     L = ["TRADES (IST; best / worst = highest / lowest premium seen while held, vs the entry fill; stop = the stop price vs the entry fill)",
-         "  entry        und     side strike   strat         score lots  entry   exit   best  worst  stop  held  exit       net"]
+         "  entry        und     side strike   strat         score lots  entry   exit   best  worst  stop  held  exit       net   score parts (daily/intraday/chain)"]
     def _key(x: Dict[str, Any]) -> float:
         try:
             return float(x.get("entry_ts") or 0)
@@ -93,8 +93,13 @@ def trade_lines(trades: List[Dict[str, Any]], limit: int = MAX_TRADE_LINES) -> L
         except (KeyError, TypeError, ValueError, OSError):
             when, held = "?", "-"
         e = t.get("entry_premium")
+        sp = t.get("score_parts") or {}
+        parts = "/".join(f"{float(sp[k]):+.0f}" for k in ("daily", "intraday", "chain")) if all(isinstance(sp.get(k), (int, float)) for k in ("daily", "intraday", "chain")) else "-"
+        when = when + ("*" if t.get("suspect_day") else "")
         L.append(f"  {when:<12} {str(t.get('underlying')):<7} {str(t.get('opt_type')):<4} {_num(t.get('strike'), 0):<7} {str(t.get('strategy')):<13} {_num(t.get('signal_score'), 0):>5} {t.get('lots')!s:>4} "
-                 f"{_num(e):>7} {_num(t.get('exit_premium')):>6} {_pct(t.get('max_premium'), e):>6} {_pct(t.get('min_premium'), e):>6} {_pct(t.get('sl_price'), e):>5} {held:>5}  {str(t.get('exit_reason')):<9} {_num(t.get('net_pnl')):>9}")
+                 f"{_num(e):>7} {_num(t.get('exit_premium')):>6} {_pct(t.get('max_premium'), e):>6} {_pct(t.get('min_premium'), e):>6} {_pct(t.get('sl_price'), e):>5} {held:>5}  {str(t.get('exit_reason')):<9} {_num(t.get('net_pnl')):>9}   {parts}")
+    if any(t.get("suspect_day") for t in trades):
+        L.append("  * opened on a day whose recording started late or has a hole: its bars / opening range are not real, so read that trade with care")
     if len(trades) > limit:
         L.append(f"  ... {len(trades) - limit} more trades in the .json")
     return L
@@ -130,6 +135,9 @@ def render_text(r: Dict[str, Any]) -> str:
         L += ["", "DAY WARNINGS"] + [f"  - {x}" for x in r["warnings"]]
     if r.get("kind") == "REPLAY" and r.get("trades"):
         L += [""] + trade_lines(r["trades"])
+        co = r.get("clean_overall")
+        if co:
+            L.append(f"  without the * days ({r.get('clean_days')} clean day(s)): trades {co.get('trades')}   win rate {co.get('win_rate_pct')}%   NET {co.get('net')}   profit factor {co.get('profit_factor')}")
     L += ["", f"VERDICT: {v.get('status')}"] + [f"  - {x}" for x in v.get("reasons", [])]
     if r.get("notes"):
         L += ["", "NOTES"] + [f"  - {x}" for x in r["notes"]]

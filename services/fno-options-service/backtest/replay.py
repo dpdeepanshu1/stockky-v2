@@ -155,6 +155,7 @@ def run(root: str, days: Sequence[str], daily_by_und: Dict[str, Sequence[dict]],
     all_trades = []
     ran: List[str] = []
     warnings: List[str] = []
+    suspect: set = set()                                               # round 507: days whose recording starts late or has a hole: their opening range / bars are not real
     for day in days:
         snaps = {u: _SnapIndex.from_file(root, day, u) for u in underlyings}      # round 504: indexes, not every parsed snapshot of the day
         if not any(len(ix) for ix in snaps.values()):
@@ -168,9 +169,11 @@ def run(root: str, days: Sequence[str], daily_by_und: Dict[str, Sequence[dict]],
         # silently changes what they see. Say so instead of hiding it.
         first = datetime.fromtimestamp(stamps[0], IST)
         if first.time() > dtime(9, 20):
+            suspect.add(day)
             warnings.append(f"{day}: recording starts {first:%H:%M}, not at the open: the opening range the strategies use is wrong that day")
         gaps = [b - a for a, b in zip(stamps, stamps[1:]) if b - a > 300.0]
         if gaps:
+            suspect.add(day)
             warnings.append(f"{day}: {len(gaps)} gap(s) in the recording, longest {max(gaps) / 60:.0f} min: bars across a gap are not real bars")
         for ts in stamps:
             prov.set_time(ts)
@@ -178,11 +181,17 @@ def run(root: str, days: Sequence[str], daily_by_und: Dict[str, Sequence[dict]],
         if db.open_positions():                                         # whatever the recording did not cover is closed at its last known price
             prov.set_time(stamps[-1])
             e.squareoff_all(reason="END_OF_RECORDING", now=datetime.fromtimestamp(stamps[-1], IST))
-        all_trades += db.positions(limit=5000)
+        for t in db.positions(limit=5000):
+            all_trades.append((t, day))
         db.close()
-    m = metrics.summarize(all_trades, p.capital)
+    trades_only = [t for t, _ in all_trades]
+    m = metrics.summarize(trades_only, p.capital)
+    clean = [t for t, d in all_trades if d not in suspect]
+    clean_days = [d for d in ran if d not in suspect]
+    m_clean = metrics.summarize(clean, p.capital) if (suspect and clean) else None
     return {"kind": "REPLAY", "underlying": "+".join(underlyings), "from": ran[0] if ran else None, "to": ran[-1] if ran else None, "days": len(ran), "capital": p.capital,
-            "params": p.to_json(), "warnings": warnings, "metrics": m, "verdict": metrics.verdict(m), "trades": [t.to_json() for t in all_trades],
+            "params": p.to_json(), "warnings": warnings, "metrics": m, "verdict": metrics.verdict(m), "trades": [dict(t.to_json(), suspect_day=(d in suspect)) for t, d in all_trades],
+            "suspect_days": sorted(suspect), "clean_days": len(clean_days), "clean_overall": (m_clean or {}).get("overall") if m_clean else None,
             "notes": ["real recorded premiums and quotes through the live engine code",
                       "snapshots are about a minute apart: exits are decided on those minute marks, a real stop could have been hit sooner",
                       "positions still open when a day's recording ends are closed at END_OF_RECORDING",

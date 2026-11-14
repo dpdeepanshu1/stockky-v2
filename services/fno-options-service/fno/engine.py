@@ -817,6 +817,7 @@ class Engine:
         def build(n_lots: int, price: float) -> Position:
             q = paper.open_position(c, n_lots, price, now.timestamp(), p, mode=mode, score=bias["score"], spot=chain.spot, strategy=strategy)
             q.note = "; ".join(bias["reasons"][:6])
+            q.score_parts = {k: float(v) for k, v in (bias.get("parts") or {}).items() if isinstance(v, (int, float))}      # round 507
             return q
 
         pos = build(lots, fill)

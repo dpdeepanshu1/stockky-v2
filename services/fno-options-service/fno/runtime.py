@@ -33,6 +33,10 @@ class Runner:
         self._thread: Optional[threading.Thread] = None
         self._last_snap: Dict[str, float] = {}
         self.snapshots_today = 0
+        self._rec_day: Optional[str] = None                  # round 507: the IST day the counters below belong to
+        self.first_snapshot_ts: Optional[float] = None       # first snapshot written today (any underlying)
+        self.chain_misses: Dict[str, int] = {}               # today: cycles that wanted a snapshot and got no chain, per underlying
+        self._miss_logged: Dict[str, float] = {}
         self.last_error: Optional[str] = None
         self.started_at: Optional[float] = None
 
@@ -50,8 +54,36 @@ class Runner:
     def stop(self) -> None:
         self._stop.set()
 
+    def _roll_day(self, now: datetime) -> None:
+        """Round 507 (E527): snapshots_today counted since the PROCESS started, so a container that stays up over midnight showed yesterday's snapshots as today's."""
+        day = day_of(now.timestamp())
+        if day != self._rec_day:
+            self._rec_day, self.snapshots_today, self.first_snapshot_ts, self.chain_misses, self._miss_logged = day, 0, None, {}, {}
+
+    def _miss(self, und: str, now: datetime, why: str) -> None:
+        self.chain_misses[und] = self.chain_misses.get(und, 0) + 1
+        if now.timestamp() - self._miss_logged.get(und, 0.0) >= 300.0:       # one line per underlying per 5 minutes, not one per cycle
+            self._miss_logged[und] = now.timestamp()
+            log.warning("no snapshot of %s at %s: %s (%d missed today)", und, now.strftime("%H:%M:%S"), why, self.chain_misses[und])
+
+    def recording_status(self, now: datetime, holidays: Sequence[str] = ()) -> Dict[str, Any]:
+        """Round 507: when today's recording really began and whether the replay can trust the opening range (the replay's own rule: first snapshot after 09:20 = late)."""
+        self._roll_day(now)
+        first = datetime.fromtimestamp(self.first_snapshot_ts, now.tzinfo) if self.first_snapshot_ts else None
+        started = datetime.fromtimestamp(self.started_at, now.tzinfo) if self.started_at else None
+        is_open_day = now.weekday() < 5 and now.date().isoformat() not in set(holidays)
+        late = bool(first and first.time() > dtime(9, 20)) or bool(first is None and is_open_day and now.time() > dtime(9, 20) and now.time() <= dtime(15, 31))
+        why = ""
+        if late and first is not None:
+            why = f"first snapshot at {first:%H:%M}" + (f" (the service started at {started:%H:%M})" if started and started.date() == now.date() and started.time() > dtime(9, 20) else "")
+        elif late:
+            why = "no snapshot yet today" + (f" (the service started at {started:%H:%M})" if started and started.date() == now.date() else "")
+        return {"snapshots_today": self.snapshots_today, "first_snapshot": first.strftime("%H:%M") if first else None, "started_at": started.strftime("%d %b %H:%M") if started else None,
+                "chain_misses": dict(self.chain_misses), "late": late, "detail": why}
+
     def snapshot(self, now: datetime) -> None:
         """Record one chain per underlying per SNAPSHOT_INTERVAL_S (the expiry the engine would trade)."""
+        self._roll_day(now)
         if not getattr(self.cfg, "FNO_RECORD_SNAPSHOTS", True):
             return
         p = Params.from_config(self.cfg)
@@ -71,11 +103,14 @@ class Runner:
         exp = self.engine.pick_expiry(und, now.date(), p)
         ch = self.engine.provider.chain(und, exp) if exp else None
         if ch is None:
+            self._miss(und, now, "no expiry to record" if not exp else f"the chain request for {exp} returned nothing")
             return
         self._last_snap[und] = now.timestamp()
         if recorder.record(self.data_dir, ch, now.timestamp(), {"vix": vix}):
             self.engine.store.add_snapshot(now.timestamp(), und, ch.expiry, recorder.snapshot_path(self.data_dir, day_of(now.timestamp()), und))
             self.snapshots_today += 1
+            if self.first_snapshot_ts is None:
+                self.first_snapshot_ts = now.timestamp()
         # Round 238: on a day the weekly contract expires, also record THAT contract (the engine trades next week's, so it was never saved). The expiry-day strategies can only be replayed
         # on recorded premiums if this exists, and it cannot be recorded afterwards. Same file; the replay picks a chain by its expiry.
         today = now.date().isoformat()

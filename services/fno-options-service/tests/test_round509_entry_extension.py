@@ -69,3 +69,10 @@ def test_the_live_engine_path_and_the_simulation_both_record_it(tmp_path):
     d2, intr = build_world(n_days=160, n_intraday=10)
     s = sim.run("NIFTY", d2, intr, p=Params(min_score=30, max_trades_per_day=2))
     assert s["trades"] and all("from_open_pct" in t["entry_ctx"] for t in s["trades"])
+
+
+def test_a_suspect_day_trade_is_left_out_of_the_buckets_and_the_report_says_so():
+    trades = [_t("CE", 0.27, 0.56, 362.2, suspect_day=True), _t("CE", 0.33, 1.0, -4000.0)]
+    txt = "\n".join(report.extension_lines(trades))
+    assert "moved 0.2% - 0.5%            trades    1  win 0%  net     -4000.00" in txt and "1 trade(s) on a late-start / holed day (*) left out" in txt
+    assert report.extension_lines([_t("CE", 0.27, 0.56, 362.2, suspect_day=True)]) == []

@@ -94,6 +94,8 @@ def _directional(t: Dict[str, Any]):
 def extension_lines(trades: List[Dict[str, Any]]) -> List[str]:
     """Round 509: do trades opened after the market had already moved far do worse? One line per bucket of the move-from-open at entry, in the trade's direction (observation only: nothing in the engine reads it).
     Shown only for trades that carry the field (recorded from round 509). With a handful of trades it is a picture, not a finding: the verdict rules still apply."""
+    left_out = [t for t in trades if t.get("suspect_day")]            # round 510 (E529): on a late-start day the "open" is the first snapshot (11:25, say), so the move from it means nothing
+    trades = [t for t in trades if not t.get("suspect_day")]
     rows = [(mv, t) for t in trades for mv, _ in [_directional(t)] if mv is not None]
     if not rows:
         return []
@@ -110,6 +112,8 @@ def extension_lines(trades: List[Dict[str, Any]]) -> List[str]:
         L.append(f"  {name:<28} trades {len(g):>4}  win {100.0 * wins / len(g):.0f}%  net {net:>12.2f}")
     if len(rows) < len(trades):
         L.append(f"  ({len(trades) - len(rows)} trade(s) without the field: opened before round 509)")
+    if left_out:
+        L.append(f"  ({len(left_out)} trade(s) on a late-start / holed day (*) left out: their \"open\" is not the open)")
     return L
 
 

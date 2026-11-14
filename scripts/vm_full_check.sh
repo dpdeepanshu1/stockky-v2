@@ -47,7 +47,7 @@ step "shared-copies"     "$PYTHON" scripts/check_shared_copies.py
 step "env-reference"     "$PYTHON" scripts/gen_env_reference.py --check
 step "control-catalog"   "$PYTHON" scripts/check_control_catalog.py
 step "file-manifest"     "$PYTHON" scripts/check_stale_files.py --verify
-step "repo-script-tests" "$PYTHON" -m pytest scripts/test_repo_scripts.py scripts/test_docker_helper_scripts.py scripts/test_vm_full_check.py scripts/test_nse_mcp_probe.py scripts/test_fno_export_candles.py -q
+step "repo-script-tests" "$PYTHON" -m pytest scripts/test_repo_scripts.py scripts/test_docker_helper_scripts.py scripts/test_vm_full_check.py scripts/test_nse_mcp_probe.py scripts/test_fno_export_candles.py scripts/test_fno_rolling_index_candles.py -q
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 # 2. one Docker suite per service (the same Python as its Dockerfile, scripts/docker_test.sh)

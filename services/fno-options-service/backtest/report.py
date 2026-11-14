@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
 
 RELIABILITY = {
     "EOD": "REAL end-of-day option prices (NSE F&O bhavcopy). Coarse: one daily bar per contract, intraday order of events unknown (the stop is assumed first).",
@@ -57,6 +58,47 @@ def save(root: str, name: str, result: Dict[str, Any]) -> str:
         return path
     raise OSError("too many backtest results with the same name in one second")
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+MAX_TRADE_LINES = 60
+
+
+def _num(x: Any, nd: int = 2) -> str:
+    try:
+        return f"{float(x):.{nd}f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _pct(a: Any, b: Any) -> str:
+    try:
+        return f"{(float(a) / float(b) - 1.0) * 100.0:+.0f}%"
+    except (TypeError, ValueError, ZeroDivisionError):
+        return "-"
+
+
+def trade_lines(trades: List[Dict[str, Any]], limit: int = MAX_TRADE_LINES) -> List[str]:
+    """Round 506 (E526): one line per closed trade of a REPLAY, so the shape of the losses can be read from the text file: when it opened, what, the entry / exit premium, how far the premium
+    went in our favour (best) and against us (worst) from the entry fill, where the stop sat, how long it was held, why it closed, and the net P&L."""
+    L = ["TRADES (IST; best / worst = highest / lowest premium seen while held, vs the entry fill; stop = the stop price vs the entry fill)",
+         "  entry        und     side strike   strat         score lots  entry   exit   best  worst  stop  held  exit       net"]
+    def _key(x: Dict[str, Any]) -> float:
+        try:
+            return float(x.get("entry_ts") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    for t in sorted(trades, key=_key)[:limit]:
+        try:
+            when = datetime.fromtimestamp(float(t["entry_ts"]), _IST).strftime("%d %b %H:%M")
+            held = f"{(float(t['exit_ts']) - float(t['entry_ts'])) / 60.0:.0f}m"
+        except (KeyError, TypeError, ValueError, OSError):
+            when, held = "?", "-"
+        e = t.get("entry_premium")
+        L.append(f"  {when:<12} {str(t.get('underlying')):<7} {str(t.get('opt_type')):<4} {_num(t.get('strike'), 0):<7} {str(t.get('strategy')):<13} {_num(t.get('signal_score'), 0):>5} {t.get('lots')!s:>4} "
+                 f"{_num(e):>7} {_num(t.get('exit_premium')):>6} {_pct(t.get('max_premium'), e):>6} {_pct(t.get('min_premium'), e):>6} {_pct(t.get('sl_price'), e):>5} {held:>5}  {str(t.get('exit_reason')):<9} {_num(t.get('net_pnl')):>9}")
+    if len(trades) > limit:
+        L.append(f"  ... {len(trades) - limit} more trades in the .json")
+    return L
+
 
 def render_text(r: Dict[str, Any]) -> str:
     o = r.get("metrics", {}).get("overall", {})
@@ -84,6 +126,10 @@ def render_text(r: Dict[str, Any]) -> str:
     dq = r.get("data_quality")
     if dq:
         L.append(f"data quality: strikes fetched {', '.join(dq.get('labels') or [])}   held bars without a candle {dq.get('unmanaged_bars')}/{dq.get('held_bars')} ({dq.get('unmanaged_pct')}%)   exits at last known price {dq.get('unpriced_exit_pct')}%   days without a usable VIX {dq.get('vix_unknown_days', '-')} ({dq.get('vix_unknown_pct', '-')}%)   {'OK' if dq.get('ok') else 'NOT OK'}")
+    if r.get("warnings"):
+        L += ["", "DAY WARNINGS"] + [f"  - {x}" for x in r["warnings"]]
+    if r.get("kind") == "REPLAY" and r.get("trades"):
+        L += [""] + trade_lines(r["trades"])
     L += ["", f"VERDICT: {v.get('status')}"] + [f"  - {x}" for x in v.get("reasons", [])]
     if r.get("notes"):
         L += ["", "NOTES"] + [f"  - {x}" for x in r["notes"]]

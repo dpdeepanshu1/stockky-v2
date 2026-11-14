@@ -87,7 +87,7 @@ def test_the_vm_replay_wrapper_exports_on_the_host_and_replays_inside_the_contai
     fake = tmp_path / "bin"
     fake.mkdir()
     log = tmp_path / "docker_args.txt"
-    (fake / "docker").write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "' + str(log) + '"\n')
+    (fake / "docker").write_text('#!/usr/bin/env bash\n[ "$2" = "ps" ] && { echo abc123; exit 0; }\nprintf "%s\\n" "$@" > "' + str(log) + '"\n')
     (fake / "docker").chmod(0o755)
     srv, _, base = _stub()
     try:
@@ -97,7 +97,29 @@ def test_the_vm_replay_wrapper_exports_on_the_host_and_replays_inside_the_contai
     finally:
         srv.shutdown()
     assert r.returncode == 0, r.stderr
+    assert "== replaying inside fno-options-service" in r.stdout and "== replay finished, exit code 0" in r.stdout
     args = log.read_text().split("\n")
     assert args[:3] == ["compose", "exec", "-T"] and "fno-options-service" in args and "--snapshots" in args and "/data/fno" in args
     assert "/data/fno_real_probe/replay_inputs/nifty_d.csv" in args and "NIFTY,SENSEX" in args and args[-3:-1] == ["--from", "2026-11-11"]
     assert (tmp_path / "in" / "nifty_d.csv").exists() and (tmp_path / "in" / "sensex_d.csv").exists()
+
+
+def test_the_vm_replay_wrapper_reports_a_failed_replay_and_a_stopped_container(tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("bash"):
+        return
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "docker").write_text('#!/usr/bin/env bash\n[ "$2" = "ps" ] && { [ -n "$FAKE_PS" ] && echo abc123; exit 0; }\nexit ${FAKE_RC:-0}\n')
+    (fake / "docker").chmod(0o755)
+    srv, _, base = _stub()
+    try:
+        env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], MARKET_DATA_URL_HOST=base, REPLAY_INPUTS=str(tmp_path / "in"))
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fno_replay_vm.sh")
+        down = subprocess.run(["bash", script], env=dict(env, FAKE_PS=""), capture_output=True, text=True, timeout=60)
+        killed = subprocess.run(["bash", script], env=dict(env, FAKE_PS="1", FAKE_RC="137"), capture_output=True, text=True, timeout=60)
+    finally:
+        srv.shutdown()
+    assert down.returncode == 1 and "is not running" in down.stderr
+    assert killed.returncode == 137 and "exit code 137" in killed.stdout and "137 = the container killed it" in killed.stderr

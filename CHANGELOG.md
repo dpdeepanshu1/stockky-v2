@@ -1,3 +1,8 @@
+## 14 Nov 2026 - Round 504 (E524): the VM replay wrapper no longer fails silently
+
+ * **VM run of round 503 (14 Nov):** `bash scripts/fno_replay_vm.sh | tee ... | head -80` printed only the two exporter lines (`nifty_d.csv` 248 days, `vix.csv` 248 days) and then nothing: no replay report, no error. The cause is not known from that output (a container that is not running or is OOM-killed, or a crash with no text, would all look like this). **Changed: `scripts/fno_replay_vm.sh`** checks that `fno-options-service` is running first (says so and exits 1), prints `== replaying inside fno-options-service: ...` before the replay and `== replay finished, exit code N` after it, hints at 137 (killed by the container's memory limit) and at `docker compose logs`, exits with the replay's own code, and no longer trips `set -u` on an empty array in older bash. 2 tests (5 in `test_fno_export_candles.py`).
+ * Not changed: no service code.
+
 ## 14 Nov 2026 - Round 503 (E523): the replay backtest runs inside the container where the recordings are
 
  * **VM run of round 502 (14 Nov): `vm_full_check.sh` ALL PASSED, 17 of 17** (merge markers, shared copies, env reference, control catalog, manifest, repo script tests, all nine service suites, frontend). `fno_export_candles.py` wrote `nifty_d.csv` (247 days, 13 Nov 2025 .. 13 Nov 2026) and `vix.csv` (246 days). The probe printed all 36 tool signatures; every argument is `*` required and none lists enum values, so `get_index_snapshot(filter)`, `get_top_movers(direction)` and `cm_get_live_market_data(index)` are still not callable without a value from the tool's description (in `tools_*.json`); `get_corporate_actions` answered "could not be fetched from NSE right now".

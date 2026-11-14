@@ -176,6 +176,10 @@ def main_replay(argv: Optional[List[str]] = None) -> int:
     over = {cfg: getattr(p, field) for field, cfg in CONFIG_NAME.items()}      # round 303: ALL 59 fields (only 8 were copied, so any other --set, e.g. max_trades_per_day or a strategy threshold, was silently ignored by the replay)
     und = [u for u in a.underlyings.upper().split(",") if u]
     daily = {"NIFTY": load_candles(a.daily) if a.daily else [], "SENSEX": load_candles(a.daily_sensex) if a.daily_sensex else []}
+    for u in und:                                                      # round 502: no daily file = the engine's direction logic has no history, so the result is not the picture the live engine saw
+        if not daily.get(u):
+            print(f"warning: no daily candles for {u} (--daily{'-sensex' if u == 'SENSEX' else ''} not given): the replay runs without the daily picture the live engine uses, so do not compare it with live. "
+                  "Write the file with: python3 scripts/fno_export_candles.py --out /tmp/replay" + (" --und SENSEX" if u == "SENSEX" else ""), file=sys.stderr)
     res = replay.run(a.snapshots, days, daily, over, und, [h for h in a.holidays.split(",") if h], a.vix_default)
     return _out(a, "fno_replay", res)
 

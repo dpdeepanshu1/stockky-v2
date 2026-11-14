@@ -143,3 +143,47 @@ def test_a_full_run_saves_schemas_and_replies_and_calls_only_what_it_can_fill(tm
     saved = json.load(open(tmp_path / "call_bhavcopy_get_ltp_by_date.json"))
     assert saved["arguments"]["symbol"] == "INFY" and saved["reply"]["last_close"] == 101.5
     assert "ERROR" in out                                                                    # the corporate-actions stub answers isError: shown, not hidden
+
+
+def test_fit_args_may_use_a_value_the_schema_itself_offers():
+    sch = {"type": "object", "properties": {"index": {"type": "string", "enum": ["gainers", "loosers"]}, "n": {"type": "integer", "default": 5}}, "required": ["index", "n"]}
+    assert P.fit_args(sch, {"symbol": "TCS"}) == ({"index": "gainers", "n": 5}, [])           # first enum value / the default, never an invented one
+    assert P.fit_args(sch, {"index": "loosers"})[0]["index"] == "loosers"                    # a candidate still wins over the enum
+
+
+def test_signature_marks_required_arguments_and_lists_enums():
+    assert P.signature(TOOLS[1]) == "get_ltp_by_date(symbol*, date*)"
+    sig = P.signature({"name": "cm_get_live_market_data", "inputSchema": {"properties": {"index": {"enum": ["gainers", "loosers"]}, "x": {}}, "required": ["index"]}})
+    assert sig == "cm_get_live_market_data(index{gainers|loosers}*, x)"
+
+
+def test_the_run_prints_every_tool_signature(tmp_path, capsys):
+    srv, _, url = _server("json")
+    try:
+        P.main(["--only", "bhavcopy", "--url-bhavcopy", url, "--out", str(tmp_path), "--timeout", "5"])
+    finally:
+        srv.shutdown()
+    out = capsys.readouterr().out
+    assert "* get_ltp_by_date(symbol*, date*)" in out and "* get_market_breadth(on_day*)" in out
+
+
+def test_call_mode_makes_one_explicit_call_and_prints_the_whole_reply(tmp_path, capsys):
+    srv, seen, url = _server("json")
+    try:
+        rc = P.main(["--call", "get_ltp_by_date", "--args", '{"symbol": "RELIANCE", "date": "2026-11-12"}', "--only", "bhavcopy", "--url-bhavcopy", url, "--out", str(tmp_path), "--timeout", "5"])
+    finally:
+        srv.shutdown()
+    out = capsys.readouterr().out
+    assert rc == 0 and seen["calls"] == [("get_ltp_by_date", {"symbol": "RELIANCE", "date": "2026-11-12"})] and '"last_close":101.5' in out
+    assert (tmp_path / "call_bhavcopy_get_ltp_by_date.json").exists()
+
+
+def test_call_mode_with_an_unknown_tool_or_bad_args(tmp_path, capsys):
+    srv, seen, url = _server("json")
+    try:
+        assert P.main(["--call", "nope", "--only", "bhavcopy", "--url-bhavcopy", url, "--out", str(tmp_path), "--timeout", "5"]) == 1
+        assert "no server offers a tool named 'nope'" in capsys.readouterr().out
+        assert P.main(["--call", "get_ltp_by_date", "--args", "[1]", "--out", str(tmp_path)]) == 2
+    finally:
+        srv.shutdown()
+    assert seen["calls"] == []

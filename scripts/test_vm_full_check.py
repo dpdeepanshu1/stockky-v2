@@ -25,7 +25,7 @@ def _sandbox(tmp_path, frontend_rc=0, service_rc=0, with_test_reads=None):
     shutil.copy(SCRIPT, root / "scripts" / "vm_full_check.sh")
     for chk in ("check_merge_conflicts.py", "check_shared_copies.py", "gen_env_reference.py", "check_control_catalog.py", "check_stale_files.py"):
         (root / "scripts" / chk).write_text("import sys\nsys.exit(0)\n")
-    for t in ("test_repo_scripts.py", "test_docker_helper_scripts.py", "test_vm_full_check.py", "test_nse_mcp_probe.py"):
+    for t in ("test_repo_scripts.py", "test_docker_helper_scripts.py", "test_vm_full_check.py", "test_nse_mcp_probe.py", "test_fno_export_candles.py"):
         (root / "scripts" / t).write_text("def test_ok():\n    assert True\n")
     (root / "scripts" / "docker_test.sh").write_text(f'#!/usr/bin/env bash\necho "suite $1"\nexit {service_rc}\n')
     # the stub fails the way the real one does: output first, then a non-zero code, so a `| tail` would have hidden it

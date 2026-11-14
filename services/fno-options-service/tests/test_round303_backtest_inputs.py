@@ -64,3 +64,15 @@ def test_index_candles_of_another_interval_are_refused_by_the_backtests():
         sim.run("NIFTY", daily, intr[::3])
     holes = [b for i, b in enumerate(intr) if i % 11 != 0]                # a few missing bars do not change the median gap
     sim.check_bar_spacing(holes, 5)
+
+
+def test_the_replay_cli_warns_when_the_daily_candles_are_missing(tmp_path, monkeypatch, capsys):
+    """Round 502: a replay without --daily used to run silently with an empty daily picture and print results that look like live ones."""
+    monkeypatch.setattr(cli.replay, "run", lambda *a, **k: {"kind": "REPLAY", "metrics": {"overall": {}}, "verdict": {}, "notes": []})
+    assert cli.main_replay(["--snapshots", str(tmp_path), "--out", str(tmp_path), "--underlyings", "NIFTY"]) == 0
+    err = capsys.readouterr().err
+    assert "no daily candles for NIFTY" in err and "fno_export_candles.py" in err
+    f = tmp_path / "nifty_d.csv"
+    f.write_text("date,open,high,low,close,volume\n2026-11-12,100,110,95,105,0\n", encoding="utf-8")
+    assert cli.main_replay(["--snapshots", str(tmp_path), "--out", str(tmp_path), "--underlyings", "NIFTY", "--daily", str(f)]) == 0
+    assert "no daily candles" not in capsys.readouterr().err

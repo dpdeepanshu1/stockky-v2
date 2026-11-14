@@ -409,6 +409,7 @@ scripts/fetch_history_for_backtest.py
 scripts/flow_tape_report.py
 scripts/fno_charges_compare.py
 scripts/fno_eod_backtest.py
+scripts/fno_export_candles.py
 scripts/fno_live_check.py
 scripts/fno_real_order_probe.py
 scripts/fno_replay_backtest.py
@@ -497,6 +498,7 @@ scripts/test_env_structure_check.py
 scripts/test_exit_followup_study.py
 scripts/test_export_records.py
 scripts/test_flow_tape_report.py
+scripts/test_fno_export_candles.py
 scripts/test_gate_scorecard_direction.py
 scripts/test_group467_performance.py
 scripts/test_group468_calibration_snapshot.py

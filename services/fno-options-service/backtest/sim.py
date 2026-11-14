@@ -125,6 +125,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], vix_by
             if not lots or not fill:
                 continue
             pos = paper.open_position(ContractRef(und, exp.isoformat(), strike, ot, lot, None, "", 0.05), lots, fill, end_dt.timestamp(), pe, mode="SIM", score=b["score"], spot=spot, strategy=strategy)
+            pos.entry_ctx = signals.entry_extension(bars[: i + 1])      # round 509
             state.trades_today += 1
             state.open_positions = 1
     m = metrics.summarize(trades, p.capital)

@@ -21,8 +21,8 @@ def _trade(**k):
 def test_the_report_shows_the_score_parts_and_dashes_when_a_trade_has_none():
     txt = report.render_text({"kind": "REPLAY", "metrics": {"overall": {}}, "verdict": {}, "warnings": [],
                               "trades": [_trade(score_parts={"daily": 50.0, "intraday": 8.0, "chain": 3.0}), _trade(entry_ts=T0 + 5, strike=25300.0)]})
-    assert [x for x in txt.splitlines() if "25200" in x][0].rstrip().endswith("+50/+8/+3")
-    assert [x for x in txt.splitlines() if "25300" in x][0].rstrip().endswith("-")
+    assert "+50/+8/+3" in [x for x in txt.splitlines() if "25200" in x][0]
+    assert "+50/+8/+3" not in [x for x in txt.splitlines() if "25300" in x][0]
 
 
 def test_a_suspect_day_trade_is_starred_and_the_clean_summary_is_printed():

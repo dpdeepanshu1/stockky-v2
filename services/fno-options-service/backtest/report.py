@@ -76,11 +76,48 @@ def _pct(a: Any, b: Any) -> str:
         return "-"
 
 
+EXT_EDGES = ((0.2, "moved < 0.2% from the open"), (0.5, "moved 0.2% - 0.5%"), (float("inf"), "moved >= 0.5%"))
+
+
+def _directional(t: Dict[str, Any]):
+    """Round 509 (E528): (how far the index had moved from today's open IN THE DIRECTION of the trade, %; where it stood in today's range, 100% = at the extreme in that direction) at entry, or (None, None)."""
+    c = t.get("entry_ctx") or {}
+    try:
+        sgn = 1.0 if str(t.get("opt_type")).upper() == "CE" else -1.0
+        mv = float(c["from_open_pct"]) * sgn
+        rp = float(c["pos_in_range"]) if sgn > 0 else 1.0 - float(c["pos_in_range"])
+        return mv, rp
+    except (KeyError, TypeError, ValueError):
+        return None, None
+
+
+def extension_lines(trades: List[Dict[str, Any]]) -> List[str]:
+    """Round 509: do trades opened after the market had already moved far do worse? One line per bucket of the move-from-open at entry, in the trade's direction (observation only: nothing in the engine reads it).
+    Shown only for trades that carry the field (recorded from round 509). With a handful of trades it is a picture, not a finding: the verdict rules still apply."""
+    rows = [(mv, t) for t in trades for mv, _ in [_directional(t)] if mv is not None]
+    if not rows:
+        return []
+    L = ["BY MOVE FROM THE OPEN AT ENTRY (in the trade's direction; observation only)"]
+    lo = float("-inf")
+    for hi, name in EXT_EDGES:
+        g = [t for mv, t in rows if lo <= mv < hi] if hi != float("inf") else [t for mv, t in rows if mv >= lo]
+        lo = hi
+        if not g:
+            L.append(f"  {name:<28} trades    0")
+            continue
+        net = sum(float(x.get("net_pnl") or 0.0) for x in g)
+        wins = sum(1 for x in g if float(x.get("net_pnl") or 0.0) > 0)
+        L.append(f"  {name:<28} trades {len(g):>4}  win {100.0 * wins / len(g):.0f}%  net {net:>12.2f}")
+    if len(rows) < len(trades):
+        L.append(f"  ({len(trades) - len(rows)} trade(s) without the field: opened before round 509)")
+    return L
+
+
 def trade_lines(trades: List[Dict[str, Any]], limit: int = MAX_TRADE_LINES) -> List[str]:
     """Round 506 (E526): one line per closed trade of a REPLAY, so the shape of the losses can be read from the text file: when it opened, what, the entry / exit premium, how far the premium
     went in our favour (best) and against us (worst) from the entry fill, where the stop sat, how long it was held, why it closed, and the net P&L."""
     L = ["TRADES (IST; best / worst = highest / lowest premium seen while held, vs the entry fill; stop = the stop price vs the entry fill)",
-         "  entry        und     side strike   strat         score lots  entry   exit   best  worst  stop  held  exit       net   score parts (daily/intraday/chain)"]
+         "  entry        und     side strike   strat         score lots  entry   exit   best  worst  stop  held  exit       net   score parts (daily/intraday/chain)  moved  range-pos"]
     def _key(x: Dict[str, Any]) -> float:
         try:
             return float(x.get("entry_ts") or 0)
@@ -96,8 +133,11 @@ def trade_lines(trades: List[Dict[str, Any]], limit: int = MAX_TRADE_LINES) -> L
         sp = t.get("score_parts") or {}
         parts = "/".join(f"{float(sp[k]):+.0f}" for k in ("daily", "intraday", "chain")) if all(isinstance(sp.get(k), (int, float)) for k in ("daily", "intraday", "chain")) else "-"
         when = when + ("*" if t.get("suspect_day") else "")
+        mv, rp = _directional(t)
+        moved = f"{mv:+.2f}%" if mv is not None else "-"
+        rpos = f"{rp * 100:.0f}%" if rp is not None else "-"
         L.append(f"  {when:<12} {str(t.get('underlying')):<7} {str(t.get('opt_type')):<4} {_num(t.get('strike'), 0):<7} {str(t.get('strategy')):<13} {_num(t.get('signal_score'), 0):>5} {t.get('lots')!s:>4} "
-                 f"{_num(e):>7} {_num(t.get('exit_premium')):>6} {_pct(t.get('max_premium'), e):>6} {_pct(t.get('min_premium'), e):>6} {_pct(t.get('sl_price'), e):>5} {held:>5}  {str(t.get('exit_reason')):<9} {_num(t.get('net_pnl')):>9}   {parts}")
+                 f"{_num(e):>7} {_num(t.get('exit_premium')):>6} {_pct(t.get('max_premium'), e):>6} {_pct(t.get('min_premium'), e):>6} {_pct(t.get('sl_price'), e):>5} {held:>5}  {str(t.get('exit_reason')):<9} {_num(t.get('net_pnl')):>9}   {parts:<12} {moved:>7} {rpos:>6}")
     if any(t.get("suspect_day") for t in trades):
         L.append("  * opened on a day whose recording started late or has a hole: its bars / opening range are not real, so read that trade with care")
     if len(trades) > limit:
@@ -138,6 +178,9 @@ def render_text(r: Dict[str, Any]) -> str:
         co = r.get("clean_overall")
         if co:
             L.append(f"  without the * days ({r.get('clean_days')} clean day(s)): trades {co.get('trades')}   win rate {co.get('win_rate_pct')}%   NET {co.get('net')}   profit factor {co.get('profit_factor')}")
+    ext = extension_lines(r.get("trades") or [])
+    if ext:
+        L += [""] + ext
     L += ["", f"VERDICT: {v.get('status')}"] + [f"  - {x}" for x in v.get("reasons", [])]
     if r.get("notes"):
         L += ["", "NOTES"] + [f"  - {x}" for x in r["notes"]]

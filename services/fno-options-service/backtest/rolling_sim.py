@@ -195,6 +195,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
                 continue
             pos = paper.open_position(ContractRef(und, exp.isoformat(), float(erow["strike"]), ot, lot, None, "", 0.05), lots, fill, float(nxt["t"]), pe, mode="SIM", score=b["score"],
                                       spot=bar["c"], strategy=strategy)
+            pos.entry_ctx = signals.entry_extension(bars[: i + 1])      # round 509
             state.trades_today += 1
             state.open_positions = 1
             # the entry bar itself is managed on the next loop pass (its own candle, entered at its open)

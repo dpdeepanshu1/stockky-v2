@@ -1441,6 +1441,7 @@ services/fno-options-service/tests/test_round505_replay_index.py
 services/fno-options-service/tests/test_round506_report_trades.py
 services/fno-options-service/tests/test_round507_recording_status.py
 services/fno-options-service/tests/test_round507_suspect_days_and_parts.py
+services/fno-options-service/tests/test_round509_entry_extension.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

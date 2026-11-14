@@ -136,6 +136,22 @@ def intraday_score(intraday: Sequence[Any]) -> Tuple[float, List[str]]:
     return max(-25.0, min(25.0, score)), why
 
 
+def entry_extension(intraday: Sequence[Any]) -> Dict[str, float]:
+    """Round 509 (E528): how far the market had ALREADY moved when a trade was opened (observation only, it never gates anything). From today's intraday bars:
+    from_open_pct = the last close vs today's first open, in %; pos_in_range = where the last close sits between today's low (0) and high (1) so far; range_pct = today's high - low so far, % of the open;
+    bars = how many bars it is built from. {} when there are fewer than 2 usable bars. Direction-free: the report reads it from the side of the trade (a PUT after a fall is 'extended' too)."""
+    bars = to_ms_bars(intraday)
+    if bars:
+        ist = timezone(timedelta(hours=5, minutes=30))
+        last_day = datetime.fromtimestamp(bars[-1][0], ist).date()
+        bars = [b for b in bars if datetime.fromtimestamp(b[0], ist).date() == last_day]
+    if len(bars) < 2 or not bars[0][1]:
+        return {}
+    o, px = bars[0][1], bars[-1][4]
+    hi, lo = max(b[2] for b in bars), min(b[3] for b in bars)
+    return {"from_open_pct": round((px / o - 1.0) * 100.0, 3), "pos_in_range": round((px - lo) / (hi - lo), 3) if hi > lo else 0.5, "range_pct": round((hi - lo) / o * 100.0, 3), "bars": float(len(bars))}
+
+
 def combine_bias(d: float, dwhy: List[str], atr: Optional[float], i: float, iwhy: List[str], c: float, cwhy: List[str], p: Params) -> Dict[str, Any]:
     """The CORE direction from its three already-computed parts (daily, intraday, chain). index_bias and fno/strategies.py both end here, so they can never disagree."""
     total = max(-100.0, min(100.0, d + i + c))

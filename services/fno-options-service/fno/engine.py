@@ -781,7 +781,7 @@ class Engine:
             self.store.update_position(pos)             # persists the new high / trail
 
     # ── entries ──
-    def _enter(self, und: str, direction: str, bias: Dict[str, Any], chain: Chain, p: Params, now: datetime, strategy: str = "CORE") -> Optional[Position]:
+    def _enter(self, und: str, direction: str, bias: Dict[str, Any], chain: Chain, p: Params, now: datetime, strategy: str = "CORE", ext: Optional[Dict[str, float]] = None) -> Optional[Position]:
         p = strategies.params_for(strategy, p)                       # an expiry-day strategy is sized at half the risk and one lot
         if p.capital <= 0:                                           # REAL with no capital from the board: never size an order from a made-up figure
             self._note("skip", und, {"stage": "capital", "strategy": strategy, "reasons": [self.capital_why or "no capital to size with"]}, key=f"capital:{strategy}", now=now)
@@ -818,6 +818,7 @@ class Engine:
             q = paper.open_position(c, n_lots, price, now.timestamp(), p, mode=mode, score=bias["score"], spot=chain.spot, strategy=strategy)
             q.note = "; ".join(bias["reasons"][:6])
             q.score_parts = {k: float(v) for k, v in (bias.get("parts") or {}).items() if isinstance(v, (int, float))}      # round 507
+            q.entry_ctx = dict(ext or {})                                                                                  # round 509
             return q
 
         pos = build(lots, fill)
@@ -916,6 +917,7 @@ class Engine:
             chains: Dict[Tuple[str, str], Optional[Chain]] = {}
             summaries: Dict[str, Dict[str, Any]] = {}
             biases: Dict[str, Dict[str, Any]] = {}
+            exts: Dict[str, Dict[str, float]] = {}                         # round 509: how far each index had already moved today (recorded on the trade, never used to decide)
             cands: Dict[str, List[Dict[str, Any]]] = {}
             flips: Dict[str, str] = {}
             failed: List[str] = []                                           # round 278: analysis errors; the cycle still manages open positions, then reports not-ok
@@ -942,6 +944,10 @@ class Engine:
                         ctx = strategies.build_ctx(und, daily_u, intra_u, summ, now, p, self.holidays, vix)
                         bias = strategies.core_bias(ctx)                 # always computed: it also flips a held position, whichever strategy opened it
                         summaries[und], biases[und] = summ, bias
+                        try:
+                            exts[und] = signals.entry_extension(intra_u)
+                        except Exception:  # noqa: BLE001 - an observation field must never stop an entry
+                            exts[und] = {}
                         cands[und] = strategies.candidates(ctx, enabled, bias)
                         vetoes = list(ctx.vetoes)
                         ctx0 = None
@@ -995,7 +1001,7 @@ class Engine:
                             d.update(action="blocked", why=["an open position has no premium this cycle"])
                             self._note("skip", und, {**d, "stage": "unpriced_position", "strategy": sname}, key=f"unpriced:{sname}", now=now)
                             continue
-                        pos = self._enter(und, cand["direction"], cand, chn, p, now, strategy=sname)
+                        pos = self._enter(und, cand["direction"], cand, chn, p, now, strategy=sname, ext=exts.get(und))
                         if pos is not None:
                             d.update(action="entered", strategy=sname)
                             out["entries"].append(pos.id)

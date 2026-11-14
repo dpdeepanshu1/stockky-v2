@@ -439,6 +439,7 @@ scripts/movers_review.py
 scripts/ms_ab_report.py
 scripts/ms_g1_check.py
 scripts/no_setup_readiness.py
+scripts/nse_mcp_probe.py
 scripts/opening_replay.py
 scripts/oracle-vm-tune.sh
 scripts/p8_retest_evidence.py
@@ -512,6 +513,7 @@ scripts/test_ml_v2_walkforward.py
 scripts/test_movers_review.py
 scripts/test_ms_ab_report.py
 scripts/test_ms_g1_check.py
+scripts/test_nse_mcp_probe.py
 scripts/test_opening_replay.py
 scripts/test_p8_retest_evidence.py
 scripts/test_plain_short.py

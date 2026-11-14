@@ -143,6 +143,7 @@ They are still in git history: `git log --diff-filter=D --name-only -- "docs/*.m
 | `daily_trade_report.py`, `charges_split.py`, `calibration_status.py` | trade / charges / calibration reports |
 | `check_*.py`, `gen_env_reference.py`, `audit_*.py` | repo guards and audits (what CI runs) |
 | `*_backtest.py`, `ml_v2_walkforward.py`, `swing_*.py`, `robustness.py` | offline backtests (stdlib, deterministic) |
+| `nse_mcp_probe.py` | read-only look at NSE's two MCP servers from this machine: saves every tool's input schema and a few sample replies (stdlib only; NSE's terms: information and education only, no trading use, no model training) |
 
 ## Open items (as of E245, 2026-10-28)
 

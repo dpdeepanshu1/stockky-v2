@@ -29,7 +29,7 @@ class Logging(FakeProvider):
 
 
 def _engine(db, prov):
-    return eng.Engine(db, prov, make_cfg(FNO_UNDERLYINGS="NIFTY"))
+    return eng.Engine(db, prov, make_cfg(FNO_UNDERLYINGS="NIFTY", FNO_REENTRY_COOLDOWN_MIN=0))     # round 495: these tests rely on a position that exits on the first tick and is bought again at once; the re-entry pause is tested in test_round495
 
 
 def _open_nifty(db, e, expiry):

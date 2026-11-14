@@ -39,7 +39,7 @@ def _open_real(db, premium, lots=1, lot=20):
 
 def test_real_entry_is_refused_when_the_open_positions_already_hold_the_allotment(db):
     b = RB()
-    e = real(db, b)
+    e = real(db, b, FNO_REENTRY_COOLDOWN_MIN=0, FNO_MAX_SAME_DIRECTION_OPEN=0)        # round 495: this test is about capital room: the held position is a SENSEX CE and the entry a NIFTY CE, so the new gates are off here
     _open_real(db, premium=24700.0, lots=1)                                    # 24,700 x 20 = Rs 4,94,000 of the Rs 5,00,000 the board gives F&O
     before = len(db.open_positions("REAL"))
     e.tick(NOW)

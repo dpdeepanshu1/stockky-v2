@@ -139,9 +139,13 @@ def intraday_score(intraday: Sequence[Any]) -> Tuple[float, List[str]]:
 def combine_bias(d: float, dwhy: List[str], atr: Optional[float], i: float, iwhy: List[str], c: float, cwhy: List[str], p: Params) -> Dict[str, Any]:
     """The CORE direction from its three already-computed parts (daily, intraday, chain). index_bias and fno/strategies.py both end here, so they can never disagree."""
     total = max(-100.0, min(100.0, d + i + c))
-    direction = UP if total >= p.min_score else (DOWN if total <= -p.min_score else FLAT)
-    return {"direction": direction, "score": round(total, 1), "parts": {"daily": round(d, 1), "intraday": round(i, 1), "chain": round(c, 1)},
-            "reasons": dwhy + iwhy + cwhy, "atr": atr}
+    raw = UP if total >= p.min_score else (DOWN if total <= -p.min_score else FLAT)
+    direction, reasons = raw, dwhy + iwhy + cwhy
+    if raw != FLAT and p.core_intraday_agree and i * (1 if raw == UP else -1) < 0:
+        direction = FLAT        # round 495 (E515): daily + chain alone must not buy a CALL while the intraday score says DOWN (or a PUT while it says UP). i == 0 (no vote / neutral) does not block: core_min_intraday_bars covers the missing case
+        reasons = reasons + [f"intraday score {i:+.0f} is against the {'UP' if raw == UP else 'DOWN'} lean ({total:+.0f}): no CORE entry"]
+    return {"direction": direction, "raw_direction": raw, "score": round(total, 1), "parts": {"daily": round(d, 1), "intraday": round(i, 1), "chain": round(c, 1)},
+            "reasons": reasons, "atr": atr}
 
 
 def index_bias(daily: Sequence[Any], intraday: Sequence[Any] = (), summary: Optional[Dict[str, Any]] = None, p: Optional[Params] = None) -> Dict[str, Any]:

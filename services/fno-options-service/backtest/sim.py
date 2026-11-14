@@ -95,6 +95,8 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], vix_by
                     state.realized_pnl_net += pos.net_pnl or 0.0
                     if hit[0] == paper.SL:
                         state.last_stopout_ts = end_dt.timestamp()
+                    if hit[0] != paper.SQUAREOFF:                          # round 495: the same re-entry pause after ANY exit as the live gate (per index + side)
+                        state.last_exit_by_key[pos.key] = end_dt.timestamp()
                     pos = None
                 continue
             if sq:
@@ -108,6 +110,8 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], vix_by
             if b["direction"] == signals.FLAT:
                 continue
             ot = "CE" if b["direction"] == signals.UP else "PE"
+            if not gates.entry_gates(end_dt, exp, vix_known if vix_known else 15.0, 0.0, state, p, key=f"{und}:{ot}", holidays=holidays, strategy=strategy, expiry_strategy=is_exp, mode="SIM")[0]:
+                continue                                                 # round 495: the per-side gates (re-entry pause) need the side, known only now
             spot = bar["c"]
             strike = round(spot / step) * step
             t_y = bs.year_fraction(end_dt, exp)
@@ -116,10 +120,11 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], vix_by
             if ask < p.min_premium:
                 continue
             fill = paper.buy_fill(ask, ask, pz)
-            lots = sizing.lots_for(fill, lot, pz) if fill else None      # round 250: size on the fill, as the live engine does
+            pe = sizing.with_noise_stop(pz, fill, None, b.get("atr") or signals.daily_score(hist)[2]) if fill else pz      # round 498 (E518): the same noise floor as live (delta unknown here: at the money)
+            lots = sizing.lots_for(fill, lot, pe) if fill else None      # round 250: size on the fill, as the live engine does
             if not lots or not fill:
                 continue
-            pos = paper.open_position(ContractRef(und, exp.isoformat(), strike, ot, lot, None, "", 0.05), lots, fill, end_dt.timestamp(), pz, mode="SIM", score=b["score"], spot=spot, strategy=strategy)
+            pos = paper.open_position(ContractRef(und, exp.isoformat(), strike, ot, lot, None, "", 0.05), lots, fill, end_dt.timestamp(), pe, mode="SIM", score=b["score"], spot=spot, strategy=strategy)
             state.trades_today += 1
             state.open_positions = 1
     m = metrics.summarize(trades, p.capital)

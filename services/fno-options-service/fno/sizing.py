@@ -22,6 +22,24 @@ def lots_for(premium: float, lot_size: int, p: Params, max_premium_share: float 
     return lots if lots >= 1 else None
 
 
+def noise_stop_pct(p: Params, premium: float, delta: Optional[float], atr: Optional[float]) -> float:
+    """Round 498 (E518): the stop distance (% of premium) for ONE entry. A flat 25 % is wide for a 150-rupee option and inside the noise of a 60-rupee one: the same index move is a
+    bigger % of a cheaper premium. The floor is `sl_noise_atr_frac` x one daily ATR move of the OPTION (delta x ATR / premium), held between sl_pct and sl_max_pct.
+    With no ATR, no premium, or the switch at 0 it is exactly sl_pct. A missing delta reads as 0.5 (at the money)."""
+    base = float(p.sl_pct)
+    if p.sl_noise_atr_frac <= 0 or not (premium and premium > 0) or not (atr and atr > 0):
+        return base
+    d = min(1.0, max(0.1, abs(float(delta)))) if delta else 0.5
+    floor = p.sl_noise_atr_frac * d * float(atr) / float(premium) * 100.0
+    return round(max(base, min(floor, max(base, float(p.sl_max_pct)))), 1)
+
+
+def with_noise_stop(p: Params, premium: float, delta: Optional[float], atr: Optional[float]) -> Params:
+    """`p` with this entry's stop % (never tighter than p.sl_pct). Sizing and open_position then both use it, so the rupee risk per trade stays the same and only the lots shrink."""
+    pct = noise_stop_pct(p, premium, delta, atr)
+    return p if pct <= p.sl_pct else p.with_(sl_pct=pct)
+
+
 def lots_in_room(lots: int, fill: float, lot_size: int, capital: float, used: float) -> int:
     """Round 247: lots that still fit the capital the board allots, after the premium already paid for the positions that are open (REAL only). 0 = no room.
     lots_for() sizes each order against the WHOLE allotment, so two or three open positions (FNO_MAX_OPEN_POSITIONS) could together hold more than the allotment and eat the other services' money."""

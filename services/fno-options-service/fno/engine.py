@@ -140,7 +140,7 @@ class Engine:
     def day_state(self, now: datetime, mode: str) -> gates.DayState:
         s = self.store.day_summary(day_of(now.timestamp()), mode)           # round 249: a leftover from an earlier day that closed today counts against today's loss limit (carried_closed_net)
         return gates.DayState(trades_today=s["trades"], open_positions=s["open"], realized_pnl_net=s["realized_net"] + s.get("carried_closed_net", 0.0), last_stopout_ts=s["last_stopout_ts"],
-                              open_same_side=s["open_same_side"], entries_by_strategy={k: v["entries"] for k, v in (s.get("by_strategy") or {}).items()})
+                              open_same_side=s["open_same_side"], entries_by_strategy={k: v["entries"] for k, v in (s.get("by_strategy") or {}).items()}, last_exit_by_key=dict(s.get("last_exit_by_key") or {}))
 
     # ── REAL order helpers (only reached behind the four locks; the default Broker cannot confirm, so DEMO tests and old behaviour are unchanged) ──
     def _can_confirm(self) -> bool:
@@ -458,9 +458,10 @@ class Engine:
                 self._note("reconcile", pos.underlying, {"msg": "entry fill still unknown: no stop, will not be sold by the engine. Check the Dhan app", "position": pos.id}, key=f"unk{pos.id}", now=now)
                 continue
             if price and abs(price - pos.entry_premium) > 1e-9:         # rebase stop / target on the real price
+                was = (1.0 - pos.sl_price / pos.entry_premium) * 100.0 if pos.entry_premium and pos.sl_price else 0.0     # round 498: keep the stop % this entry was given (the noise floor may have widened it); read BEFORE the premium changes
                 pos.entry_premium = price
                 pp = Params.from_config(self.cfg)                      # the same percentages open_position used
-                pos.sl_price = paper.round_tick(price * (1 - pp.sl_pct / 100.0), 0.05, up=True)
+                pos.sl_price = paper.round_tick(price * (1 - max(pp.sl_pct, was) / 100.0), 0.05, up=True)
                 pos.target_price = paper.round_tick(price * (1 + pp.target_pct / 100.0), 0.05, up=True)
                 pos.max_premium = max(pos.max_premium or price, price)
                 pos.min_premium = min(pos.min_premium or price, price)
@@ -796,6 +797,7 @@ class Engine:
         fill = paper.buy_fill(getattr(side, "ask", None), getattr(side, "ltp", None), p, c.tick_size)
         if not fill:
             return None
+        p = sizing.with_noise_stop(p, fill, pick.get("delta"), bias.get("atr"))      # round 498 (E518): a stop never inside the option's own daily noise; lots shrink so the rupee risk stays
         lots = sizing.lots_for(fill, c.lot_size, p)                  # round 250: sized on the FILL (ask + slippage), because the stop is measured from the fill; sizing on the ask let the risk at the stop run up to the slippage above the budget
         if not lots:
             self._note("skip", und, {"stage": "sizing", "strategy": strategy, "reasons": ["one lot exceeds the risk budget"], "premium": fill, "lot_size": c.lot_size,
@@ -953,7 +955,7 @@ class Engine:
                         for v in vetoes:                                 # a chain veto leaves no trade, so log it: the SIM has no chain, this is how live and SIM can be compared
                             self._note("veto", und, v, key=f"{v['strategy']}:{v['direction']}", now=now)
                         for ot, want in (("CE", signals.DOWN), ("PE", signals.UP)):          # a held CALL is flipped by a clear DOWN signal and vice versa
-                            if bias["direction"] == want:
+                            if bias.get("raw_direction", bias["direction"]) == want:     # round 495: a held position is still flipped by the raw lean, even when the intraday-agree rule keeps CORE from OPENING on it
                                 flips[f"{und}:{ot}"] = "flip"
                     except Exception as e:  # noqa: BLE001
                         log.exception("analysis of %s failed", und)

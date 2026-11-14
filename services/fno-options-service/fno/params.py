@@ -45,6 +45,12 @@ class Params:
     strat_chain_veto: float = 15.0    # the option chain vetoes a signal when it leans this far against it
     strat_sweep_max_d: float = 50.0    # BEAR_SWEEP: not above this daily score
     core_min_intraday_bars: int = 6    # round 388 (E404): a SWITCH, 0 = off, anything else = on. On: CORE may enter only when its intraday part could be scored (intraday_score needs 6 bars of today = 09:45 on 5-minute bars). Off = the old behaviour (daily + chain alone could enter at 09:30)
+    core_intraday_agree: bool = True   # round 495 (E515): a SWITCH. On: CORE does not trade AGAINST its own intraday score (no CALL while it is negative, no PUT while it is positive). Off = the old behaviour
+    max_same_dir_open: int = 1         # round 495 (E515): at most this many open positions on the SAME side (CE or PE) across ALL indices (NIFTY and SENSEX are one bet). 0 = no such limit
+    reentry_cooldown_min: int = 30     # round 495 (E515): minutes before the same index + side may be bought again after ANY exit but the end-of-day square-off. 0 = off
+    entry_settle_min: int = 10         # round 497 (E517): no entry in the first N minutes AFTER the entry window opens (09:30 + 10 = 09:40): the open's own noise. 0 = off
+    early_trades_max: int = 2          # round 497 (E517): at most this many entries before `early_until`, so the day's cap (max_trades_per_day) is not used up by the morning. 0 = off
+    early_until: str = "12:00"        # round 497 (E517): the time the early-entry limit ends (IST)
     strat_pivot_max_d: float = 15.0    # BEAR_PIVOT: not above this daily score
     strat_opener_d: float = 15.0    # WEEKLY_OPENER: daily score needed in the break direction
     strat_surge_body: float = 0.6     # MOMENTUM_SURGE: body as a fraction of the bar range
@@ -62,9 +68,11 @@ class Params:
     capital: float = 500000.0
     # exits
     sl_pct: float = 25.0
+    sl_noise_atr_frac: float = 0.20    # round 498 (E518): the stop is never inside this fraction of one daily ATR move of the OPTION (delta x ATR / premium). 0 = off (a flat sl_pct)
+    sl_max_pct: float = 35.0           # round 498 (E518): the widest the noise floor may make the stop (% of premium); never below sl_pct
     target_pct: float = 50.0
-    trail_arm_pct: float = 30.0
-    trail_pct: float = 20.0
+    trail_arm_pct: float = 20.0        # round 495 (E515): was 30. Trailing 20 % below a +30 % peak left a winner at about +4 %
+    trail_pct: float = 12.0            # round 495 (E515): was 20. Armed at +20 %, a +30 % peak now exits at about +14 %
     slippage_pct: float = 0.5
     # costs
     brokerage_per_order: float = 20.0
@@ -103,10 +111,12 @@ class Params:
             strat_surge_range_mult=float(g("FNO_STRAT_SURGE_RANGE_MULT", 1.5)), strat_expiry_range_mult=float(g("FNO_STRAT_EXPIRY_RANGE_MULT", 1.3)),
             strat_drift_closes=int(g("FNO_STRAT_DRIFT_CLOSES", 10)), strat_drift_slope_pct=float(g("FNO_STRAT_DRIFT_SLOPE_PCT", 0.04)),
             strat_pivot_break_pct=float(g("FNO_STRAT_PIVOT_BREAK_PCT", 0.03)), core_min_intraday_bars=int(g("FNO_CORE_MIN_INTRADAY_BARS", 6)),
+            core_intraday_agree=bool(g("FNO_CORE_INTRADAY_AGREE", True)), max_same_dir_open=int(g("FNO_MAX_SAME_DIRECTION_OPEN", 1)), reentry_cooldown_min=int(g("FNO_REENTRY_COOLDOWN_MIN", 30)),
+            entry_settle_min=int(g("FNO_ENTRY_SETTLE_MIN", 10)), early_trades_max=int(g("FNO_EARLY_TRADES_MAX", 2)), early_until=str(g("FNO_EARLY_UNTIL", "12:00")),
             expiry_entry_end=str(g("FNO_EXPIRY_ENTRY_END", "13:30")), expiry_squareoff_at=str(g("FNO_EXPIRY_SQUAREOFF_AT", "14:45")),
             expiry_risk_mult=float(g("FNO_EXPIRY_RISK_MULT", 0.5)), expiry_real_ok=bool(g("FNO_EXPIRY_REAL", False)),
-            sl_pct=float(g("FNO_SL_PCT", 25.0)), target_pct=float(g("FNO_TARGET_PCT", 50.0)), trail_arm_pct=float(g("FNO_TRAIL_ARM_PCT", 30.0)),
-            trail_pct=float(g("FNO_TRAIL_PCT", 20.0)), slippage_pct=float(g("FNO_SLIPPAGE_PCT", 0.5)),
+            sl_pct=float(g("FNO_SL_PCT", 25.0)), sl_noise_atr_frac=float(g("FNO_SL_NOISE_ATR_FRAC", 0.20)), sl_max_pct=float(g("FNO_SL_MAX_PCT", 35.0)), target_pct=float(g("FNO_TARGET_PCT", 50.0)), trail_arm_pct=float(g("FNO_TRAIL_ARM_PCT", 20.0)),
+            trail_pct=float(g("FNO_TRAIL_PCT", 12.0)), slippage_pct=float(g("FNO_SLIPPAGE_PCT", 0.5)),
             brokerage_per_order=float(g("BROKERAGE_PER_ORDER", 20.0)), brokerage_pct_cap=float(g("BROKERAGE_PCT_CAP", 100.0)),
             stt_sell_pct=float(g("STT_SELL_PCT", 0.15)), exch_txn_pct_nse=float(g("EXCH_TXN_PCT_NSE", 0.03553)),
             exch_txn_pct_bse=float(g("EXCH_TXN_PCT_BSE", 0.0325)), sebi_pct=float(g("SEBI_PCT", 0.0001)), stamp_buy_pct=float(g("STAMP_BUY_PCT", 0.003)),
@@ -146,6 +156,12 @@ CONFIG_NAME: Dict[str, str] = {
     "strat_chain_veto": "FNO_STRAT_CHAIN_VETO",
     "strat_sweep_max_d": "FNO_STRAT_SWEEP_MAX_D",
     "core_min_intraday_bars": "FNO_CORE_MIN_INTRADAY_BARS",
+    "core_intraday_agree": "FNO_CORE_INTRADAY_AGREE",
+    "max_same_dir_open": "FNO_MAX_SAME_DIRECTION_OPEN",
+    "reentry_cooldown_min": "FNO_REENTRY_COOLDOWN_MIN",
+    "entry_settle_min": "FNO_ENTRY_SETTLE_MIN",
+    "early_trades_max": "FNO_EARLY_TRADES_MAX",
+    "early_until": "FNO_EARLY_UNTIL",
     "strat_pivot_max_d": "FNO_STRAT_PIVOT_MAX_D",
     "strat_opener_d": "FNO_STRAT_OPENER_D",
     "strat_surge_body": "FNO_STRAT_SURGE_BODY",
@@ -165,6 +181,8 @@ CONFIG_NAME: Dict[str, str] = {
     "expiry_risk_mult": "FNO_EXPIRY_RISK_MULT",
     "expiry_real_ok": "FNO_EXPIRY_REAL",
     "sl_pct": "FNO_SL_PCT",
+    "sl_noise_atr_frac": "FNO_SL_NOISE_ATR_FRAC",
+    "sl_max_pct": "FNO_SL_MAX_PCT",
     "target_pct": "FNO_TARGET_PCT",
     "trail_arm_pct": "FNO_TRAIL_ARM_PCT",
     "trail_pct": "FNO_TRAIL_PCT",

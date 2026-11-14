@@ -816,6 +816,14 @@ services:
       # round 492: FNO_REAL_FIXED_CAPITAL (round 387) and FNO_CORE_MIN_INTRADAY_BARS (round 388) were read by config.py but never listed, so a value in .env never arrived (blank = code default).
       FNO_REAL_FIXED_CAPITAL: ${FNO_REAL_FIXED_CAPITAL:-}
       FNO_CORE_MIN_INTRADAY_BARS: ${FNO_CORE_MIN_INTRADAY_BARS:-}
+      # round 495 (E515): three entry / re-entry rules (blank = code default)
+      FNO_CORE_INTRADAY_AGREE: ${FNO_CORE_INTRADAY_AGREE:-}
+      FNO_MAX_SAME_DIRECTION_OPEN: ${FNO_MAX_SAME_DIRECTION_OPEN:-}
+      FNO_REENTRY_COOLDOWN_MIN: ${FNO_REENTRY_COOLDOWN_MIN:-}
+      # round 497 (E517): the settle time after the open and the early-entry limit (blank = code default)
+      FNO_ENTRY_SETTLE_MIN: ${FNO_ENTRY_SETTLE_MIN:-}
+      FNO_EARLY_TRADES_MAX: ${FNO_EARLY_TRADES_MAX:-}
+      FNO_EARLY_UNTIL: ${FNO_EARLY_UNTIL:-}
       # (CAPITAL_ALLOC_DIR is left out on purpose: it is the container path /data/shared mounted below.)
       FNO_BLOCK_EXPIRY_DAY: ${FNO_BLOCK_EXPIRY_DAY:-}
       FNO_BROKERAGE_PCT_CAP: ${FNO_BROKERAGE_PCT_CAP:-}
@@ -859,6 +867,9 @@ services:
       FNO_SIGNAL_MIN_SCORE: ${FNO_SIGNAL_MIN_SCORE:-}
       FNO_SLIPPAGE_PCT: ${FNO_SLIPPAGE_PCT:-}
       FNO_SL_PCT: ${FNO_SL_PCT:-}
+      # round 498 (E518): the noise floor under the stop (blank = code default)
+      FNO_SL_NOISE_ATR_FRAC: ${FNO_SL_NOISE_ATR_FRAC:-}
+      FNO_SL_MAX_PCT: ${FNO_SL_MAX_PCT:-}
       FNO_SNAPSHOT_INTERVAL_S: ${FNO_SNAPSHOT_INTERVAL_S:-}
       FNO_SQUAREOFF_AT: ${FNO_SQUAREOFF_AT:-}
       FNO_STAMP_BUY_PCT: ${FNO_STAMP_BUY_PCT:-}

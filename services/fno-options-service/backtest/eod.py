@@ -96,11 +96,12 @@ def run(daily: Sequence[dict], bhav_by_day: Dict[date, List[Dict[str, Any]]], p:
         if row["o"] < p.min_premium:
             continue
         fill = paper.buy_fill(row["o"], row["o"], p)
-        lots = sizing.lots_for(fill, lot_size, p) if fill else None      # round 250: size on the fill, as the live engine does
+        p_in = sizing.with_noise_stop(p, fill, None, b.get("atr")) if fill else p      # round 498 (E518): the same noise floor as live
+        lots = sizing.lots_for(fill, lot_size, p_in) if fill else None      # round 250: size on the fill, as the live engine does
         if not lots or not fill:
             continue
         pos = paper.open_position(ContractRef(underlying, exp.isoformat(), row["strike"], ot, lot_size, None, "NSE_FNO", 0.05), lots, fill,
-                                  datetime.combine(nd, datetime.min.time(), IST).timestamp() + 9.25 * 3600, p, mode="EOD", score=b["score"], spot=spot)
+                                  datetime.combine(nd, datetime.min.time(), IST).timestamp() + 9.25 * 3600, p_in, mode="EOD", score=b["score"], spot=spot)
         hit = paper.evaluate_bar(pos, row["o"], row["h"], row["l"], row["c"], p, squareoff=False)
         reason, ref = hit if hit else (paper.SQUAREOFF, row["c"])
         out_fill = paper.sell_fill(ref, ref, p) or ref

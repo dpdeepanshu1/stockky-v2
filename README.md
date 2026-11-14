@@ -98,6 +98,9 @@ bash scripts/docker_test.sh position-stocks-service                         # wh
 bash scripts/docker_test.sh position-stocks-service tests/test_sell_probe.py tests/test_sell_orders.py tests/test_short_entry_order.py tests/test_short_live.py -q
 bash scripts/docker_test.sh real-trade-service tests/test_x.py -x           # extra arguments go to pytest
 bash scripts/docker_frontend_check.sh                                       # frontend: npm ci + tsc + build + unit tests
+bash scripts/vm_full_check.sh                                             # everything in one run: repo checks + every service suite + frontend; per-step logs, a summary with the real exit codes (E516)
+# F&O entry timing (E517): FNO_ENTRY_SETTLE_MIN (no entry in the first 10 min of the window), FNO_EARLY_TRADES_MAX / FNO_EARLY_UNTIL (2 entries before 12:00, the third kept for later)
+# F&O stop floor (E518): FNO_SL_NOISE_ATR_FRAC (0.2 of a daily ATR move of the option, 0 = flat stop) and FNO_SL_MAX_PCT (widest stop, 35)
 python3 -m pytest scripts/test_repo_scripts.py -q                            # repo tooling tests (CI runs this and a few sibling script tests)
 ```
 

@@ -23,7 +23,7 @@ price, so the previous close is reported as "corrected" (the move is then measur
 daily history and is not tradable by the candidate engines anyway.
 
 SELF-CHECK (fail open): a corporate-action day touches a handful of names out of ~2,700. If more than PREV_CLOSE_GUARD_TRIP_PCT
-(default 5 %) of the distinct symbols seen (at least PREV_CLOSE_GUARD_TRIP_MIN, default 100) come out corrected / suspect, the
+(default 10 %, was 5 % until round 499) of the distinct symbols seen (at least PREV_CLOSE_GUARD_TRIP_MIN, default 300, was 100) come out corrected / suspect, the
 assumption behind the check (the feed's band layout) is what is wrong, not the data: the guard then passes every row through
 unchanged for PREV_CLOSE_GUARD_TRIP_S seconds (default 900), logs one ERROR and starts counting again afterwards.
 PREV_CLOSE_GUARD_MODE=off turns the whole thing off.
@@ -77,14 +77,14 @@ def _note(symbol: str, flagged: bool) -> None:
         elif len(_seen) < _SEEN_MAX:
             _seen[symbol] = flagged
         n = len(_seen)
-        if n >= max(1, int(_pct("PREV_CLOSE_GUARD_TRIP_MIN", 100.0))):
+        if n >= max(1, int(_pct("PREV_CLOSE_GUARD_TRIP_MIN", 300.0))):
             bad = sum(1 for v in _seen.values() if v)
-            if bad * 100.0 / n > _pct("PREV_CLOSE_GUARD_TRIP_PCT", 5.0):
+            if bad * 100.0 / n > _pct("PREV_CLOSE_GUARD_TRIP_PCT", 10.0):
                 _tripped_until = time.monotonic() + _pct("PREV_CLOSE_GUARD_TRIP_S", 900.0)
                 _seen.clear()
                 logger.error("prev-close guard: %d of %d symbols flagged (> %.1f%%) - the feed's circuit-band / print layout does not "
                              "match the check's assumptions; passing every previous close through unchanged for %.0f s",
-                             bad, n, _pct("PREV_CLOSE_GUARD_TRIP_PCT", 5.0), _pct("PREV_CLOSE_GUARD_TRIP_S", 900.0))
+                             bad, n, _pct("PREV_CLOSE_GUARD_TRIP_PCT", 10.0), _pct("PREV_CLOSE_GUARD_TRIP_S", 900.0))
 
 
 def tripped() -> bool:

@@ -26,7 +26,7 @@ def test_a_last_entry_at_or_after_the_square_off_is_a_problem():
 
 def test_a_window_that_closes_before_it_opens_is_a_problem():
     assert any("after it closes" in w for w in _why(entry_start="14:40", entry_end="14:30"))
-    assert _why(entry_start="09:30", entry_end="09:30") == []
+    assert _why(entry_start="09:30", entry_end="09:30", entry_settle_min=0) == []        # round 497: a one-minute window cannot also hold a settle period
 
 
 def test_expiry_day_times_must_fit_too():

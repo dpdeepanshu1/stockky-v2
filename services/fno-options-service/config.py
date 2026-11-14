@@ -119,10 +119,12 @@ FNO_STRAT_WEEKLY_OPENER = _b("FNO_STRAT_WEEKLY_OPENER", False)
 FNO_STRAT_EXPIRY_MOMENTUM = _b("FNO_STRAT_EXPIRY_MOMENTUM", False)   # round 236: expiry-day strategies. OFF; DEMO-only unless FNO_EXPIRY_REAL (env only)
 FNO_STRAT_EXPIRY_ALPHA = _b("FNO_STRAT_EXPIRY_ALPHA", False)
 FNO_STRATEGY_MAX_PER_DAY = _i("FNO_STRATEGY_MAX_PER_DAY", 1)  # entries per day for each non-core strategy
+FNO_SL_NOISE_ATR_FRAC = max(0.0, _f("FNO_SL_NOISE_ATR_FRAC", 0.20))                # round 498 (E518): the stop is never inside this fraction of one daily ATR move of the option (delta x ATR / premium); 0 = off
+FNO_SL_MAX_PCT = _f("FNO_SL_MAX_PCT", 35.0)                                       # round 498 (E518): the widest the noise floor may make the stop (% of premium)
 FNO_SL_PCT = _f("FNO_SL_PCT", 25.0)                          # stop loss as % of the entry premium
 FNO_TARGET_PCT = _f("FNO_TARGET_PCT", 50.0)
-FNO_TRAIL_ARM_PCT = _f("FNO_TRAIL_ARM_PCT", 30.0)            # profit % at which the trailing stop switches on
-FNO_TRAIL_PCT = _f("FNO_TRAIL_PCT", 20.0)                    # trail distance, % below the best premium seen
+FNO_TRAIL_ARM_PCT = _f("FNO_TRAIL_ARM_PCT", 20.0)            # profit % at which the trailing stop switches on
+FNO_TRAIL_PCT = _f("FNO_TRAIL_PCT", 12.0)                    # trail distance, % below the best premium seen
 FNO_RISK_PER_TRADE_PCT = _f("FNO_RISK_PER_TRADE_PCT", 1.0)   # % of capital lost if the stop is hit
 FNO_MAX_LOTS = _i("FNO_MAX_LOTS", 2)
 FNO_MAX_OPEN_POSITIONS = _i("FNO_MAX_OPEN_POSITIONS", 2)
@@ -157,6 +159,12 @@ FNO_STRAT_TREND_I = _f("FNO_STRAT_TREND_I", 15.0)
 FNO_STRAT_CHAIN_VETO = _f("FNO_STRAT_CHAIN_VETO", 15.0)
 FNO_STRAT_SWEEP_MAX_D = _f("FNO_STRAT_SWEEP_MAX_D", 50.0)
 FNO_CORE_MIN_INTRADAY_BARS = max(0, _i("FNO_CORE_MIN_INTRADAY_BARS", 6))     # round 388 (E404): switch, 0 = off, else on: CORE needs a scoreable intraday part (6 bars of today)
+FNO_CORE_INTRADAY_AGREE = _b("FNO_CORE_INTRADAY_AGREE", True)                  # round 495 (E515): CORE does not trade against its own intraday score (OFF = old behaviour)
+FNO_MAX_SAME_DIRECTION_OPEN = max(0, _i("FNO_MAX_SAME_DIRECTION_OPEN", 1))     # round 495 (E515): open positions on one side (CE or PE) across all indices; 0 = no limit
+FNO_REENTRY_COOLDOWN_MIN = max(0, _i("FNO_REENTRY_COOLDOWN_MIN", 30))          # round 495 (E515): minutes before the same index + side is bought again after ANY exit but the end-of-day square-off; 0 = off
+FNO_ENTRY_SETTLE_MIN = max(0, _i("FNO_ENTRY_SETTLE_MIN", 10))                   # round 497 (E517): minutes after the entry window opens with no entry (09:30 + 10 = 09:40); 0 = off
+FNO_EARLY_TRADES_MAX = max(0, _i("FNO_EARLY_TRADES_MAX", 2))                   # round 497 (E517): at most this many entries before FNO_EARLY_UNTIL, the rest of FNO_MAX_TRADES_PER_DAY is kept for later; 0 = off
+FNO_EARLY_UNTIL = _s("FNO_EARLY_UNTIL", "12:00")                                # round 497 (E517): when the early-entry limit ends (IST)
 FNO_STRAT_PIVOT_MAX_D = _f("FNO_STRAT_PIVOT_MAX_D", 15.0)
 FNO_STRAT_OPENER_D = _f("FNO_STRAT_OPENER_D", 15.0)
 FNO_STRAT_SURGE_BODY = _f("FNO_STRAT_SURGE_BODY", 0.6)

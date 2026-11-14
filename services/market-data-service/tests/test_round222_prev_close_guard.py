@@ -102,8 +102,8 @@ def test_day_change_pct():
 
 
 def test_systemic_mismatch_trips_and_fails_open():
-    for i in range(200):
-        bad = i < 20
+    for i in range(400):
+        bad = i < 80                   # round 499: 20 % flagged (the trip is now above 10 % over at least 300 symbols)
         g.assess(608.3 if bad else 101.0, 3143.3 if bad else 100.0, symbol=f"S{i}",
                  open_=641.0 if bad else 100.5, high=647.9 if bad else 102.0, low=606.0 if bad else 99.0)
     assert g.tripped() is True
@@ -117,6 +117,28 @@ def test_a_handful_of_corporate_actions_does_not_trip():
         g.assess(608.3 if bad else 101.0, 3143.3 if bad else 100.0, symbol=f"S{i}",
                  open_=641.0 if bad else 100.5, high=647.9 if bad else 102.0, low=606.0 if bad else 99.0)
     assert g.tripped() is False
+
+
+def _feed(n, every):
+    for i in range(n):
+        bad = i % every == 0           # flagged names spread evenly through the feed
+        g.assess(608.3 if bad else 101.0, 3143.3 if bad else 100.0, symbol=f"S{i}",
+                 open_=641.0 if bad else 100.5, high=647.9 if bad else 102.0, low=606.0 if bad else 99.0)
+
+
+def test_round499_a_normal_busy_day_of_about_five_percent_does_not_switch_the_guard_off():
+    _feed(600, 19)                     # 5.3 %: a day with many splits / bonuses / new listings (the 14 Nov review item 13 saw 5.1 %)
+    assert g.tripped() is False
+
+
+def test_round499_a_small_early_sample_never_trips():
+    _feed(250, 2)                      # half flagged, but under 300 distinct symbols so far
+    assert g.tripped() is False
+
+
+def test_round499_just_over_ten_percent_of_a_full_sample_still_trips():
+    _feed(600, 9)                      # 11 %
+    assert g.tripped() is True
 
 
 def test_repeated_polls_of_one_symbol_count_once():

@@ -178,6 +178,10 @@ class Store:
         ps = self.positions(mode=mode, day=day, limit=2000)
         closed = [p for p in ps if p.status == CLOSED]
         stop_ts = max((p.exit_ts for p in closed if p.exit_reason == "SL" and p.exit_ts), default=None)
+        last_exit: Dict[str, float] = {}                    # round 495: latest exit per index + side, any reason but the end-of-day square-off (a partial-exit child is not an exit of the position)
+        for p in closed:
+            if p.parent_id is None and p.exit_ts and p.exit_reason not in ("SQUAREOFF", "NOT_FILLED"):
+                last_exit[p.key] = max(last_exit.get(p.key, 0.0), p.exit_ts)
         same: Dict[str, int] = {}
         for p in ps:
             if p.status == OPEN:
@@ -194,7 +198,7 @@ class Store:
         return {"trades": len(roots), "open": sum(1 for p in ps if p.status == OPEN) + len(carried), "carried_open": len(carried), "carried_closed_net": round(sum(p.net_pnl or 0.0 for p in self.closed_from_earlier(day, mode)), 2), "realized_net": round(sum(p.net_pnl or 0.0 for p in closed), 2),
                 "realized_gross": round(sum(p.gross_pnl or 0.0 for p in closed), 2), "charges": round(sum(p.charges or 0.0 for p in closed), 2),
                 "wins": sum(1 for n in done if n > 0), "losses": sum(1 for n in done if n <= 0),
-                "last_stopout_ts": stop_ts, "open_same_side": same,
+                "last_stopout_ts": stop_ts, "open_same_side": same, "last_exit_by_key": last_exit,
                 "by_strategy": self._by_strategy(placed)}
 
     @staticmethod

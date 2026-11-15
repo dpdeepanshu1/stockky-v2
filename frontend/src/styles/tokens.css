@@ -19,7 +19,7 @@
   --border-strong-rgb: 60 69 90;
   --fg-rgb: 234 238 245;
   --muted-rgb: 152 162 179;
-  --muted-2-rgb: 120 131 150;
+  --muted-2-rgb: 125 136 154;   /* E558: 4.5:1 on panel-2 (was 4.24) */
   --accent-rgb: 45 212 160;
   --accent-2-rgb: 45 212 160;
   --info-rgb: 124 147 255;
@@ -48,9 +48,9 @@ html.light {
   --accent-rgb: 0 124 89;
   --accent-2-rgb: 0 124 89;
   --info-rgb: 61 90 254;
-  --buy-rgb: 6 128 90;
-  --sell-rgb: 210 50 60;
-  --warn-rgb: 178 106 0;
+  --buy-rgb: 6 127 89;   /* E558: 4.5:1 as text on all three light surfaces */
+  --sell-rgb: 206 49 59;   /* E558: same */
+  --warn-rgb: 160 95 0;   /* E558: was 3.8:1 to 4.2:1 as text; white on a warn solid now 4.5:1 too */
   --on-solid-rgb: 255 255 255;
   --shadow-rgb: 15 23 42;
   --card-shadow: 0 1px 2px rgb(var(--shadow-rgb) / 0.06), 0 6px 16px rgb(var(--shadow-rgb) / 0.05);

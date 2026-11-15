@@ -10,6 +10,8 @@ def build_bound_routes_g(ref):
     set_notification_config_router = APIRouter()
     delete_notification_channel_router = APIRouter()
     notifications_call_me_router = APIRouter()
+    notifications_history_router = APIRouter()
+    notifications_read_all_router = APIRouter()
     test_notification_channels_router = APIRouter()
     trigger_training_router = APIRouter()
     ops_circuit_reset_router = APIRouter()
@@ -361,6 +363,30 @@ def build_bound_routes_g(ref):
             ref.logger.exception("hard_reset_database: %s", e)
             raise ref.HTTPException(status_code=500, detail=str(e)[:240])
 
+    @notifications_history_router.api_route("/notifications/history", dependencies=[ref.Depends(ref._require_admin)], methods=["GET"])
+    def notifications_history(limit: int = 100):
+        """E556 (B1): the last alerts the notification service sent (newest first, key-redacted). Admin login: the text can name your picks and positions."""
+        try:
+            resp = ref.httpx.get(f"{ref.NOTIFICATION_URL}/history", params={"limit": max(1, min(int(limit), 200))}, timeout=15)
+            resp.raise_for_status()
+            return ref._json_sanitize(resp.json())
+        except ref.httpx.HTTPError as e:
+            raise ref.HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+        except ValueError as e:
+            raise ref.HTTPException(status_code=502, detail=f"Notification service returned a non-JSON body: {e}")
+
+    @notifications_read_all_router.post("/notifications/read-all", dependencies=[ref.Depends(ref._require_admin)])
+    def notifications_read_all():
+        """E556 (B1): mark every alert read (moves the read marker; deletes nothing)."""
+        try:
+            resp = ref.httpx.post(f"{ref.NOTIFICATION_URL}/history/read-all", timeout=15)
+            resp.raise_for_status()
+            return ref._json_sanitize(resp.json())
+        except ref.httpx.HTTPError as e:
+            raise ref.HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+        except ValueError as e:
+            raise ref.HTTPException(status_code=502, detail=f"Notification service returned a non-JSON body: {e}")
+
     return SimpleNamespace(
         set_notification_config=set_notification_config,
         set_notification_config_router=set_notification_config_router,
@@ -368,6 +394,10 @@ def build_bound_routes_g(ref):
         delete_notification_channel_router=delete_notification_channel_router,
         notifications_call_me=notifications_call_me,
         notifications_call_me_router=notifications_call_me_router,
+        notifications_history=notifications_history,
+        notifications_history_router=notifications_history_router,
+        notifications_read_all=notifications_read_all,
+        notifications_read_all_router=notifications_read_all_router,
         test_notification_channels=test_notification_channels,
         test_notification_channels_router=test_notification_channels_router,
         trigger_training=trigger_training,

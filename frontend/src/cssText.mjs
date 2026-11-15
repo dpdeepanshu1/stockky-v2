@@ -61,11 +61,10 @@ export function animRules(css) {
   };
   walk(_strip(css), []); return out;
 }
-/** main.tsx css imports, with pages.css expanded into the page sheets it @imports (cascade order) */
+/** main.tsx css imports in cascade order (E558: pages.css is gone, the page sheets are imported directly) */
 export function cascadeOrder() {
   const main = _rf(new URL("./main.tsx", import.meta.url), "utf8");
-  const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
-  return imports.flatMap((f) => f === "styles/pages.css" ? [...rdStyle("pages.css").matchAll(/@import "\.\/([\w-]+\.css)"/g)].map((m) => `styles/${m[1]}`) : [f]);
+  return [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
 }
 export const mainCssImports = () => [..._rf(new URL("./main.tsx", import.meta.url), "utf8").matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
 

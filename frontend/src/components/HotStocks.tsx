@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useStockkyRealtime } from "../useRealtime";
 import ConvictionCard from "./ConvictionCard";
+import { useSparklines } from "./RowSpark";   // E557 (B3)
 import Pipeline from "./Pipeline";
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { getSafePrice } from "../priceDisplay";
@@ -266,6 +267,7 @@ function Section({
   liveQuotes: Record<string, { price: number; as_of?: string }>;
   onAnalyze?: (symbol: string) => void;
 }) {
+  const sparkOf = useSparklines(items.map((i) => i.symbol));   // E557 (B3): one batched read for this section's rows
   return (
     <section className="mk-hot-section">
       <header className="mk-hot-head">
@@ -283,6 +285,7 @@ function Section({
               <ConvictionCard
                 key={`${item.section || title}-${item.symbol}`}
                 onSelect={onAnalyze}
+                spark={sparkOf(item.symbol)}
                 data={{
                   ...item,
                   close: live?.price,

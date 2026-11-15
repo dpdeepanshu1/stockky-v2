@@ -6,6 +6,7 @@ import { RiskRail } from "../ui/RiskRail";   // design v7
 import { fmtDate, fmtInr, fmtTime, pnlColor, positionLevels } from "./format";
 import { openCharges, afterCharges } from "../../moneyView";   // Round 270
 import { entryReason } from "../../setupView";   // E285 round 104: the Entry reason line (same helper as Position Stocks)
+import { Button } from "../kit";   // round 537
 
 // AUDIT FIX (session64, issue #8 follow-up — "show demat-imported holdings
 // under Positions in their own sub-section"): factored the existing
@@ -110,10 +111,9 @@ export function PositionCard({
         {p.status === "PENDING_EXIT" ? (
           <span className="font-display tabular-nums text-[10px] text-signal-hold">pending exit…</span>
         ) : (
-          <button onClick={onClose} disabled={closing}
-            className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-sell/10 border border-signal-sell/20 text-signal-sell disabled:opacity-40">
+          <Button variant="danger" size="sm" onClick={onClose} loading={closing}>
             {closing ? "Closing…" : "Close position"}
-          </button>
+          </Button>
         )}
       </div>
     </GlintBox>

@@ -22,7 +22,7 @@ import config
 import jobs as J
 import session_keys
 from auth import mint_service_token, require_admin
-from runner import Runner
+from runner import Runner, market_open_now
 from scheduler import Scheduler
 
 app = FastAPI(title="calibration-runner-service", version="1.0.0")
@@ -31,7 +31,7 @@ app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_credentials=Fal
 
 def _all_secrets() -> list:
     """Every session secret this process holds, so job logs / notifications can redact them."""
-    return [v for v in (session_keys.own_secret(k) for k in session_keys.SERVICE_ENV) if v]
+    return [v for v in (session_keys.own_secret(k) for k in session_keys.SERVICE_ENV) if v] + [v for v in (config.GEMINI_API_KEY, config.GROQ_API_KEY) if v]      # E553: the agent's LLM keys too
 
 
 _tok: Dict[str, Any] = {"v": "", "exp": 0.0}
@@ -54,6 +54,7 @@ def _ctx_base() -> Dict[str, Any]:
 runner: Optional[Runner] = None
 sched: Optional[Scheduler] = None
 auto: Optional[Any] = None       # group 476: AutoCalibrator
+agent: Optional[Any] = None      # E553: the nightly AI idea source (agent.py): ideas only, never sets a switch
 weather: Optional[Any] = None    # Part 1 step 4: Market Weather (shadow)
 weather_control: Optional[Any] = None   # E112: the same ControlClient, for the card's saved / today / expiry view and the revert button
 
@@ -67,7 +68,7 @@ def _safe_token() -> str:
 
 @app.on_event("startup")
 def _startup() -> None:
-    global runner, sched, auto, weather, weather_control
+    global runner, sched, auto, agent, weather, weather_control
     import notify as N
     from notify import make_notifier, make_skip_notifier, Outbox, start_outbox_flusher
     from runner import Redactor
@@ -92,7 +93,15 @@ def _startup() -> None:
                              AC.RunnerEvidence(runner, J.PACK_MAP, config.AUTOCALIB_MAX_AGE_DAYS * 86400), notify=_tell,
                              enabled=config.AUTOCALIB_ENABLED, dry_run=config.AUTOCALIB_DRY_RUN, cooldown_s=config.AUTOCALIB_COOLDOWN_H * 3600,
                              step_pct=config.AUTOCALIB_STEP_PCT / 100.0)
+    import agent as AG
+    agent = AG.Agent(str(config.DATA_DIR), auto, runner, J.JOBS,
+                     AG.LLM(config.GEMINI_API_KEY, config.GEMINI_MODEL, config.AGENT_GEMINI_BACKUP_MODEL, config.GROQ_API_KEY, config.GROQ_MODEL, config.AGENT_MIN_GAP_S),
+                     notify=_tell, mode=config.AGENT_MODE, max_ideas=config.AGENT_MAX_IDEAS, max_queue=config.AGENT_MAX_QUEUE,
+                     min_rerun_h=config.AGENT_MIN_RERUN_H, run_after=config.AGENT_RUN_AFTER_IST, max_calls_day=config.AGENT_MAX_CALLS_DAY,
+                     secrets=lambda: [_safe_token(), config.SESSION_SECRET, config.GEMINI_API_KEY, config.GROQ_API_KEY, *_all_secrets()],
+                     market_open=lambda: bool(config.GUARD_MARKET_HOURS and market_open_now()))
     runner.start()
+    agent.start()
     start_outbox_flusher(ob, config.NOTIFICATION_URL, config.OUTBOX_RETRY_S)
     skip_notifier = make_skip_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, lambda p: (J.PACK_MAP.get(p) or {}).get("title", p or ""),
                                        Redactor(lambda: [_safe_token(), config.SESSION_SECRET, *_all_secrets()]), outbox=ob)
@@ -132,6 +141,8 @@ def _shutdown() -> None:
         sched.stop.set()
     if weather:
         weather.stop.set()
+    if agent:
+        agent.stop.set()
 
 
 def _svc(service: str) -> str:
@@ -364,6 +375,37 @@ class AutoRun(BaseModel):
 def autocalib_run(req: AutoRun, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     """Evaluate every rule now. dry_run=true shows what would change and applies nothing (also the only mode while auto-calibration is switched off)."""
     return _a().evaluate(trigger=f"manual by {claims.get('sub') or '-'}", force=True, dry_run=req.dry_run)
+
+
+# ----------------------------------------------------------------------------------------------- E553: the nightly AI idea source
+def _ag() -> Any:
+    if agent is None:
+        raise HTTPException(503, "agent not started")
+    return agent
+
+
+@app.get("/agent/status")
+def agent_status(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Mode, models, which keys are set (never the keys), the allow-list, the last run and the idea counters."""
+    return _ag().status()
+
+
+class AgentRun(BaseModel):
+    mode: Optional[str] = None       # report | propose; empty = the configured AGENT_MODE
+
+
+@app.post("/agent/run")
+def agent_run(req: AgentRun, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Run the agent now (2 to 4 LLM calls; refused in market hours or after a self-off). Ideas only: it never sets a switch. propose also queues the existing tests behind the ideas (the runner's market-hours guard applies)."""
+    if req.mode is not None and req.mode not in ("report", "propose"):
+        raise HTTPException(400, "mode must be report or propose")
+    return _ag().run(mode=req.mode, trigger="manual", by=str(claims.get("sub") or "-"))
+
+
+@app.post("/agent/resume")
+def agent_resume(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Switch the agent back on after it switched itself off (stop rule). The rule counts from this point. It sets no trading switch."""
+    return _ag().resume()
 
 
 # ----------------------------------------------------------------------------------------------- Part 1 step 4: Market Weather (shadow)

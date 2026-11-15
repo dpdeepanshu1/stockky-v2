@@ -5,7 +5,7 @@ import { Stat, Stats } from "./kit/Stat";
 import { Button } from "./kit/Button";
 import { StatusPill } from "./kit/StatusPill";
 import { SkeletonLines } from "./kit/Skeleton";
-import { indexDelta, indexValue, moodView, toneOf } from "./app/homeView";
+import { extraTiles, indexDelta, indexValue, moodView, toneOf } from "./app/homeView";
 import { setVisibleInterval } from "../visibleInterval";
 import { api, MarketIndicesResponse } from "../api";
 
@@ -62,7 +62,7 @@ export default function MarketSentimentHeader() {
   const mood = moodView(market_mood, market_score);
 
   // E536: the old header as three Stat tiles (Nifty 50, Sensex, market mood). `fetched_at` is already formatted in IST (e.g. "08:37:43 AM").
-  // The index feed carries only these fields, so no further tile is shown (nothing is made up).
+  // Round 539 (B2): Bank Nifty and India VIX tiles appear only when the gateway sent them (extraTiles drops a missing or zero tile; nothing is made up).
   return (
     <Card aria-label="Market today">
       <CardHeader
@@ -78,6 +78,7 @@ export default function MarketSentimentHeader() {
       <Stats>
         <Stat label="NIFTY 50" value={indexValue(nifty.price)} tone={toneOf(nifty.change)} delta={indexDelta(nifty.change, nifty.change_pct)} />
         <Stat label="SENSEX" value={indexValue(sensex.price)} tone={toneOf(sensex.change)} delta={indexDelta(sensex.change, sensex.change_pct)} />
+        {extraTiles(data).map((x) => <Stat key={x.key} label={x.label} value={x.value} tone={x.tone} delta={x.delta} sub={x.sub} />)}
         <Stat label="Market mood" value={mood.word} tone={mood.tone} delta={`Score ${mood.scoreText}`} sub={stale ? "Showing the last known values" : undefined} />
       </Stats>
       <MoodGauge score={market_score} mood={market_mood} />

@@ -33,6 +33,7 @@ import { HistoryTab } from "./realAuto/tabs/HistoryTab";   // E122: closed-trade
 import { OverviewTab, type RiskForm } from "./realAuto/tabs/OverviewTab";
 import { BoardTab } from "./realAuto/tabs/BoardTab";
 import { openLivePositions, type LivePositionRow } from "./realAuto/liveParts";
+import { Button } from "./kit";   // round 537
 // kept as the public surface of this module (the types and helper used to be declared here)
 export { openLivePositions };
 export type { LivePositionRow };
@@ -633,7 +634,7 @@ export default function RealAutoTrade() {
             value={apiUrlInput}
             onChange={e => setApiUrlInput(e.target.value)}
           />
-          <button onClick={saveApiUrl} className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy">Save</button>
+          <Button variant="primary" onClick={saveApiUrl}>Save</Button>
         </div>
       </div>
     );
@@ -722,7 +723,7 @@ export default function RealAutoTrade() {
       {error && (
         <div className="ra-alert font-display tabular-nums" role="alert">
           <span>{error}</span>
-          <button onClick={() => setError(null)} aria-label="Dismiss error">✕</button>
+          <Button variant="ghost" size="sm" onClick={() => setError(null)} aria-label="Dismiss error">✕</Button>
         </div>
       )}
 

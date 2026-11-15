@@ -8,10 +8,11 @@ import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import { KpiStrip } from "./ui/KpiStrip";
 import { MarketsFilterBar, NoMatch } from "./MarketsFilterBar";   // E541
 import { MarketCard } from "./MarketCard";   // E543
-import { Tabs } from "./kit";   // E543
+import { Button, Chip, DataTable, Empty, Tabs, type Column } from "./kit";   // E543, E538 (F3 part 2)
+import { RowSpark, useSparklines } from "./RowSpark";   // E557 (B3)
 import { SURPRISE_VIEWS, surpriseCard, type SurpriseView } from "../marketCardView";   // E543
 import { NO_FILTER, applyMarketFilter, isFilteredEmpty, sortsFor, type MarketAccess, type MarketFilter } from "../marketsFilter";   // E541
-import { surpriseKpis, surpriseRowView } from "./surpriseView";
+import { surpriseKpis, surpriseRowView, type SurpriseRowView } from "./surpriseView";
 
 export interface SurpriseStock {
   symbol: string;
@@ -64,6 +65,49 @@ function formatEta(sec?: number | null) {
   if (h > 0) return `${h}h ${m}m ${r}s`;
   if (m > 0) return `${m}m ${r}s`;
   return `${r}s`;
+}
+
+// E538 (F3 part 2): the two tables are kit DataTables. Columns live here so the page body stays about the page.
+type SurpriseTableRow = { s: SurpriseStock; v: SurpriseRowView };
+const dirClass = (d: "up" | "down" | "flat" | null) => (d === "down" ? "text-signal-sell" : d === "up" ? "text-signal-buy" : "text-paper");
+function surpriseColumns(sparkOf: (symbol: string) => number[] | null): Column<SurpriseTableRow>[] {
+  return [
+    { key: "symbol", header: "Symbol", render: ({ s }) => <b className="font-display tabular-nums text-paper">{s.symbol}</b> },
+    { key: "tier", header: "Tier", render: ({ v }) => <span className={`mk-tier ${v.tier.tone}`}><i aria-hidden="true">{v.tier.glyph}</i>{v.tier.label}</span> },
+    { key: "score", header: "Score", render: ({ v }) => (v.score ? (
+      <span className={`mk-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
+    ) : "—") },
+    { key: "price", header: "Price", align: "right", render: ({ s }) => <PriceRoll value={resolveDisplayPrice(s as any, null)} text={formatInrPrice(s as any, null, "—")} /> },
+    { key: "change", header: "Change %", align: "right", render: ({ v }) => (
+      <span className={`font-semibold ${dirClass(v.change.dir)}`}>
+        {v.change.dir === "up" && <i className="mk-arrow" aria-hidden="true">▲</i>}
+        {v.change.dir === "down" && <i className="mk-arrow" aria-hidden="true">▼</i>}
+        {v.change.text}
+      </span>
+    ) },
+    { key: "trend", header: "30d", render: ({ s }) => <RowSpark symbol={s.symbol} closes={sparkOf(s.symbol)} /> },   // E557 (B3): empty when there is no history
+    { key: "rvol", header: "RVOL", align: "right", render: ({ v }) => (
+      <span className="font-bold text-signal-hold">{v.rvol}{v.slope && <span className="text-signal-buy ml-1">{v.slope}</span>}</span>
+    ) },
+    { key: "trigger", header: "Trigger", render: ({ s }) => <Chip as="span">{s.trigger_type || "—"}</Chip> },
+    { key: "target", header: "Target +5%", align: "right", render: ({ v }) => <span className="text-signal-buy/90">{v.target}</span> },
+    { key: "stop", header: "Trail (VWAP)", align: "right", render: ({ v }) => <span className="text-signal-sell/90">{v.stop}</span> },
+  ];
+}
+type HealthRow = { symbol: string; missing_fields?: string[]; current_price?: number };
+function healthColumns(patching: string | null, batchBusy: boolean, repair: (symbol: string) => void): Column<HealthRow>[] {
+  return [
+    { key: "symbol", header: "Symbol", render: (r) => <b className="font-display tabular-nums text-paper">{r.symbol}</b> },
+    { key: "price", header: "Price", align: "right", render: (r) => <span className="font-display tabular-nums text-signal-sell">{r.current_price && r.current_price > 0 ? `₹${r.current_price.toFixed(2)}` : "—"}</span> },
+    { key: "missing", header: "Missing", render: (r) => (
+      <span className="inline-flex flex-wrap gap-1">{(r.missing_fields || ["price"]).map((m) => <Chip key={m} as="span" tone="bad" symbol="✗">{m}</Chip>)}</span>
+    ) },
+    { key: "action", header: "Action", align: "right", render: (r) => (
+      <Button variant="ghost" size="sm" onClick={() => repair(r.symbol)} disabled={batchBusy} loading={patching === r.symbol}>
+        {patching === r.symbol ? "Patching…" : "Repair"}
+      </Button>
+    ) },
+  ];
 }
 
 const SURPRISE_ACCESS: MarketAccess<SurpriseStock> = { symbol: (r) => r.symbol, score: (r) => r.score, change: (r) => (r as { change_pct?: unknown }).change_pct };   // E541
@@ -599,6 +643,7 @@ export default function SurpriseStocks({
   const scPct = Math.min(100, Math.max(0, Number(scanProg?.percent ?? 0)));
 
   const shownStocks = applyMarketFilter(stocks, SURPRISE_ACCESS, mfilter);   // E541
+  const sparkOf = useSparklines(shownStocks.map((s) => s.symbol));   // E557 (B3)
 
   return (
     <div className="rounded-2xl border border-slate bg-graphite p-4 sm:p-6">
@@ -624,60 +669,35 @@ export default function SurpriseStocks({
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={startPremarket}
-            disabled={pmRunning}
-            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-hold/25 text-signal-hold border border-signal-hold/40 hover:bg-signal-hold/40 transition disabled:opacity-50"
-          >
+          <Button variant="soft" size="sm" onClick={startPremarket} loading={pmRunning}>
             {pmRunning ? "Premarket running…" : "🛠 Run Premarket Feed"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void runMarketAwareQuoteFeed(false)}
-            disabled={quoteFeedBusy || pmRunning}
-            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-prepare/25 text-signal-prepare border border-signal-prepare/40 hover:bg-signal-prepare/40 transition disabled:opacity-50"
-          >
+          </Button>
+          <Button variant="soft" size="sm" onClick={() => void runMarketAwareQuoteFeed(false)} disabled={quoteFeedBusy || pmRunning} loading={quoteFeedBusy}>
             {quoteFeedBusy ? "Bulk quotes…" : "📡 Bulk Quote Feed (50×)"}
-          </button>
-          <button
-            type="button"
-            onClick={() => fetchSurpriseStocks(true)}
-            disabled={loading}
-            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-buy/30 text-signal-buy border border-signal-buy/40 hover:bg-signal-buy/45 transition disabled:opacity-50"
-          >
+          </Button>
+          <Button variant="primary" size="sm" onClick={() => fetchSurpriseStocks(true)} loading={loading}>
             {loading ? "Scanning…" : "Refresh Scan"}
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
             onClick={() => void stopSurprise()}
-            disabled={!busy || stopBusy}
+            disabled={!busy}
+            loading={stopBusy}
             title={
               busy
                 ? "Halt after the current symbol — results already collected are kept"
                 : "Nothing is running"
             }
-            className="font-display tabular-nums text-xs px-4 py-2 rounded-xl bg-signal-sell/25 text-white border border-signal-sell/40 hover:bg-signal-sell/40 transition disabled:opacity-40"
           >
             {stopBusy ? "Stopping…" : "⏹ Stop"}
-          </button>
-          <button
-            type="button"
-            onClick={handleSearchBuysFromSurprise}
-            disabled={stocks.length === 0 || sniperLoading}
-            className="font-display tabular-nums text-xs bg-signal-buy/25 border border-signal-buy/50 text-white rounded-xl px-3 py-2 transition hover:bg-signal-buy/35 disabled:opacity-50 shadow-lg shadow-emerald-900/20"
-          >
+          </Button>
+          <Button variant="soft" size="sm" onClick={handleSearchBuysFromSurprise} disabled={stocks.length === 0} loading={sniperLoading}>
             {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void notifyTopPicks()}
-            disabled={notifyBusy}
-            title="Send the current top 5 Surprise Momentum picks to Telegram"
-            className="font-display tabular-nums text-xs bg-signal-prepare/25 border border-signal-prepare/50 text-signal-prepare rounded-xl px-3 py-2 transition hover:bg-signal-prepare/35 disabled:opacity-50 shadow-lg shadow-sky-900/20"
-          >
+          </Button>
+          <Button variant="soft" size="sm" onClick={() => void notifyTopPicks()} loading={notifyBusy} title="Send the current top 5 Surprise Momentum picks to Telegram">
             {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
-          </button>
+          </Button>
 
         </div>
         {notifyMsg && (
@@ -763,14 +783,9 @@ export default function SurpriseStocks({
               {healthData?.source ? ` · source: ${healthData.source}` : ""}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void fetchSurpriseHealth()}
-            disabled={healthLoading}
-            className="font-display tabular-nums text-xs px-3 py-1.5 bg-graphite text-mist rounded-xl border border-slate hover:bg-slate/40 transition disabled:opacity-50"
-          >
+          <Button variant="ghost" size="sm" onClick={() => void fetchSurpriseHealth()} loading={healthLoading}>
             {healthLoading ? "Auditing…" : auditError ? "🔄 Retry Audit" : "🔄 Refresh Audit"}
-          </button>
+          </Button>
         </div>
         {auditError && !healthLoading && (
           <p className="font-display tabular-nums text-[11px] text-signal-sell mb-3" role="alert">
@@ -817,20 +832,20 @@ export default function SurpriseStocks({
         )}
 
         <div className="flex flex-wrap gap-2 mt-4">
-          <button
-            type="button"
+          <Button
+            variant="soft"
+            size="sm"
             onClick={() => void handleRepairBatchMissing()}
+            loading={batchRepairBusy}
             disabled={
-              batchRepairBusy ||
               healthLoading ||
               // See FeedHealthPanel: enable on the full repairable set
               // (incomplete_stocks), not the price-only missing_data count.
               ((healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0) === 0)
             }
-            className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl bg-signal-sell/20 text-white border border-signal-sell/40 hover:bg-signal-sell/35 transition disabled:opacity-50"
           >
             {batchRepairBusy ? "Repairing…" : `⚡ Repair All Missing (${Math.min(100, healthData?.incomplete_stocks?.length ?? healthData?.missing_data ?? 0)})`}
-          </button>
+          </Button>
         </div>
         {repairMsg && (
           <p className={`font-display tabular-nums text-[11px] mt-2 ${repairMsg.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>
@@ -839,49 +854,13 @@ export default function SurpriseStocks({
         )}
 
         {(healthData?.incomplete_stocks?.length ?? 0) > 0 && (
-          <div className="mt-4 overflow-x-auto rounded-xl border border-slate/60">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="text-mist/50 border-b border-slate/60 font-display tabular-nums text-[10px] uppercase tracking-wider">
-                  <th className="py-2 px-3">Symbol</th>
-                  <th className="py-2 px-3">Price</th>
-                  <th className="py-2 px-3">Missing</th>
-                  <th className="py-2 px-3 text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(healthData?.incomplete_stocks || []).map((stock) => (
-                  <tr key={stock.symbol} className="border-b border-slate/40 hover:bg-ink/40">
-                    <td className="py-2 px-3 font-display tabular-nums font-semibold text-paper">{stock.symbol}</td>
-                    <td className="py-2 px-3 font-display tabular-nums text-signal-sell">
-                      {stock.current_price && stock.current_price > 0
-                        ? `₹${stock.current_price.toFixed(2)}`
-                        : "—"}
-                    </td>
-                    <td className="py-2 px-3">
-                      {(stock.missing_fields || ["price"]).map((m) => (
-                        <span
-                          key={m}
-                          className="inline-block bg-signal-sell/40 text-signal-sell px-1.5 py-0.5 rounded mr-1 text-[10px] uppercase"
-                        >
-                          {m}
-                        </span>
-                      ))}
-                    </td>
-                    <td className="py-2 px-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => void handleRepairSingle(stock.symbol)}
-                        disabled={patchingSymbol === stock.symbol || batchRepairBusy}
-                        className="font-display tabular-nums text-[11px] px-2 py-1 bg-graphite text-mist rounded border border-slate hover:bg-slate/40 disabled:opacity-50"
-                      >
-                        {patchingSymbol === stock.symbol ? "Patching…" : "Repair"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="mt-4">
+            <DataTable
+              dense
+              columns={healthColumns(patchingSymbol, batchRepairBusy, (sym) => void handleRepairSingle(sym))}
+              rows={healthData?.incomplete_stocks || []}
+              rowKey={(stock) => stock.symbol}
+            />
           </div>
         )}
       </div>
@@ -907,85 +886,20 @@ export default function SurpriseStocks({
       )}
 
       {view === "table" && (
-      <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate/80 text-mist/50 font-display tabular-nums text-[10px] uppercase tracking-wider">
-              <th className="py-2.5 px-3">Symbol</th>
-              <th className="py-2.5 px-3">Tier</th>
-              <th className="py-2.5 px-3">Score</th>
-              <th className="py-2.5 px-3">Price</th>
-              <th className="py-2.5 px-3">Change %</th>
-              <th className="py-2.5 px-3">RVOL</th>
-              <th className="py-2.5 px-3">Trigger</th>
-              <th className="py-2.5 px-3">Target +5%</th>
-              <th className="py-2.5 px-3">Trail (VWAP)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {shownStocks.map((s) => {
-              const v = surpriseRowView(s);   // E161: formatted text, dashes for missing values
-              return (
-              <tr key={s.symbol} className={`mk-srow ${v.change.dir ?? "flat"} border-b border-slate/40 hover:bg-ink/40 text-sm transition`}>
-                <td className="py-2.5 px-3">
-                  <button
-                    type="button"
-                    onClick={() => onSelect?.(s.symbol)}
-                    className="font-display tabular-nums font-semibold text-paper hover:text-signal-buy"
-                  >
-                    {s.symbol}
-                  </button>
-                </td>
-                <td className="py-2.5 px-3">
-                  <span className={`mk-tier ${v.tier.tone}`}><i aria-hidden="true">{v.tier.glyph}</i>{v.tier.label}</span>
-                </td>
-                <td className="py-2.5 px-3">
-                  {v.score ? (
-                    <span className={`mk-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
-                  ) : "—"}
-                </td>
-                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-paper">
-                  <PriceRoll value={resolveDisplayPrice(s as any, null)} text={formatInrPrice(s as any, null, "—")} />
-                </td>
-                <td className={`py-2.5 px-3 font-display tabular-nums text-xs font-semibold ${v.change.dir === "down" ? "text-signal-sell" : v.change.dir === "up" ? "text-signal-buy" : "text-paper"}`}>
-                  {v.change.dir === "up" && <i className="mk-arrow" aria-hidden="true">▲</i>}
-                  {v.change.dir === "down" && <i className="mk-arrow" aria-hidden="true">▼</i>}
-                  {v.change.text}
-                </td>
-                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-hold font-bold">
-                  {v.rvol}
-                  {v.slope && <span className="text-signal-buy ml-1">{v.slope}</span>}
-                </td>
-                <td className="py-2.5 px-3">
-                  <span className="font-display tabular-nums text-[10px] px-2 py-0.5 rounded bg-signal-prepare/60 text-signal-prepare border border-signal-prepare/40">
-                    {s.trigger_type || "—"}
-                  </span>
-                </td>
-                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-buy/90">{v.target}</td>
-                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-sell/90">{v.stop}</td>
-              </tr>
-              );
-            })}
-            {isFilteredEmpty(shownStocks.length, stocks.length) && (
-              <tr><td colSpan={9}><NoMatch query={mfilter.query} onClear={() => setMfilter(NO_FILTER)} /></td></tr>
-            )}
-            {stocks.length === 0 && !loading && (
-              <tr>
-                <td colSpan={9} className="py-10 text-center font-display tabular-nums text-xs text-mist/45">
-                  No surprise breakouts or early-building setups right now.
-                </td>
-              </tr>
-            )}
-            {loading && stocks.length === 0 && (
-              <tr>
-                <td colSpan={9} className="py-10 text-center font-display tabular-nums text-xs text-mist/50">
-                  Scanning universe… {scanProg ? `${scanProg.processed}/${scanProg.total}` : ""}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+        <DataTable
+          columns={surpriseColumns(sparkOf)}
+          rows={shownStocks.map((s) => ({ s, v: surpriseRowView(s) }))}   // E161: formatted text, dashes for missing values
+          rowKey={(r) => r.s.symbol}
+          rowClass={(r) => `mk-srow ${r.v.change.dir ?? "flat"}`}
+          onRowClick={onSelect ? (r) => onSelect(r.s.symbol) : undefined}
+          empty={
+            isFilteredEmpty(shownStocks.length, stocks.length)
+              ? <NoMatch query={mfilter.query} onClear={() => setMfilter(NO_FILTER)} />
+              : loading
+                ? <Empty title={`Scanning universe… ${scanProg ? `${scanProg.processed}/${scanProg.total}` : ""}`} />
+                : <Empty title="No surprise breakouts or early-building setups right now." />
+          }
+        />
       )}
 
       <BuySniperModal

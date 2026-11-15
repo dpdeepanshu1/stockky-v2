@@ -10,6 +10,7 @@ import { getRealTradeApiUrl, setRealTradeApiUrl, getSessionToken as getRtToken, 
 import { getPositionStocksApiUrl, setPositionStocksApiUrl, getSessionToken as getPsToken, setSessionToken as setPsToken, positionStocksApi } from "./positionStocksApi";
 import { getApiUrl } from "./api";
 import { getFnoApiUrl, fnoToken } from "./fnoApi";
+import type { AgentRunResult, AgentStatus } from "./agentView";
 import type { OverlayRevertResult, OverlayView, WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
@@ -240,6 +241,10 @@ export const runnerApi = {
   autoStatus: () => R<AutoStatus>("/autocalib/status"),
   autoSettings: (body: { enabled?: boolean; dry_run?: boolean; pinned?: string[] }) => R<AutoSettings>("/autocalib/settings", { method: "PUT", body: JSON.stringify(body) }),
   autoRun: (dry_run?: boolean) => R<AutoReport>("/autocalib/run", { method: "POST", body: JSON.stringify(dry_run === undefined ? {} : { dry_run }) }),
+  // round 536: the nightly AI idea source (agent.py). It only suggests; none of these calls sets a switch.
+  agentStatus: () => R<AgentStatus>("/agent/status"),
+  agentRun: (mode?: "report" | "propose") => R<AgentRunResult>("/agent/run", { method: "POST", body: JSON.stringify(mode ? { mode } : {}) }),
+  agentResume: () => R<{ resumed: boolean; mode: string }>("/agent/resume", { method: "POST", body: "{}" }),
   // Part 1 step 5: Market Weather (shadow). /weather/* on calibration-runner-service; none of these changes a trading switch.
   weatherStatus: () => R<WeatherStatus>("/weather/status"),
   weatherLog: (limit = 100) => R<{ rows: WeatherLogRow[] }>(`/weather/log?limit=${limit}`),

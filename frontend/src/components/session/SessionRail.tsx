@@ -4,6 +4,7 @@
 // The clock tick is a plain setInterval (no network). Motion (a one-time sweep and a ring on the running slot) is in design-v8.css and is off under reduced-motion, TV mode and "Animations: Off".
 import { useEffect, useState } from "react";
 import { sessionView, type SessionService } from "../../sessionView";
+import { Card } from "../kit/Card";
 
 export default function SessionRail({ service }: { service: SessionService }) {
   const [now, setNow] = useState(() => new Date());
@@ -13,7 +14,7 @@ export default function SessionRail({ service }: { service: SessionService }) {
   }, []);
   const v = sessionView(service, now);
   return (
-    <section className={`w-day ${v.weekday ? "" : "off"}`} aria-label={v.title} data-testid={`session-rail-${service}`}>
+    <Card quiet className={`w-day ${v.weekday ? "" : "off"}`} aria-label={v.title} data-testid={`session-rail-${service}`}>
       <header className="w-day-head">
         <h3>{v.title}</h3>
         <span className="w-day-clock">{v.weekday ? "IST" : "weekend"}</span>
@@ -31,6 +32,6 @@ export default function SessionRail({ service }: { service: SessionService }) {
         </ol>
       </div>
       <p className="w-day-words" data-testid="session-words">{v.words}</p>
-    </section>
+    </Card>
   );
 }

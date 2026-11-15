@@ -11,6 +11,7 @@ import { Skeleton } from "../../ui/motion";
 import type { Mode } from "../types";
 import { entryReason } from "../../../setupView";   // E285 round 104: Entry reason on each closed trade
 import {
+import { Button } from "../../kit";   // round 537
   HISTORY_RANGES, daysFor, equityCurve, heldLabel, inRange, insights, newestFirst, pctLabel, pnlOf, priceLabel,
   reasonLabel, signedInr, summarize, toCsv, type HistoryRange,
 } from "../history";
@@ -106,14 +107,14 @@ export function HistoryTab({ mode, loggedIn }: HistoryTabProps) {
         <input type="search" className="hx-search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a symbol" aria-label="Find a symbol" />
         <span className="hx-toolbar-gap" />
         {updated && <span className="hx-updated">Updated {updated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })}</span>}
-        <button type="button" className="hx-btn" onClick={() => void load()} disabled={loading || needsLogin}>{loading ? "Loading…" : "↻ Refresh"}</button>
-        <button type="button" className="hx-btn" onClick={download} disabled={!rows.length}>⤓ CSV</button>
+        <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading || needsLogin}>{loading ? "Loading…" : "↻ Refresh"}</Button>
+        <Button variant="ghost" size="sm" onClick={download} disabled={!rows.length}>⤓ CSV</Button>
       </div>
 
       {needsLogin ? (
         <EmptyState icon="lock" title="Log in to see your real trades" hint="Open the Overview tab and sign in. The history is read-only." />
       ) : error && records == null ? (
-        <div className="ra-alert" role="alert"><span>{error}</span><button onClick={() => void load()} aria-label="Retry">↻</button></div>
+        <div className="ra-alert" role="alert"><span>{error}</span><Button variant="ghost" size="sm" onClick={() => void load()} aria-label="Retry">↻</Button></div>
       ) : records == null ? (
         <div className="hx-skels" aria-busy="true">
           <Skeleton h={78} /><Skeleton h={120} /><Skeleton h={54} /><Skeleton h={54} />

@@ -1,4 +1,4 @@
-import { decisionStyle } from "../decisionStyle";
+import { Card, Chip, ChipList, type ChipTone } from "./kit";   // E538 (F3 part 2)
 
 type Row = {
   symbol: string;
@@ -40,7 +40,7 @@ export default function SignalStream({
   });
 
   return (
-    <section className="terminal-panel mb-4">
+    <Card className="mb-4">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         <div>
           <h3 className="topo-title" style={{ margin: 0 }}>
@@ -68,7 +68,10 @@ export default function SignalStream({
         <p className="mono text-xs text-mist py-6 text-center">No signals in this filter — run Market Scan.</p>
       ) : (
         filtered.slice(0, 12).map((r) => {
-          const ds = decisionStyle[r.decision || ""] ?? decisionStyle["DO NOT BUY"];
+          const dec = (r.decision || "").toUpperCase();
+          // E538: the decision pill is a kit chip with a symbol. HOLD / WAIT is neutral and DO NOT BUY / AVOID is down (they used to share the PREPARE look).
+          const pillTone: ChipTone = dec.includes("BUY NOW") ? "up" : dec.includes("PREPARE") ? "warn" : dec.includes("DO NOT") || dec.includes("AVOID") ? "down" : "neutral";
+          const pillSym = pillTone === "up" ? "▲" : pillTone === "warn" ? "◆" : pillTone === "down" ? "▼" : "●";
           const prov = r.provisional || r.data_quality?.provisional;
           const pillars = r.data_quality?.pillars;
           return (
@@ -85,17 +88,7 @@ export default function SignalStream({
                   <div className="signal-sym">{r.symbol}</div>
                   <div className="signal-name">{r.sector || "NSE"}</div>
                 </div>
-                <span
-                  className={
-                    (r.decision || "").includes("BUY NOW")
-                      ? "signal-pill-buy"
-                      : (r.decision || "").includes("PREPARE")
-                        ? "signal-pill-prepare"
-                        : "signal-pill-prepare"
-                  }
-                >
-                  {r.decision || "—"}
-                </span>
+                <Chip as="span" tone={pillTone} symbol={pillSym}>{r.decision || "—"}</Chip>
               </div>
               {prov && (
                 <div className="mono text-[10px] text-signal-hold mb-2 uppercase tracking-wide">
@@ -125,13 +118,13 @@ export default function SignalStream({
                 </div>
               </div>
               {pillars && (
-                <div className="pillar-row">
+                <ChipList label="Data pillars" className="mt-1">
                   {Object.entries(pillars).map(([k, v]) => (
-                    <span key={k} className={`pillar-chip ${v ? "pass" : "fail"}`}>
+                    <Chip key={k} tone={v ? "ok" : "bad"} symbol={v ? "✓" : "✗"}>
                       {k.slice(0, 4).toUpperCase()} {v ? "PASS" : "MISS"}
-                    </span>
+                    </Chip>
                   ))}
-                </div>
+                </ChipList>
               )}
               {r.natural_language_summary && (
                 <p className="cc-blurb mt-2" style={{ marginBottom: 0 }}>
@@ -142,7 +135,7 @@ export default function SignalStream({
           );
         })
       )}
-    </section>
+    </Card>
   );
 }
 

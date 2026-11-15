@@ -9,7 +9,7 @@ import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { decisionTally, ruleCounts, prepareNoteLines } from "../structureView";
-import { Button } from "./kit/Button";
+import { Button, Card, Chip } from "./kit";   // E538 (F3 part 2)
 
 interface Props {
   result: ScanResult;
@@ -496,12 +496,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           {/* Left: Back + stats */}
           <div className="flex items-center gap-3 w-full sm:w-auto">
-            <button
-              onClick={onBack}
-              className="font-display tabular-nums text-xs text-mist hover:text-paper transition flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-graphite/40 hover:bg-graphite/60 border border-slate/40"
-            >
-              ← Back
-            </button>
+            <Button variant="ghost" size="sm" onClick={onBack}>← Back</Button>
             <span className="font-display tabular-nums text-xs text-mist/70">
               Scanned: <strong className="text-paper">{result.scanned}</strong>
               {" / "}
@@ -515,29 +510,12 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
 
           {/* Right: action buttons */}
           <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-            <button
-              type="button"
-              onClick={handleRefreshPrepareToBuy}
-              disabled={isRefreshing}
-              className="font-display tabular-nums text-xs px-3 py-2 rounded-xl bg-signal-hold/80 hover:bg-signal-hold text-white font-bold transition disabled:opacity-50 flex-1 sm:flex-none"
-            >
-              {isRefreshing ? "⏳ Syncing…" : "🔄 Refresh 'Prepare to Buy'"}
-            </button>
-            <button
-              type="button"
-              onClick={handleSearchBuys}
-              disabled={!result || sniperLoading}
-              className="font-display tabular-nums text-xs bg-signal-buy hover:bg-signal-buy text-white font-bold rounded-xl px-4 py-2 transition disabled:opacity-50 flex items-center justify-center gap-2 shadow-md hover:shadow-emerald-900/40 animate-pulse flex-1 sm:flex-none"
-            >
-              {sniperLoading ? (
-                <>
-                  <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-white animate-spin"></span>
-                  Sniping…
-                </>
-              ) : (
-                "🎯 Search for Buy Stocks (1-4)"
-              )}
-            </button>
+            <Button variant="soft" size="sm" onClick={handleRefreshPrepareToBuy} loading={isRefreshing}>
+              {isRefreshing ? "Syncing…" : "🔄 Refresh 'Prepare to Buy'"}
+            </Button>
+            <Button variant="primary" size="sm" onClick={handleSearchBuys} disabled={!result || sniperLoading} loading={sniperLoading}>
+              {sniperLoading ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
+            </Button>
           </div>
         </div>
         {refreshMsg && (
@@ -704,13 +682,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               >
                 Add Balance / Open Trades
               </Button>
-              <button
-                type="button"
-                className="font-display tabular-nums text-xs px-3 py-1.5 rounded-xl border border-signal-hold/40 text-signal-hold hover:bg-signal-hold/20"
-                onClick={() => setBalanceLow(null)}
-              >
-                Dismiss
-              </button>
+              <Button variant="ghost" size="sm" onClick={() => setBalanceLow(null)}>Dismiss</Button>
             </div>
           </div>
         </div>
@@ -744,13 +716,9 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               <p className="text-mist/60 text-sm mb-2">Worth watching:</p>
               <div className="flex flex-wrap justify-center gap-3">
                 {uniqueBySymbol(result.watchlist_candidates || []).slice(0, 6).map((d) => (
-                  <button
-                    key={d.symbol}
-                    onClick={() => onSelect(d.symbol)}
-                    className="font-display tabular-nums text-sm border border-slate/60 px-4 py-2 rounded-xl hover:border-mist/60 hover:text-paper transition"
-                  >
+                  <Button key={d.symbol} variant="ghost" onClick={() => onSelect(d.symbol)}>
                     {d.symbol} <span className="text-mist/50">({d.combined_score})</span>
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -869,30 +837,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                       <div className="flex items-center justify-end gap-2 flex-wrap">
                         {(r.decision === "BUY NOW" || r.decision === "PREPARE TO BUY") && (
                           <>
-                            <button
-                              onClick={() => void sendToRealTrade(r, "DEMO")}
-                              disabled={sendingToTrade === `${r.symbol}:DEMO`}
-                              title="Queue this stock for the Real Automatic Trade DEMO cycle"
-                              className="text-[10px] text-signal-buy hover:text-white transition uppercase tracking-wide disabled:opacity-50"
-                            >
-                              {sendingToTrade === `${r.symbol}:DEMO` ? "…" : "→ DEMO"}
-                            </button>
-                            <button
-                              onClick={() => void sendToRealTrade(r, "REAL")}
-                              disabled={sendingToTrade === `${r.symbol}:REAL`}
-                              title="Queue this stock for the Real Automatic Trade REAL cycle (requires admin login + armed)"
-                              className="text-[10px] text-signal-sell hover:text-white transition uppercase tracking-wide disabled:opacity-50"
-                            >
-                              {sendingToTrade === `${r.symbol}:REAL` ? "…" : "→ REAL"}
-                            </button>
+                            <Button variant="soft" size="sm" onClick={() => void sendToRealTrade(r, "DEMO")} loading={sendingToTrade === `${r.symbol}:DEMO`} title="Queue this stock for the Real Automatic Trade DEMO cycle">
+                              → DEMO
+                            </Button>
+                            <Button variant="danger" size="sm" onClick={() => void sendToRealTrade(r, "REAL")} loading={sendingToTrade === `${r.symbol}:REAL`} title="Queue this stock for the Real Automatic Trade REAL cycle (requires admin login + armed)">
+                              → REAL
+                            </Button>
                           </>
                         )}
-                        <button
-                          onClick={() => onSelect(r.symbol)}
-                          className="text-[10px] text-signal-prepare hover:text-paper transition uppercase tracking-wide"
-                        >
-                          View →
-                        </button>
+                        <Button variant="ghost" size="sm" onClick={() => onSelect(r.symbol)}>View →</Button>
                       </div>
                       {sendTradeMsg && sendTradeMsg.symbol === r.symbol && (
                         <p className={`text-[9px] mt-1 ${sendTradeMsg.ok ? "text-signal-buy/80" : "text-signal-sell/80"}`}>
@@ -995,10 +948,16 @@ function TopPick({
   const isAdding = addingWatchlist === data.symbol;
   const stamps = deriveHorizonStamps(data);
 
+  const open = () => onSelect(data.symbol);
+  // E538: the card is a kit Card that opens the analysis (it was a <button> with a second "button" inside it). The decision colour stays on the decision text only.
   return (
-    <button
-      onClick={() => onSelect(data.symbol)}
-      className={`text-left rounded-2xl border ${style.border} ${style.bg} p-5 sm:p-6 hover:brightness-110 transition group h-full min-h-[11.5rem] flex flex-col w-full`}
+    <Card
+      role="button"
+      tabIndex={0}
+      aria-label={`${data.symbol}, ${data.decision}. Open full analysis`}
+      onClick={open}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(); } }}
+      className="text-left hover:brightness-110 transition group h-full min-h-[11.5rem] flex flex-col w-full cursor-pointer"
     >
       <div className="flex items-start justify-between mb-3 gap-2">
         <span className="font-display tabular-nums text-[10px] text-mist/60 shrink-0">#{rank}</span>
@@ -1012,18 +971,7 @@ function TopPick({
       {stamps.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-3">
           {stamps.map((s) => (
-            <span
-              key={s.key}
-              className={
-                s.key === "short"
-                  ? "font-display tabular-nums text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-signal-prepare/40 bg-signal-prepare/15 text-signal-prepare"
-                  : s.key === "mid"
-                  ? "font-display tabular-nums text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-signal-prepare/40 bg-signal-prepare/15 text-signal-prepare"
-                  : "font-display tabular-nums text-[9px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-signal-hold/40 bg-signal-hold/15 text-signal-hold"
-              }
-            >
-              {s.label}
-            </span>
+            <Chip key={s.key} as="span" tone={s.key === "short" || s.key === "mid" ? "neutral" : "warn"}>{s.label}</Chip>
           ))}
         </div>
       )}
@@ -1035,29 +983,11 @@ function TopPick({
         <span className="font-display tabular-nums text-[10px] text-mist/50 group-hover:text-mist transition">
           View full analysis →
         </span>
-        <span
-          role="button"
-          tabIndex={0}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAddToWatchlist(data.symbol);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.stopPropagation();
-              onAddToWatchlist(data.symbol);
-            }
-          }}
-          className={`text-[10px] font-display tabular-nums transition border px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer ${
-            isAdding
-              ? "bg-signal-buy/20 border-signal-buy text-signal-buy"
-              : "text-signal-prepare hover:text-paper border-signal-prepare/30"
-          }`}
-        >
+        <Button variant="ghost" size="sm" loading={isAdding} onClick={(e) => { e.stopPropagation(); onAddToWatchlist(data.symbol); }}>
           {isAdding ? "Adding…" : "+ Watchlist"}
-        </span>
+        </Button>
       </div>
-    </button>
+    </Card>
   );
 }
 
@@ -1076,9 +1006,14 @@ function CandidateCard({
   const isAdding = addingWatchlist === data.symbol;
 
   return (
-    <div
+    <Card
+      quiet
+      role="button"
+      tabIndex={0}
+      aria-label={`${data.symbol}, ${data.decision}. Open analysis`}
       onClick={() => onSelect(data.symbol)}
-      className="border border-slate/60 bg-graphite/30 rounded-2xl p-4 hover:border-mist/60 cursor-pointer transition-all duration-300 hover:shadow-glow-sm"
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSelect(data.symbol); } }}
+      className="cursor-pointer hover:brightness-110 transition"
     >
       <div className="flex items-center justify-between">
         <div>
@@ -1090,25 +1025,10 @@ function CandidateCard({
           <div className="text-xs text-mist/60">Score: {data.combined_score}</div>
         </div>
       </div>
-      <button
-        onClick={(e) => { e.stopPropagation(); onAddToWatchlist(data.symbol); }}
-        disabled={isAdding}
-        className={`mt-2 text-[10px] font-display tabular-nums transition border px-2 py-0.5 rounded ${
-          isAdding 
-            ? "bg-signal-buy/20 border-signal-buy text-signal-buy" 
-            : "text-signal-prepare hover:text-paper border-signal-prepare/30"
-        }`}
-      >
-        {isAdding ? (
-          <span className="flex items-center gap-1">
-            <span className="inline-block w-3 h-3 rounded-full border-2 border-t-transparent border-signal-buy animate-spin"></span>
-            Adding...
-          </span>
-        ) : (
-          "+ Watchlist"
-        )}
-      </button>
-    </div>
+      <Button variant="ghost" size="sm" className="mt-2" loading={isAdding} onClick={(e) => { e.stopPropagation(); onAddToWatchlist(data.symbol); }}>
+        {isAdding ? "Adding…" : "+ Watchlist"}
+      </Button>
+    </Card>
   );
 }
 

@@ -1,7 +1,7 @@
 // components/kit/KitPreview.tsx (E534) - every kit component on one page, light and dark. Open the app with ?kit=1 (main.tsx loads this page instead of the app).
 // Sample numbers below are made up for the preview only; nothing here calls a service.
 import { useState } from "react";
-import { Button, Card, CardHeader, DataTable, Empty, ErrorState, Field, Sheet, SkeletonLines, Stat, Stats, StatusPill, Switch, Tabs, type Column, type PillState } from "./index";
+import { Button, Card, CardHeader, Chip, ChipList, DataTable, Empty, ErrorState, Field, Sheet, SkeletonLines, Stat, Stats, StatusPill, Switch, Tabs, type Column, type PillState } from "./index";
 
 type Row = { sym: string; ltp: number; chg: number; qty: number };
 const ROWS: Row[] = [
@@ -44,6 +44,18 @@ export default function KitPreview() {
       <Card>
         <CardHeader title="StatusPill" sub="Colour and shape both carry the state" />
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{PILLS.map((p) => <StatusPill key={p} state={p} />)}</div>
+      </Card>
+
+      <Card>
+        <CardHeader title="Chip" sub="A toned chip always carries a symbol" />
+        <ChipList>
+          <Chip>3 open · ₹18,400 in</Chip>
+          <Chip tone="ok" symbol="✓">Broker stop set</Chip>
+          <Chip tone="warn" symbol="⚠">2 near stop</Chip>
+          <Chip tone="bad" symbol="✕">Feed down</Chip>
+          <Chip tone="up" symbol="▲">now +₹320</Chip>
+          <Chip tone="down" symbol="▼">now -₹140</Chip>
+        </ChipList>
       </Card>
 
       <Card flush>

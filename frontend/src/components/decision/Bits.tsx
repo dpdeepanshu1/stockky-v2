@@ -1,5 +1,6 @@
 // E536 (redesign round 4): the small display pieces of the decision card, moved out of DecisionCard.tsx (code unchanged except `export`).
 import { useState } from "react";
+import { Button, Card, Chip } from "../kit";   // E538 (F3 part 2): the kit card, ghost button and chip
 
 // ── Helper Components ──
 
@@ -51,7 +52,7 @@ export function ReasonList({ title, items, maxItems }: { title: string; items: s
   const visibleItems = shouldTruncate ? items.slice(0, maxItems) : items;
 
   return (
-    <div className="rounded-2xl border border-slate bg-graphite p-5">
+    <Card>
       <h3 className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-3">{title}</h3>
       {hasItems ? (
         <>
@@ -64,18 +65,15 @@ export function ReasonList({ title, items, maxItems }: { title: string; items: s
             ))}
           </ul>
           {maxItems != null && items.length > maxItems && (
-            <button
-              onClick={() => setExpanded(!expanded)}
-              className="mt-2 text-[10px] font-display tabular-nums uppercase tracking-wider text-mist/40 hover:text-mist/70 transition"
-            >
+            <Button variant="ghost" size="sm" className="mt-2" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
               {expanded ? "Show less" : `+${items.length - maxItems} more`}
-            </button>
+            </Button>
           )}
         </>
       ) : (
         <p className="text-sm text-mist/40 italic">No specific {title.toLowerCase()} insights available</p>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -104,9 +102,9 @@ export function EventScoreBadge({ data }: { data: any }) {
     data?.event_score_raw_delta ?? data?.event_data?.event_score_raw_delta ?? data?.events?.event_score_raw_delta;
   if (score == null) return null;
 
-  const tone = score >= 65 ? "text-signal-buy border-signal-buy/40 bg-signal-buy/10"
-    : score >= 50 ? "text-signal-hold border-signal-hold/30 bg-signal-hold/10"
-    : "text-signal-sell border-signal-sell/40 bg-signal-sell/10";
+  // E538: the score and contributor badges are kit chips; the direction is a symbol as well as a colour.
+  const scoreTone = score >= 65 ? "up" : score >= 50 ? "warn" : "down";
+  const scoreSym = score >= 65 ? "▲" : score >= 50 ? "◆" : "▼";
 
   const top = [...breakdown]
     .sort((a, b) => Math.abs(b.decayed_impact ?? 0) - Math.abs(a.decayed_impact ?? 0))
@@ -114,32 +112,33 @@ export function EventScoreBadge({ data }: { data: any }) {
 
   return (
     <div className="mt-2 mb-3 flex flex-wrap items-center gap-2">
-      <span className={`font-display tabular-nums text-[11px] px-2 py-1 rounded-xl border ${tone}`}>
+      <Chip as="span" tone={scoreTone} symbol={scoreSym}>
         Event Score {Math.round(score)}/100
-      </span>
+      </Chip>
       {rawDelta != null && (
-        <span
-          className="font-display tabular-nums text-[10px] px-1.5 py-0.5 rounded border text-mist/70 border-slate/40 bg-graphite/40"
+        <Chip
+          as="span"
           title="Natural/raw score before the 0-100 neutral-50 compression — the signed sum of every event's recency-decayed impact"
         >
           natural {rawDelta >= 0 ? "+" : ""}
           {rawDelta}
-        </span>
+        </Chip>
       )}
-      {top.map((b, i) => (
-        <span
-          key={i}
-          className={`font-display tabular-nums text-[10px] px-1.5 py-0.5 rounded border ${
-            (b.decayed_impact ?? 0) >= 0
-              ? "text-signal-buy/90 border-signal-buy/25 bg-signal-buy/5"
-              : "text-signal-sell/90 border-signal-sell/25 bg-signal-sell/5"
-          }`}
-          title={`base ${b.base_impact} · age ${b.age_days ?? "?"}d`}
-        >
-          {String(b.type || "").replace(/_/g, " ")} {(b.decayed_impact ?? 0) >= 0 ? "+" : ""}
-          {b.decayed_impact}
-        </span>
-      ))}
+      {top.map((b, i) => {
+        const pos = (b.decayed_impact ?? 0) >= 0;
+        return (
+          <Chip
+            as="span"
+            key={i}
+            tone={pos ? "up" : "down"}
+            symbol={pos ? "▲" : "▼"}
+            title={`base ${b.base_impact} · age ${b.age_days ?? "?"}d`}
+          >
+            {String(b.type || "").replace(/_/g, " ")} {pos ? "+" : ""}
+            {b.decayed_impact}
+          </Chip>
+        );
+      })}
     </div>
   );
 }

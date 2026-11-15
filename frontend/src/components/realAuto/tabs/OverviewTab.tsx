@@ -11,6 +11,7 @@ import DhanMoneyCard from "../../DhanMoneyCard";   // Round 270
 import { openCharges, afterCharges } from "../../../moneyView";
 import SessionRail from "../../session/SessionRail";   // E277: the trading-day rail
 import { ArmStepper } from "../../trading/ArmStepper";   // E537
+import { Button } from "../../kit";   // round 537
 
 // E66 - E31 step 10: the "overview" tab, moved out of RealAutoTrade.tsx (JSX unchanged). PortfolioSummary and GateStep moved with it
 // (only this tab used them). State and handlers stay in RealAutoTrade and arrive as props.
@@ -209,35 +210,32 @@ export function OverviewTab({
                 {/* Login form already shown above when not logged in; here only if
                     logged in but gate not met */}
                 {status && !gate3 && mode === "REAL" && gate1 && gate2 && (
-                  <button onClick={() => void doConfirmRisk()}
-                    className="w-full py-2 rounded-xl bg-signal-hold/10 border border-signal-hold/30 font-display tabular-nums text-xs text-signal-hold">
+                  <Button variant="soft" block onClick={() => void doConfirmRisk()}>
                     Confirm risk configuration
-                  </button>
+                  </Button>
                 )}
                 {status && !gate3 && mode === "DEMO" && (
-                  <button onClick={() => void doConfirmRisk()}
-                    className="w-full py-2 rounded-xl bg-signal-hold/10 border border-signal-hold/30 font-display tabular-nums text-xs text-signal-hold">
+                  <Button variant="soft" block onClick={() => void doConfirmRisk()}>
                     Confirm risk configuration
-                  </button>
+                  </Button>
                 )}
 
                 <div className="flex gap-2 mt-2">
                   {armed ? (
-                    <button onClick={() => void doDisarm()} className="flex-1 py-2.5 rounded-xl bg-signal-sell/10 border border-signal-sell/30 font-display tabular-nums text-xs text-signal-sell">
+                    <Button variant="danger" className="flex-1" onClick={() => void doDisarm()}>
                       🛑 DISARM
-                    </button>
+                    </Button>
                   ) : (
-                    <button onClick={() => void doArm()} disabled={loading || !gate1 || !gate2 || !gate3}
-                      className="flex-1 py-2.5 rounded-xl bg-signal-buy/10 border border-signal-buy/30 font-display tabular-nums text-xs text-signal-buy disabled:opacity-30">
+                    <Button variant="primary" className="flex-1" onClick={() => void doArm()} disabled={loading || !gate1 || !gate2 || !gate3}>
                       {loading ? "Arming…" : "⚡ ARM"}
-                    </button>
+                    </Button>
                   )}
-                  <button onClick={() => void doEmergencyPause()} className="px-4 py-2.5 rounded-xl bg-signal-sell/30 border border-signal-sell/40 font-display tabular-nums text-xs text-signal-sell">
+                  <Button variant="danger" onClick={() => void doEmergencyPause()}>
                     🚨 PAUSE ALL
-                  </button>
-                  <button onClick={() => setShowCloseAll(true)} className="px-4 py-2.5 rounded-xl bg-signal-sell/40 border border-signal-sell font-display tabular-nums text-xs text-signal-sell">
+                  </Button>
+                  <Button variant="danger" onClick={() => setShowCloseAll(true)}>
                     🚨 CLOSE ALL
-                  </button>
+                  </Button>
                   {showCloseAll && (
                     <CloseAllDialog open={showCloseAll}
                       title={`Close all and disarm — ${mode}`}
@@ -258,10 +256,9 @@ export function OverviewTab({
                         why the account shows connected while this happens.
                       </p>
                       <div className="flex items-center gap-2 mt-2">
-                        <button onClick={() => void doNetworkCheck()} disabled={networkCheckBusy}
-                          className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold disabled:opacity-40">
+                        <Button variant="soft" size="sm" onClick={() => void doNetworkCheck()} disabled={networkCheckBusy}>
                           {networkCheckBusy ? "Checking…" : "Check outbound IP"}
-                        </button>
+                        </Button>
                         {networkCheck?.outbound_ip && (
                           <code className="font-display tabular-nums text-[10px] text-paper bg-ink px-2 py-1 rounded">{networkCheck.outbound_ip}</code>
                         )}
@@ -338,18 +335,15 @@ export function OverviewTab({
                         </p>
                         {edisSummary?.verified_today !== true && (
                           <div className="flex gap-2 mt-2">
-                            <button onClick={() => void doEdisRequestTpin()} disabled={edisBusy}
-                              className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold disabled:opacity-40">
+                            <Button variant="soft" size="sm" onClick={() => void doEdisRequestTpin()} disabled={edisBusy}>
                               {edisBusy ? "Working…" : "1. Request T-PIN"}
-                            </button>
-                            <button onClick={() => void doEdisAuthorize()} disabled={edisBusy}
-                              className="font-display tabular-nums text-[10px] px-3 py-1 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 text-signal-prepare disabled:opacity-40">
+                            </Button>
+                            <Button variant="soft" size="sm" onClick={() => void doEdisAuthorize()} disabled={edisBusy}>
                               {edisBusy ? "Working…" : "2. Authorize on CDSL"}
-                            </button>
-                            <button onClick={() => void loadStatus(mode)} disabled={edisBusy}
-                              className="font-display tabular-nums text-[10px] text-mist hover:text-paper disabled:opacity-40">
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => void loadStatus(mode)} disabled={edisBusy}>
                               ↻ Re-check
-                            </button>
+                            </Button>
                           </div>
                         )}
                       </div>
@@ -380,15 +374,15 @@ export function OverviewTab({
                       ) : null}
 
                       <div className="flex gap-2">
-                        <button onClick={() => void loadStatus(mode)} className="font-display tabular-nums text-[10px] text-signal-prepare hover:text-signal-prepare">
+                        <Button variant="soft" size="sm" onClick={() => void loadStatus(mode)}>
                           ↻ Refresh
-                        </button>
-                        <button onClick={() => setShowDhanForm(!showDhanForm)} className="font-display tabular-nums text-[10px] text-mist hover:text-paper">
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setShowDhanForm(!showDhanForm)}>
                           Rotate token
-                        </button>
-                        <button onClick={() => void doRegenerateToken()} disabled={regenLoading} className="font-display tabular-nums text-[10px] text-signal-prepare hover:text-signal-prepare disabled:opacity-40">
+                        </Button>
+                        <Button variant="soft" size="sm" onClick={() => void doRegenerateToken()} disabled={regenLoading}>
                           {regenLoading ? "Regenerating…" : "⟳ Regenerate token"}
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   ) : (
@@ -410,14 +404,13 @@ export function OverviewTab({
                           placeholder="Access Token (generate at web.dhan.co → DhanHQ APIs)" value={dhanToken} onChange={e => setDhanToken(e.target.value)} />
                       </div>
                       <div className="flex flex-col sm:flex-row gap-2">
-                        <button onClick={() => void doConnectDhan()} disabled={loading || !dhanClientId || !dhanToken}
-                          className="ra-btn ra-btn-primary flex-1">
+                        <Button variant="primary" className="flex-1" onClick={() => void doConnectDhan()} disabled={loading || !dhanClientId || !dhanToken}>
                           {loading ? "Connecting…" : dhanAccount?.connected ? "Save new token" : "Connect Dhan"}
-                        </button>
+                        </Button>
                         {dhanAccount?.connected && (
-                          <button onClick={() => setShowDhanForm(false)} className="ra-btn ra-btn-ghost">
+                          <Button variant="ghost" onClick={() => setShowDhanForm(false)}>
                             Cancel
-                          </button>
+                          </Button>
                         )}
                       </div>
                     </div>
@@ -482,15 +475,14 @@ export function OverviewTab({
                     </p>
                   )}
                   {!armed && (
-                    <button onClick={() => void doSaveRiskConfig()} disabled={riskSaving}
-                      className="mt-3 w-full py-2 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
+                    <Button variant="soft" block className="mt-3" onClick={() => void doSaveRiskConfig()} disabled={riskSaving}>
                       {riskSaving ? "Saving…" : "Save changes"}
-                    </button>
+                    </Button>
                   )}
                   {!gate3 && (
-                    <button onClick={() => void doConfirmRisk()} className="mt-2 w-full py-2 rounded-xl bg-signal-hold/10 border border-signal-hold/30 font-display tabular-nums text-xs text-signal-hold">
+                    <Button variant="soft" block className="mt-2" onClick={() => void doConfirmRisk()}>
                       Confirm this risk configuration
-                    </button>
+                    </Button>
                   )}
                 </div>
               )}

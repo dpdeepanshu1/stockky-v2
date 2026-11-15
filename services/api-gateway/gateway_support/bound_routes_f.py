@@ -258,6 +258,7 @@ def build_bound_routes_f(ref):
                 result["nifty_vs_prev_close"] = nifty_vs_prev
             if sensex_vs_prev:
                 result["sensex_vs_prev_close"] = sensex_vs_prev
+            result.update(ref._extra_index_tiles())   # E555 (B2): Bank Nifty / VIX tiles, fail-soft, never part of the score
             if not ref._json_finite(result):
                 raise ValueError("non-finite index values")
             ref._redis_set(ref.INDICES_CACHE_KEY, result, ttl=300)

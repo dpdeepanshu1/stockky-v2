@@ -13,9 +13,10 @@ const FILES = readdirSync(new URL("./styles/", import.meta.url)).filter((f) => f
 const all = FILES.map((f) => stripComments(rdStyle(f))).join("\n");
 const rules = [...all.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
 
-test("import order: base, tokens, components, pages (which imports shell, home, trading, control, markets); the old layer files are gone", () => {
+test("import order: base, tokens, components, then shell, home, trading, control, markets (pages.css is folded into main.tsx); the old layer files are gone", () => {
   const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
-  assert.deepEqual(imports, ["styles/base.css", "styles/tokens.css", "styles/components.css", "styles/pages.css"]);
+  assert.deepEqual(imports, ["styles/base.css", "styles/tokens.css", "styles/components.css", "styles/shell.css", "styles/home.css", "styles/trading.css", "styles/control.css", "styles/markets.css"]);
+  assert.equal(existsSync(new URL("./styles/pages.css", import.meta.url)), false, "pages.css was folded into main.tsx in E558");
   assert.deepEqual(cascadeOrder().slice(-5), ["styles/shell.css", "styles/home.css", "styles/trading.css", "styles/control.css", "styles/markets.css"]);
   for (const f of ["index.css", "design-v3.css", "design-v4.css", "design-v5.css", "design-v6.css", "design-v7.css", "design-v8.css", "auth-login.css", "light-contrast.css", "alignment.css"]) {
     assert.equal(existsSync(new URL(`./${f}`, import.meta.url)), false, `${f} was folded in round 8i and must not come back`);

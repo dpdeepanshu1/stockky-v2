@@ -170,7 +170,7 @@ test("the command palette knows the five sections", () => {
 /* ---------- CSS ---------- */
 test("shell.css: loads right after the kit (only home.css, trading.css, control.css and markets.css are later), tokens only, no animation, no !important, no blur or gradient", () => {
   const css = stripCss(rd("./styles/shell.css")); const main = rd("./main.tsx");
-  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
+  const imports = cascadeOrder();   // E558: base, tokens, components, then the page sheets
   assert.equal(imports[imports.length - 5], "styles/shell.css"); assert.equal(imports[imports.length - 4], "styles/home.css"); assert.equal(imports[imports.length - 3], "styles/trading.css"); assert.equal(imports[imports.length - 2], "styles/control.css"); assert.equal(imports[imports.length - 1], "styles/markets.css");
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");
@@ -187,6 +187,24 @@ test("the folded System section never hides pages from the tablet rail", () => {
 test("every sh- class used in the shell components is styled", () => {
   const css = rd("./styles/shell.css"); const src = rd("./components/app/AppNav.tsx") + rd("./components/AdminGate.tsx");
   for (const m of new Set([...src.matchAll(/["` ]((?:sh)-[a-z-]+)/g)].map((x) => x[1]))) assert.ok(css.includes(`.${m}`), `.${m} has no style`);
+});
+
+/* ---------- F2: the shell on the kit ---------- */
+test("F2: login buttons, the backend-down banner and the AI deck use kit Buttons / Chips; the replaced rules are gone", () => {
+  const g = rd("./components/AdminGate.tsx"), a = rd("./components/app/AppNav.tsx"), d = rd("./components/app/AiInsightDeck.tsx"), base = rd("./styles/base.css");
+  assert.ok(/import \{ Button \} from "\.\/kit\/Button"/.test(g) && /<Button type="submit" variant="primary" block loading=\{busy\}/.test(g), "login submit is a kit Button");
+  assert.ok(!/className="auth-(submit|link)/.test(g) && !/\.auth-(submit|link)\b/.test(base), "old login button classes are gone");
+  assert.ok(/export function BackendDownBanner/.test(a) && /<Button size="sm" onClick=\{handleWakeBackend\} loading=\{isWaking\}>/.test(a) && !/font-mono|bg-signal-/.test(a.slice(a.indexOf("export function BackendDownBanner"))), "banner is on kit Buttons, no Tailwind one-offs");
+  assert.ok(/role="alert"/.test(a.slice(a.indexOf("export function BackendDownBanner"))) && /\.sh-banner-text::before \{ content: "⚠ "/.test(rd("./styles/shell.css")), "banner is announced and not colour-only");
+  assert.ok(/<Button size="sm" onClick=\{\(\) => onQuickScan\(\)\}>/.test(d) && /<ChipList label="Scan results">/.test(d) && !/ai-count(?!s)|ai-cta/.test(d + base), "AI deck: kit Button and Chips");
+  for (const sym of ["▲", "◆", "●", "▼"]) assert.ok(d.includes(`symbol="${sym}"`), `scan-result chip ${sym} carries a symbol`);
+});
+test("F2: the command palette is a labelled combobox + listbox with keyboard focus kept, scroll-into-view and focus returned; no inline styles", () => {
+  const c = rd("./components/CommandPalette.tsx");
+  for (const piece of ['role="combobox"', 'role="listbox"', 'role="option"', "aria-activedescendant", "aria-selected={i === active}", 'aria-label="Command palette"', "scrollIntoView", "opener.focus()", 'e.key === "Tab"', "e.isComposing"]) assert.ok(c.includes(piece), piece);
+  assert.ok(!/style=\{\{/.test(c), "no inline styles");
+  const css = rd("./styles/shell.css");
+  assert.ok(css.includes(".cmdk-empty") && css.includes(".cmdk-group"));
 });
 
 console.log(`shell tests: ${n} ok`);

@@ -131,10 +131,11 @@ html.light .mk-cc-up { color: rgb(3 84 61); }
 .mk-srow > td:first-child { box-shadow: inset 3px 0 0 rgb(var(--muted-2-rgb) / 0.5); }
 .mk-srow.up > td:first-child { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
 .mk-srow.down > td:first-child { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }
-.mk-ipo-row { box-shadow: inset 3px 0 0 rgb(var(--muted-2-rgb) / 0.5); }
-.mk-ipo-row.up { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
-.mk-ipo-row.warn { box-shadow: inset 3px 0 0 rgb(var(--warn-rgb)); }
-.mk-ipo-row.down { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }
+/* E538: an IPO row is a quiet kit Card; the stripe is the row's state colour (the longer selector beats .k-card.quiet's no-shadow rule) */
+.k-card.quiet.mk-ipo-row { padding: var(--k-gap-3) var(--k-gap-4); box-shadow: inset 3px 0 0 rgb(var(--muted-2-rgb) / 0.5); }
+.k-card.quiet.mk-ipo-row.up { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
+.k-card.quiet.mk-ipo-row.warn { box-shadow: inset 3px 0 0 rgb(var(--warn-rgb)); }
+.k-card.quiet.mk-ipo-row.down { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }
 
 /* ── IPO overview (IpoLifecycle): one flat kit card, four stage tiles, no looping dot, no gradient ── */
 .k-card.mk-ipo { padding: var(--k-gap-4); }
@@ -180,3 +181,8 @@ html.light .mk-ipo-pop .up { color: rgb(3 84 61); } html.light .mk-ipo-pop .down
 .mk-wl-card > .flex { flex: 1; }
 html.tv .mk-pulse-tile b { font-size: 1.6rem; }
 .mk-wl-note { margin: -0.5rem 0 0.75rem; font-size: 0.75rem; font-weight: 700; color: rgb(var(--warn-rgb)); }
+
+/* E557 (B3): the small 30-day trend line on Hot cards, Surprise rows and IPO rows. Tokens only, no animation of its own. */
+.mk-rowspark { display: inline-block; width: 88px; height: 28px; vertical-align: middle; flex: none; }
+.mk-rowspark .w-spark { height: 100%; }
+.mk-cc-trend { margin-top: var(--k-gap-1); }

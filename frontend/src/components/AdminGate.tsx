@@ -11,6 +11,7 @@ import {
 } from "../adminAuth";
 import { formatCountdown, initialGatePhase, MIN_NEW_PASSWORD, nextGatePhase, passwordStrength, PILL_WARN_SECONDS, pillTime, validateNewPassword, type GatePhase } from "../adminSession";
 import { Sheet } from "./kit/Sheet";
+import { Button } from "./kit/Button";
 
 const reducedMotion = () => {
   try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("tv"); } catch { return false; }
@@ -154,12 +155,12 @@ export function LoginForm({ onHold, onSuccess, compact, startMode = "login", hea
       {err && <p className="auth-error" role="alert">{err}</p>}
       {info && <p className="auth-info" role="status">{info}</p>}
 
-      <button className="auth-submit" type="submit" disabled={busy || done || !password || (mode === "change" && (!next || !confirm))}>
+      <Button type="submit" variant="primary" block loading={busy} disabled={done || !password || (mode === "change" && (!next || !confirm))}>
         {done ? "Unlocked" : busy ? (mode === "login" ? "Logging in…" : "Changing…") : mode === "login" ? "Log in" : "Change password"}
-      </button>
-      <button type="button" className="auth-link" onClick={() => { setMode(mode === "login" ? "change" : "login"); setErr(null); setInfo(null); }} disabled={busy || done}>
+      </Button>
+      <Button variant="ghost" size="sm" className="auth-alt" onClick={() => { setMode(mode === "login" ? "change" : "login"); setErr(null); setInfo(null); }} disabled={busy || done}>
         {mode === "login" ? "Change password" : "Back to log in"}
-      </button>
+      </Button>
       <p className="auth-foot">Sessions end automatically. The pill in the top bar shows the time left.</p>
     </form>
   );
@@ -222,7 +223,7 @@ export function AdminGate({ title, children, onExit }: { title: string; children
         <div className="auth-overlay" role="dialog" aria-modal="true" aria-label="Session ended">
           <div className="auth-overlay-card">
             <LoginForm compact onHold={hold} onSuccess={finish} />
-            {onExit && <button type="button" className="auth-link auth-exit" onClick={onExit}>Leave this page</button>}
+            {onExit && <Button variant="ghost" size="sm" className="auth-alt auth-exit" onClick={onExit}>Leave this page</Button>}
           </div>
         </div>
       )}

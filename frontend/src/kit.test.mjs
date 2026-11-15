@@ -8,18 +8,18 @@ const main = rd("./main.tsx");
 const index = rd("./components/kit/index.ts");
 let n = 0; const test = (name, f) => { f(); n++; console.log("ok -", name); };
 
-const FILES = ["Card", "Stat", "StatusPill", "Tabs", "Button", "Field", "DataTable", "Sheet", "Skeleton", "KitPreview"];
+const FILES = ["Card", "Stat", "StatusPill", "Tabs", "Button", "Chip", "Field", "DataTable", "Sheet", "Skeleton", "KitPreview"];
 test("every kit component file exists and the index exports the whole kit", () => {
   for (const f of FILES) assert.ok(existsSync(new URL(`./components/kit/${f}.tsx`, import.meta.url)), `${f}.tsx missing`);
-  for (const name of ["Card", "CardHeader", "Stat", "Stats", "StatusPill", "Tabs", "Button", "Field", "Switch", "DataTable", "Sheet", "Skeleton", "SkeletonLines", "Empty", "ErrorState"]) assert.ok(new RegExp(`\\b${name}\\b`).test(index), `index does not export ${name}`);
+  for (const name of ["Card", "CardHeader", "Stat", "Stats", "StatusPill", "Tabs", "Button", "Chip", "ChipList", "Field", "Switch", "DataTable", "Sheet", "Skeleton", "SkeletonLines", "Empty", "ErrorState"]) assert.ok(new RegExp(`\\b${name}\\b`).test(index), `index does not export ${name}`);
 });
 test("components.css loads after tokens.css; only the shell (E535), home (E536), trading (E537) and control (E539) styles come after it", () => {
-  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
+  const imports = cascadeOrder();   // E558: base, tokens, components, then the page sheets
   assert.deepEqual(imports.slice(-6), ["styles/components.css", "styles/shell.css", "styles/home.css", "styles/trading.css", "styles/control.css", "styles/markets.css"]);
   assert.ok(imports.indexOf("styles/components.css") > imports.indexOf("styles/tokens.css"));
 });
 test("every class the kit styles starts with k- (it cannot clash with the old layers)", () => {
-  const bad = [...css.matchAll(/(?:^|[},\s])\.([a-z][\w-]*)/gm)].map((m) => m[1]).filter((c) => !c.startsWith("k-") && !["light", "tv", "anim-off", "up", "down", "warn", "sm", "lg", "md", "block", "flush", "quiet", "invalid", "live", "armed", "paused", "offline", "closed", "info", "primary", "soft", "ghost", "danger", "asking", "click", "dense", "ready", "r", "tint-warn", "tint-sell"].includes(c));
+  const bad = [...css.matchAll(/(?:^|[},\s])\.([a-z][\w-]*)/gm)].map((m) => m[1]).filter((c) => !c.startsWith("k-") && !["light", "tv", "anim-off", "up", "down", "warn", "sm", "lg", "md", "block", "flush", "quiet", "invalid", "live", "armed", "paused", "offline", "closed", "info", "primary", "soft", "ghost", "danger", "asking", "click", "dense", "ready", "r", "tint-warn", "tint-sell", "ok", "bad"].includes(c));
   assert.deepEqual([...new Set(bad)], []);
 });
 test("every animation and transition sits behind reduced-motion, TV and anim-off; keyframes use transform / opacity only", () => {
@@ -59,5 +59,32 @@ test("the preview page is opt-in (?kit=1), lazy, and calls no service", () => {
   assert.ok(/get\("kit"\) === "1"/.test(main) && /lazy\(\(\) => import\("\.\/components\/kit\/KitPreview"\)\)/.test(main));
   const p = rd("./components/kit/KitPreview.tsx");
   assert.ok(!/fetch\(|from "\.\.\/\.\.\/api"|from "\.\.\/\.\.\/realTradeApi"/.test(p));
+});
+test("F1: one kit Chip replaces the three look-alike chips; a toned chip always carries a symbol and the tone never colours the text", () => {
+  const chip = rd("./components/kit/Chip.tsx");
+  assert.ok(/aria-hidden="true"/.test(chip) && /k-chip-sym/.test(chip), "the symbol is a hidden glyph beside the words");
+  assert.ok(/\.k-chip \{[^}]*color:\s*rgb\(var\(--fg-rgb\)\)/.test(css), "chip text stays the normal text colour (tone is on the symbol, border and fill)");
+  assert.ok(/\.k-chip-sym \{[^}]*color:\s*rgb\(var\(--cc\)\)/.test(css));
+  const base = rd("./styles/base.css");
+  for (const old of ["w-money-chip", "w-pulse-chip", "w-expo-chip"]) assert.ok(!base.includes(old), `${old} rules are gone from base.css`);
+  for (const f of ["MoneyModeBanner", "AiPulse", "ExposureStrip"]) {
+    const t = rd(`./components/ui/${f}.tsx`);
+    assert.ok(/<ChipList>/.test(t) && /<Chip\b/.test(t) && !/w-(money|pulse|expo)-chip/.test(t), `${f} uses the kit chip`);
+  }
+  assert.ok(/tone=\{x\.state\} symbol=\{SYMBOL\[x\.state\]\}/.test(rd("./components/ui/MoneyModeBanner.tsx")) && /symbol=\{SYMBOL\[c\.state\]\}/.test(rd("./components/ui/AiPulse.tsx")), "state chips pass their symbol");
+  const ex = rd("./components/ui/ExposureStrip.tsx");
+  assert.ok(/symbol=\{pnlTone === "up" \? "▲" : pnlTone === "down" \? "▼" : undefined\}/.test(ex) && /tone="warn" symbol="⚠"/.test(ex), "P&L and near-stop chips carry an arrow / warning mark");
+  assert.ok(/<Chip as="span">Risk : reward/.test(rd("./components/ui/TradePlanBar.tsx")), "the plan bar's risk : reward is a chip");
+});
+test("F1: panels with a plain card surface sit on the kit Card (no second border / padding), and EmptyState is the kit Empty with an icon", () => {
+  assert.ok(/<Card className="w-expo"/.test(rd("./components/ui/ExposureStrip.tsx")) && /<Card quiet className=\{`w-day/.test(rd("./components/session/SessionRail.tsx")));
+  const base = rd("./styles/base.css");
+  for (const sel of [".w-expo {", ".w-day {"]) {
+    const rule = base.split("\n").find((l) => l.startsWith(sel)) || "";
+    assert.ok(rule && !/(border|background|padding|box-shadow)/.test(rule), `${sel} must not repeat the Card surface`);
+  }
+  const es = rd("./components/ui/EmptyState.tsx");
+  assert.ok(/from "\.\.\/kit\/Skeleton"/.test(es) && /<Empty\b/.test(es) && !/k-empty/.test(es), "EmptyState wraps the kit Empty");
+  assert.ok(/icon\?: ReactNode/.test(rd("./components/kit/Skeleton.tsx")) && /\.k-empty-icon \{/.test(css) && !/\.k-empty-icon/.test(base), "the empty icon rules live in the kit");
 });
 console.log(`kit.test.mjs: ${n} ok`);

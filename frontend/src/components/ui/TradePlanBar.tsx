@@ -1,5 +1,6 @@
 // frontend/src/components/ui/TradePlanBar.tsx  (design v5 - entry / stop / target at a glance; styles in design-v5.css)
 // Presentation only: draws numbers the decision already carries. Renders nothing unless stop < entry < target (a long plan) and all are present.
+import { Chip } from "../kit/Chip";
 type Props = { stop: number | null | undefined; entryLow: number | null | undefined; entryHigh: number | null | undefined; target: number | null | undefined; price: number | null | undefined };
 const rs = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 const ok = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
@@ -18,7 +19,7 @@ export function TradePlanBar({ stop, entryLow, entryHigh, target, price }: Props
     <div className="w-plan" role="group" aria-label="Trade plan: stop loss, entry zone and target">
       <div className="w-plan-head">
         <span className="w-eyebrow">TRADE PLAN</span>
-        {rr != null && <span className="w-plan-rr">Risk : reward <b className="num">1 : {rr.toFixed(1)}</b></span>}
+        {rr != null && <Chip as="span">Risk : reward <b className="num">1 : {rr.toFixed(1)}</b></Chip>}
       </div>
       <div className="w-plan-rail">
         <span className="w-plan-risk" style={{ left: 0, width: `${pos(lo)}%` }} />

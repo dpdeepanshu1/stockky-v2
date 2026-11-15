@@ -92,7 +92,7 @@ test("AdminGate wrapping and session code are not touched by this round", () => 
 });
 test("trading.css: loads second to last, tokens only, no animation, no !important, no blur or gradient, no hex colour; every tr- class used is defined", () => {
   const css = stripCss(rd("./styles/trading.css")); const main = rd("./main.tsx");
-  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
+  const imports = cascadeOrder();   // E558: base, tokens, components, then the page sheets
   assert.equal(imports[imports.length - 3], "styles/trading.css");   // control.css (E539) and markets.css (E540) are the only later files
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css));

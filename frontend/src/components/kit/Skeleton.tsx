@@ -14,9 +14,10 @@ export function SkeletonLines({ rows = 3 }: { rows?: number }) {
   );
 }
 
-export function Empty({ title, hint, action }: { title: string; hint?: string; action?: ReactNode }) {
+export function Empty({ title, hint, action, icon }: { title: string; hint?: string; action?: ReactNode; icon?: ReactNode }) {
   return (
     <div className="k-empty" role="status">
+      {icon != null && <span className="k-empty-icon" aria-hidden="true">{icon}</span>}
       <p className="k-empty-title">{title}</p>
       {hint && <p className="k-empty-hint">{hint}</p>}
       {action != null && <div className="k-empty-action">{action}</div>}

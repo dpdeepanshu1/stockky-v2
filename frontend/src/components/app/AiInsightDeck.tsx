@@ -4,6 +4,8 @@
 import type { Decision } from "../../api";
 import type { ViewState } from "./appTypes";
 import { AiOrb, AiTyping, type AiOrbState } from "../ui/AiOrb";
+import { Button } from "../kit/Button";
+import { Chip, ChipList } from "../kit/Chip";
 
 type Props = {
   view: ViewState;
@@ -72,7 +74,7 @@ export default function AiInsightDeck({ view, liveScanRows, onSelect, onQuickSca
           <p className="ai-deck-sub">{sub}</p>
         </div>
         {!loading && rows.length === 0 && (
-          <button type="button" className="ai-cta" onClick={() => onQuickScan()}>Try a quick scan</button>
+          <Button size="sm" onClick={() => onQuickScan()}>Try a quick scan</Button>
         )}
       </div>
 
@@ -84,11 +86,13 @@ export default function AiInsightDeck({ view, liveScanRows, onSelect, onQuickSca
       )}
 
       {rows.length > 1 && (
-        <div className="ai-counts" role="list">
-          <span className="ai-count buy" role="listitem"><b>{buy}</b> Buy now</span>
-          <span className="ai-count prep" role="listitem"><b>{prep}</b> Prepare</span>
-          <span className="ai-count hold" role="listitem"><b>{hold}</b> Hold</span>
-          <span className="ai-count avoid" role="listitem"><b>{avoid}</b> Avoid</span>
+        <div className="ai-counts">
+          <ChipList label="Scan results">
+            <Chip tone="up" symbol="▲"><b className="num">{buy}</b> Buy now</Chip>
+            <Chip symbol="◆"><b className="num">{prep}</b> Prepare</Chip>
+            <Chip tone="warn" symbol="●"><b className="num">{hold}</b> Hold</Chip>
+            <Chip tone="down" symbol="▼"><b className="num">{avoid}</b> Avoid</Chip>
+          </ChipList>
         </div>
       )}
 

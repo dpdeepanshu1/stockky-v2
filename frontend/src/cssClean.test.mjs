@@ -29,16 +29,16 @@ test("braces are balanced in every stylesheet", () => {
     assert.equal(d, 0, `${f}: unbalanced braces`);
   }
 });
-test("ratchet: !important and root stylesheet size only go down (round 8i: 80 occurrences across all CSS and 1,801 lines in the two folded files; targets 15 and 2,000)", () => {
+test("ratchet: !important and root stylesheet size only go down (E560, round 540: 14 occurrences across all CSS and 1355 lines in the folded layers)", () => {
   const all = [...OLD, "styles/tokens.css", "styles/components.css", "styles/shell.css", "styles/home.css", "styles/trading.css", "styles/control.css", "styles/markets.css"].map((f) => strip(rd(`./${f}`)));
   const important = all.reduce((n, c) => n + (c.match(/!important/g) || []).length, 0);
-  assert.ok(important <= 80, `!important is ${important}, the ratchet is 80`);
+  assert.ok(important <= 14, `!important is ${important}, the ratchet is 14`);
   const lines = OLD.map((f) => strip(rd(`./${f}`)).split("\n").length).reduce((a, b) => a + b, 0);
-  assert.ok(lines <= 1810, `folded old layers are ${lines} lines, the ratchet is 1810`);
+  assert.ok(lines <= 1355, `folded old layers are ${lines} lines, the ratchet is 1355`);
 });
 test("classIsLive: a literal class, a class built from a prefix pattern, and a dead class", () => {
   assert.ok(classIsLive("k-card") && classIsLive("anim-off") && classIsLive("tv"));
-  assert.ok(classIsLive("signal-pill-buy"));
+  assert.ok(classIsLive("signal-stream-card"));
   assert.equal(classIsLive("dash-hero-top"), false);
   assert.equal(classIsLive("definitely-not-a-class-xyz"), false);
 });

@@ -72,16 +72,18 @@ test("Paper Trades tabs use the kit Tabs with the same four views and the same s
   assert.ok(/onChange=\{setTab\}/.test(t) && /useState<"open" \| "closed" \| "daily" \| "weekly">\("open"\)/.test(t));
   assert.ok(!/onClick=\{\(\) => setTab\(key\)\}/.test(t), "the hand-made tab buttons are gone");
 });
-test("Alerts: no history feed exists on the backend, so none is drawn (no invented day groups or read marks)", () => {
-  const api = rd("./api.ts"), t = rd("./components/NotificationsPanel.tsx");
-  assert.ok(!/getNotificationHistory|\/notifications\/(history|feed|inbox)/.test(api));
-  assert.ok(!/mark all read|markAllRead/i.test(t));
+test("Alerts: the history feed (round 539 B1) reads the stored history and keeps nothing invented", () => {
+  const api = rd("./api.ts"), t = rd("./components/NotificationsPanel.tsx"), f = rd("./components/AlertsFeed.tsx");
+  assert.ok(/getNotificationHistory/.test(api) && /\/notifications\/history/.test(api) && /\/notifications\/read-all/.test(api));
+  assert.ok(/<AlertsFeed \/>/.test(t));
+  assert.ok(/groupAlertsByDay\(hist,/.test(f), "groups come from the stored history, not from made-up rows");
+  assert.ok(!/mark all read|markAllRead/i.test(t), "the button lives in the feed, not the channel panel");
 });
 
 /* ---------- CSS ---------- */
 test("markets.css: loads last, tokens only, no animation, no !important, no blur or gradient, no hex colour; every mk- class used is defined", () => {
   const css = stripCss(rd("./styles/markets.css")); const main = rd("./main.tsx");
-  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
+  const imports = cascadeOrder();   // E558: base, tokens, components, then the page sheets
   assert.equal(imports[imports.length - 1], "styles/markets.css");
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");
@@ -187,14 +189,19 @@ test("surpriseCard: missing values are dashes and no ring; a real 0 score is a r
   assert.equal(d.score, 100); assert.equal(d.tag, null); assert.equal(mc.changeArrow(d.change.dir), "▼ "); assert.equal(d.badge.label, "Building"); assert.equal(d.badge.tone, "warn");
   assert.equal(mc.surpriseCard({ symbol: 5 }, surpriseRowView({})).symbol, "—");
 });
-test("Surprise: Table stays the default; Cards reads the same filtered rows and the same price node; the table's own markup is untouched", () => {
+test("Surprise: Table stays the default; Cards reads the same filtered rows and the same price node; the table keeps its nine columns (plus the 30d trend, E557) on the kit DataTable", () => {
   const t = rd("./components/SurpriseStocks.tsx");
   assert.ok(/useState<SurpriseView>\("table"\)/.test(t) && /<Tabs label="Surprise Momentum view"/.test(t));
   assert.ok(/view === "cards"/.test(t) && /view === "table"/.test(t));
   assert.ok(/shownStocks\.map\(\(s\) => \(\s*<MarketCard/.test(t) && /surpriseCard\(s, surpriseRowView\(s\)\)/.test(t));
   assert.ok(/PriceRoll value=\{resolveDisplayPrice\(s as any, null\)\}/.test(t));
-  for (const col of ["Symbol", "Tier", "Score", "Price", "Change %", "RVOL", "Trigger", "Target +5%", "Trail (VWAP)"]) assert.ok(t.includes(`>${col}</th>`), `table column ${col}`);
-  assert.ok(/onClick=\{\(\) => onSelect\?\.\(s\.symbol\)\}/.test(t), "table row click is unchanged");
+  // E538 (F3 part 2): the table is the kit DataTable; the nine columns, their order and the row click are the same as before.
+  const cols = ["Symbol", "Tier", "Score", "Price", "Change %", "RVOL", "Trigger", "Target +5%", "Trail (VWAP)"];
+  let at = -1;
+  for (const col of cols) { const i = t.indexOf(`header: "${col}"`); assert.ok(i > at, `table column ${col} (in order)`); at = i; }
+  assert.ok(/<DataTable\s+columns=\{surpriseColumns\(sparkOf\)\}/.test(t) && !/<table/.test(t.replace(/\/\/.*$/gm, "")), "kit DataTable, no hand-written table");
+  assert.ok(/onRowClick=\{onSelect \? \(r\) => onSelect\(r\.s\.symbol\) : undefined\}/.test(t), "table row click still opens the stock");
+  assert.ok(/rowClass=\{\(r\) => `mk-srow \$\{r\.v\.change\.dir \?\? "flat"\}`\}/.test(t), "the up / down stripe stays");
 });
 test("MarketCard: symbol opens the stock, direction in text, ring only with a score, no request, no money animation; css rules exist and use no gradient / hex", () => {
   const t = rd("./components/MarketCard.tsx"), css = stripCss(rd("./styles/markets.css"));

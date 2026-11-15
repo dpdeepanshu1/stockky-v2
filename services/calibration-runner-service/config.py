@@ -83,3 +83,20 @@ WEATHER_STAMP = _b("WEATHER_STAMP", False)          # true = also post a STAMP-O
 WEATHER_APPLY = _b("WEATHER_APPLY", False)          # true = LIVE: send tighten-only dials, but only while the evidence gate passes AND the service itself has MARKET_STATE_MODE=live (weather_apply.py)
 WEATHER_GATE_MODE = (_s("WEATHER_GATE_MODE", "replay_only") or "replay_only").strip().lower()   # replay_only (default) | strict (replay USEFUL AND shadow report PASS) | off; unknown = strict
 WEATHER_NOTIFY = _b("WEATHER_NOTIFY", True)         # Telegram brief at 08:00 and a message whenever the state changes
+
+# E553 (round 533): the nightly AI idea source (agent.py). An idea source only: no code path sets a switch or places an order.
+# GEMINI_API_KEY here is filled by compose from AGENT_GEMINI_API_KEY (its own free-tier Google project), falling back to the main key.
+AGENT_MODE = (_s("AGENT_MODE", "report") or "report").lower()          # off | report (Telegram only) | propose (also queues the existing tests behind the ideas); unknown = report
+if AGENT_MODE not in ("off", "report", "propose"):
+    AGENT_MODE = "report"
+AGENT_MAX_IDEAS = max(1, min(10, _i("AGENT_MAX_IDEAS", 5)))            # ideas kept per night
+AGENT_MAX_QUEUE = max(0, min(6, _i("AGENT_MAX_QUEUE", 3)))             # existing tests the agent may queue per night (propose mode)
+AGENT_MIN_RERUN_H = max(0, _i("AGENT_MIN_RERUN_H", 20))                # a test whose last result is younger than this is not queued again
+AGENT_MAX_CALLS_DAY = max(1, min(500, _i("AGENT_MAX_CALLS_DAY", 40)))      # LLM calls the agent may make per IST day (counted in agent/usage.json); the free tiers allow far more
+AGENT_MIN_GAP_S = max(0, _i("AGENT_MIN_GAP_S", 7))                     # seconds between two LLM calls (free tier: 10 requests a minute)
+AGENT_RUN_AFTER_IST = _s("AGENT_RUN_AFTER_IST", "16:10")               # the automatic nightly run, weekdays, after the market-hours guard ends
+GEMINI_API_KEY = _s("GEMINI_API_KEY")
+GEMINI_MODEL = _s("GEMINI_MODEL")                                      # an exact free Flash-Lite id; empty = Gemini is skipped and Groq is used
+AGENT_GEMINI_BACKUP_MODEL = _s("AGENT_GEMINI_BACKUP_MODEL", "gemini-3.1-flash-lite")   # tried once when the model above answers 404 (free models get retired)
+GROQ_API_KEY = _s("GROQ_API_KEY")
+GROQ_MODEL = _s("GROQ_MODEL", "openai/gpt-oss-20b")

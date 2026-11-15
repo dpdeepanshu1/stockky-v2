@@ -37,6 +37,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from typing import Optional
 
 import httpx
@@ -928,11 +929,114 @@ def _dispatch(title: str, message: str, channel_filter: str, urgency: str = "nor
     return results
 
 
+# ── E556 (round 539, B1): notification history. Every message that goes through POST /notify is remembered (last 200) so the app can show a
+# day-grouped Alerts feed. Best effort: a storage problem never changes what /notify does or returns. Text is key-redacted and cut to 600 characters.
+HISTORY_KEY = "stockky:notification:history"
+HISTORY_READ_KEY = "stockky:notification:history_read"
+HISTORY_MAX = 200
+HISTORY_TEXT_MAX = 600
+_history_lock = threading.Lock()
+_history_mem: list = []
+_history_read_mem: float = 0.0
+
+
+def _hist_load() -> list:
+    if _kv is not None:
+        try:
+            val = _kv.get(HISTORY_KEY)
+            if val:
+                items = val if isinstance(val, list) else json.loads(val)
+                if isinstance(items, list):
+                    return [i for i in items if isinstance(i, dict)]
+        except Exception as e:  # noqa: BLE001
+            logger.debug("history load: %s", e)
+    return list(_history_mem)
+
+
+def _hist_save(items: list) -> None:
+    global _history_mem
+    _history_mem = list(items)
+    if _kv is not None:
+        try:
+            _kv.set(HISTORY_KEY, items, ttl=None)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("history save: %s", e)
+
+
+_BARE_TG_TOKEN = _re_top.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b")
+
+
+def _hist_clean(text, limit: int) -> str:
+    """Channel-secret redaction (URL shapes) plus a bare Telegram bot token, then cut."""
+    return _BARE_TG_TOKEN.sub("***", _redact_secrets(text))[:limit]
+
+
+def _history_add(title, message, channel, urgency, delivered, note=None) -> None:
+    """Remember one /notify call. Never raises."""
+    try:
+        entry = {
+            "id": uuid.uuid4().hex[:12],
+            "ts": round(time.time(), 3),
+            "title": _hist_clean(title or "", 160),
+            "message": _hist_clean(message or "", HISTORY_TEXT_MAX),
+            "channel": str(channel or "all")[:20],
+            "urgency": str(urgency or "normal")[:12],
+            "delivered": bool(delivered),
+        }
+        if note:
+            entry["note"] = _hist_clean(note, 200)
+        with _history_lock:
+            items = _hist_load()
+            items.insert(0, entry)
+            _hist_save(items[:HISTORY_MAX])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("history add: %s", e)
+
+
+def _hist_read_at() -> float:
+    if _kv is not None:
+        try:
+            v = _kv.get(HISTORY_READ_KEY)
+            if v is not None:
+                return float(v)
+        except Exception:  # noqa: BLE001
+            pass
+    return _history_read_mem
+
+
+@app.get("/history")
+def get_history(limit: int = 100):
+    """Newest first. `unread` counts entries newer than the last read-all."""
+    limit = max(1, min(int(limit or 100), HISTORY_MAX))
+    items = _hist_load()
+    read_at = _hist_read_at()
+    return {
+        "items": items[:limit],
+        "count": len(items),
+        "unread": sum(1 for i in items if float(i.get("ts") or 0) > read_at),
+        "read_at": read_at or None,
+    }
+
+
+@app.post("/history/read-all")
+def history_read_all():
+    global _history_read_mem
+    now = round(time.time(), 3)
+    _history_read_mem = now
+    if _kv is not None:
+        try:
+            _kv.set(HISTORY_READ_KEY, now, ttl=None)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("history read mark: %s", e)
+    return {"ok": True, "read_at": now, "unread": 0}
+
+
 @app.post("/notify")
 def notify(req: NotifyRequest):
     attempted = _dispatch(req.title, req.message, req.channel, urgency=req.urgency or "normal")
     if not attempted:
         oid = _outbox_enqueue(req.title, req.message, req.channel, req.urgency or "normal", "no channel")
+        _history_add(req.title, req.message, req.channel, req.urgency, False, "no channel")
         return {
             "delivered": False,
             "outbox_id": oid,
@@ -951,6 +1055,7 @@ def notify(req: NotifyRequest):
         outbox_id = _outbox_enqueue(
             req.title, req.message, req.channel, req.urgency or "normal", note
         )
+    _history_add(req.title, req.message, req.channel, req.urgency, delivered, None if delivered else note)
     return {
         "delivered": delivered,
         "results": attempted,

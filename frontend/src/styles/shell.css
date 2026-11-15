@@ -88,3 +88,13 @@ html.light .sh-pill.warn .sh-pill-time { color: rgb(130 76 0); }
 
 /* focus rings stay visible on the new controls */
 .sh-pill button:focus-visible, .sh-sheet-link:focus-visible, .sh-dot-btn:focus-visible, .sh-missing button:focus-visible, .sh-sec-toggle:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 2px; }
+
+/* F2: backend-down banner (kit Buttons), login secondary buttons, command palette empty / group text */
+.sh-banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem 1rem; padding: 0.7rem 1rem; border-bottom: 1px solid rgb(var(--sell-rgb) / 0.35); background: rgb(var(--sell-rgb) / 0.06); }
+.sh-banner-text { margin: 0; font-size: 0.875rem; font-weight: 500; color: rgb(var(--fg-rgb)); overflow-wrap: anywhere; }
+.sh-banner-text::before { content: "⚠ "; color: rgb(var(--sell-rgb)); }
+.sh-banner-url { color: rgb(var(--muted-rgb)); }
+.sh-banner-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.auth-form .auth-alt { align-self: center; }
+.cmdk-empty { padding: 0.5rem 0.75rem; cursor: default; opacity: 0.6; font-size: 0.9375rem; }
+.cmdk-group { opacity: 0.55; }

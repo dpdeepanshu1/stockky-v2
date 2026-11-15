@@ -13,7 +13,7 @@ const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
 let n = 0; const test = (name, f) => { f(); n++; console.log("ok -", name); };
 
 test("tokens.css is imported after base.css and before the kit styles (the kit file, if present, is last)", () => {
-  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
+  const imports = cascadeOrder();   // E558: base, tokens, components, then the page sheets
   const t = imports.indexOf("styles/tokens.css");
   assert.ok(imports.indexOf("styles/base.css") >= 0 && t > imports.indexOf("styles/base.css"), "base, then tokens");
   const tail = imports.slice(t + 1);

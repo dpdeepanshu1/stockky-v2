@@ -2,6 +2,7 @@ import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { ScoreRing } from "./ui/ScoreRing";          // E160: v5/v7 pieces, presentation only
 import { TradePlanBar } from "./ui/TradePlanBar";
+import { RowSpark } from "./RowSpark";   // E557 (B3)
 import { Card } from "./kit/Card";   // E550: the card is a kit Card; its inner rules are mk-cc-* in styles/markets.css
 
 /** Minimal decision-like shape so card works from scan, hot stocks, or full Decision */
@@ -71,6 +72,8 @@ type Props = {
   compact?: boolean;
   onSelect?: (symbol: string) => void;
   footer?: React.ReactNode;
+  /** E557 (B3): last closes for the small trend line; nothing is drawn when absent */
+  spark?: number[] | null;
 };
 
 function fmt(n: number | null | undefined, digits = 2) {
@@ -122,7 +125,7 @@ function QualityGate({ data }: { data: ConvictionData }) {
   );
 }
 
-export default function ConvictionCard({ data, rank, compact, onSelect, footer }: Props) {
+export default function ConvictionCard({ data, rank, compact, onSelect, footer, spark }: Props) {
   const decision = data.decision || "DO NOT BUY";
   const style = decisionStyle[decision] ?? decisionStyle["DO NOT BUY"];
   const score = data.combined_score ?? data.score ?? null;
@@ -164,6 +167,7 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         </div>
         <span className={`mk-cc-decision ${style.color}`}>{decision}</span>
       </div>
+      {spark ? <div className="mk-cc-trend"><RowSpark symbol={data.symbol} closes={spark} /></div> : null}
 
       <QualityGate data={data} />
       {data.technical_thin === true && (

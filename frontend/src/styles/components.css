@@ -143,6 +143,20 @@ html:not(.light) .k-btn.danger { color: #1a0509; }
 .k-error-title::before { content: "⚠ "; color: rgb(var(--warn-rgb)); }
 .k-empty-action, .k-error-action { margin-top: var(--k-gap-2); }
 
+/* ── Chip (F1): the one small status chip; a toned chip always carries a symbol ───────────────── */
+.k-empty-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; margin-bottom: 0.25rem; background: rgb(var(--accent-rgb) / 0.1); color: rgb(var(--accent-rgb)); }
+.k-empty-icon svg { width: 22px; height: 22px; }
+.k-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.k-chip { --cc: var(--muted-rgb); display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.65rem; border-radius: 999px; font-size: 0.74rem; font-weight: 700; line-height: 1.3; font-variant-numeric: tabular-nums; color: rgb(var(--fg-rgb)); border: 1px solid rgb(var(--border-strong-rgb)); background: rgb(var(--panel-2-rgb)); }
+.k-chip-sym { color: rgb(var(--cc)); font-weight: 800; }
+.k-chip.ok, .k-chip.up { --cc: var(--buy-rgb); }
+.k-chip.warn { --cc: var(--warn-rgb); }
+.k-chip.bad, .k-chip.down { --cc: var(--sell-rgb); }
+.k-chip.ok, .k-chip.up, .k-chip.warn, .k-chip.bad, .k-chip.down { border-color: rgb(var(--cc) / 0.45); background: rgb(var(--cc) / 0.1); }
+.k-chip.bad { border-width: 1.5px; }
+html.tv .k-chip { font-size: 1rem; }
+@media (prefers-contrast: more) { .k-chip { border-width: 2px; } }
+
 /* ── Touch targets on touch screens ──────────────────────────────────── */
 @media (pointer: coarse) { .k-btn, .k-btn.sm, .k-tab { min-height: 44px; } }
 

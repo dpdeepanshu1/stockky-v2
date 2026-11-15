@@ -6,7 +6,11 @@ import { getApiUrl } from "./api";
 import "./styles/base.css"; // round 532: Tailwind + former index.css + folded design layers (renamed, same cascade order; motion is opt-in)
 import "./styles/tokens.css"; // E513: calm palette, one font, flat surfaces
 import "./styles/components.css"; // E534: component kit (k- classes)
-import "./styles/pages.css"; // round 532: shell, home, trading, control, markets sheets in their old order
+import "./styles/shell.css"; // E558 (F4): the five page sheets are imported here, in the order pages.css used to give them
+import "./styles/home.css";
+import "./styles/trading.css";
+import "./styles/control.css";
+import "./styles/markets.css";
 
 // TV / 10-foot mode: auto-detected from the browser's user agent (Tizen, webOS,
 // Android TV, Fire TV, Chromecast, …). Force it on/off with ?tv=1 / ?tv=0 —

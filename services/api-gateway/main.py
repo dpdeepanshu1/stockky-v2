@@ -6375,6 +6375,74 @@ def _prev_session_change(ticker, last_price) -> Optional[dict]:
         return None
 
 
+# E555 (round 539, B2): Bank Nifty and India VIX tiles. ADDITIVE and fail-soft: they are separate keys ("banknifty", "vix") in the /market/indices body,
+# never part of the market score, never able to fail or slow the Nifty / Sensex answer that the trading services read. Own cache and a negative cache.
+INDICES_EXTRA_CACHE_KEY = "indices:extra:v1"
+_EXTRA_INDEX_SYMBOLS = (("banknifty", "^NSEBANK"), ("vix", "^INDIAVIX"))
+EXTRA_INDICES_DEADLINE_S = 4.0
+
+
+def _extra_tiles_on() -> bool:
+    return (os.getenv("INDICES_EXTRA_TILES") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+class _FrameOnce:
+    """history() of an already fetched frame, so _prev_session_change does not fetch the same index twice."""
+    def __init__(self, frame):
+        self.frame = frame
+
+    def history(self, period: str = "5d", **kw):
+        return self.frame
+
+
+def _one_extra_tile(symbol: str) -> Optional[dict]:
+    """{price, change, change_pct (vs the previous session close)} for one index, or None. Never raises."""
+    try:
+        frame = _IndexTicker(symbol).history(period="5d")
+        if frame is None or frame.empty:
+            return None
+        last = float(frame["Close"].dropna().iloc[-1])
+        prev = _prev_session_change(_FrameOnce(frame), last)
+        if not prev or not math.isfinite(last) or last <= 0:
+            return None
+        change = last - float(prev["prev_close"])
+        out = {"price": round(last, 2), "change": round(change, 2), "change_pct": prev["change_pct"]}
+        return out if _json_finite(out) else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("extra index %s unavailable: %s", symbol, e)
+        return None
+
+
+def _extra_index_tiles() -> dict:
+    """{"banknifty": {...}, "vix": {...}} with only the tiles that came back (possibly {}). Never raises, waits at most
+    EXTRA_INDICES_DEADLINE_S, and remembers an empty answer for 15 minutes so an outage is not retried on every refresh."""
+    if not _extra_tiles_on():
+        return {}
+    try:
+        cached = _redis_get(INDICES_EXTRA_CACHE_KEY)
+        if isinstance(cached, dict) and _json_finite(cached):
+            return {k: v for k, v in cached.items() if k in ("banknifty", "vix") and isinstance(v, dict)}
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
+        out: dict = {}
+        pool = ThreadPoolExecutor(max_workers=len(_EXTRA_INDEX_SYMBOLS))
+        try:
+            futs = {key: pool.submit(_one_extra_tile, sym) for key, sym in _EXTRA_INDEX_SYMBOLS}
+            for key, fut in futs.items():
+                try:
+                    tile = fut.result(timeout=EXTRA_INDICES_DEADLINE_S)
+                except _Timeout:
+                    tile = None
+                if tile:
+                    out[key] = tile
+        finally:
+            pool.shutdown(wait=False)
+        _redis_set(INDICES_EXTRA_CACHE_KEY, out, ttl=300 if out else 900)
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("extra index tiles: %s", e)
+        return {}
+
+
 # ── IMPROVED /market/indices with IST time ──────────────────────────────
 # E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
 get_market_indices = _bound_routes_f.get_market_indices
@@ -6464,6 +6532,10 @@ app.include_router(_bound_routes_g.delete_notification_channel_router)
 # E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
 notifications_call_me = _bound_routes_g.notifications_call_me
 app.include_router(_bound_routes_g.notifications_call_me_router)
+notifications_history = _bound_routes_g.notifications_history   # E556 (B1)
+app.include_router(_bound_routes_g.notifications_history_router)
+notifications_read_all = _bound_routes_g.notifications_read_all
+app.include_router(_bound_routes_g.notifications_read_all_router)
 
 # E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
 test_notification_channels = _bound_routes_g.test_notification_channels
@@ -7341,6 +7413,10 @@ app.include_router(_surprise_static_router)
 api_surprise_notify_top_picks = _bound_routes_j.api_surprise_notify_top_picks
 app.include_router(_bound_routes_j.api_surprise_notify_top_picks_router)
 
+
+# E557 (round 539, B3): row sparklines (read-only, no login).
+from gateway_routers.sparklines import sparklines_router as _sparklines_router, market_sparklines  # noqa: E402,F401
+app.include_router(_sparklines_router)
 
 # E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
 from gateway_routers.ipo_routes import ipo_scan_router as _ipo_scan_router, api_ipo_scan  # noqa: E402,F401

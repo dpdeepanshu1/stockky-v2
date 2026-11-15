@@ -10,8 +10,26 @@ import { positionStocksApi } from "../../positionStocksApi";
 import { scorecardView, setupLadderView, setupName, type SetupStatsDoc } from "../../setupView";
 import { setVisibleInterval } from "../../visibleInterval";
 import { Btn, Card, Chip, Msg } from "./ui";
+import { DataTable, type Column } from "../kit";   // E538 (F3 part 2): the scorecard table is the kit DataTable
 
 const fmt = (v: number | null, suffix = "") => (v == null ? "-" : `${v}${suffix}`);
+
+type ScoreRow = ReturnType<typeof scorecardView>["rows"][number];
+const tip = (label: string, title: string) => <span title={title}>{label}</span>;
+const num = (r: ScoreRow, k: "winPct" | "avgR" | "lowerR") => (k === "winPct" ? fmt(r.winPct, "%") : k === "avgR" ? fmt(r.avgR) : fmt(r.lowerR));
+function scoreColumns(minTrades: number): Column<ScoreRow>[] {
+  return [
+    { key: "setup", header: "Setup", render: (r) => <span className="text-paper">{r.isAll ? setupName(r.setup) : ""}</span> },
+    { key: "slot", header: "Slot", render: (r) => <span className="text-mist">{r.slotLabel}</span> },
+    { key: "n", header: tip("Trades", "Settled trades carrying this stamp. A cell needs the minimum before it can be judged."), align: "right",
+      render: (r) => <span title={`${r.n} of ${minTrades} trades`}>{r.n}<span className="ml-1 text-[9px] text-mist">{r.progressPct >= 100 ? "" : `${r.progressPct}%`}</span></span> },
+    { key: "win", header: "Win %", align: "right", render: (r) => num(r, "winPct") },
+    { key: "avgR", header: tip("Avg R", "Average R: net P&L divided by the rupees at risk at the stop."), align: "right",
+      render: (r) => <span className={r.avgR != null && r.avgR < 0 ? "text-signal-sell" : ""}>{num(r, "avgR")}</span> },
+    { key: "lowerR", header: tip("Lower R", "90% lower bound of the average R. Only a bound above 0 counts as positive."), align: "right", render: (r) => num(r, "lowerR") },
+    { key: "verdict", header: "Verdict", render: (r) => (r.tone ? <Chip tone={r.tone}>{r.verdictText}</Chip> : <span className="text-mist">{r.verdictText}</span>) },
+  ];
+}
 
 export default function SetupScorecardPanel({ svc }: { svc: Svc }) {
   const [doc, setDoc] = useState<SetupStatsDoc | null>(null);
@@ -61,33 +79,8 @@ export default function SetupScorecardPanel({ svc }: { svc: Svc }) {
         {loaded && !doc && !err && <p className="text-mist">No numbers yet.</p>}
         {doc && <p className="text-[13px]" data-testid="setup-headline">{v.headline}</p>}
         {v.rows.length > 0 && (
-          <div className="mt-2 overflow-x-auto">
-            <table className="w-full text-[11px] tabular-nums" data-testid="setup-table">
-              <thead>
-                <tr className="border-b border-slate text-left text-mist">
-                  <th className="py-1 pr-3">Setup</th>
-                  <th className="py-1 pr-3">Slot</th>
-                  <th className="py-1 pr-3" title="Settled trades carrying this stamp. A cell needs the minimum before it can be judged.">Trades</th>
-                  <th className="py-1 pr-3">Win %</th>
-                  <th className="py-1 pr-3" title="Average R: net P&L divided by the rupees at risk at the stop.">Avg R</th>
-                  <th className="py-1 pr-3" title="90% lower bound of the average R. Only a bound above 0 counts as positive.">Lower R</th>
-                  <th className="py-1">Verdict</th>
-                </tr>
-              </thead>
-              <tbody>
-                {v.rows.map((r) => (
-                  <tr key={r.key} className={`border-b border-slate/50 ${r.isAll ? "font-bold" : ""}`} data-testid="setup-row">
-                    <td className="py-1 pr-3 text-paper">{r.isAll ? setupName(r.setup) : ""}</td>
-                    <td className="py-1 pr-3 text-mist">{r.slotLabel}</td>
-                    <td className="py-1 pr-3" title={`${r.n} of ${v.minTrades} trades`}>{r.n}<span className="ml-1 text-[9px] text-mist">{r.progressPct >= 100 ? "" : `${r.progressPct}%`}</span></td>
-                    <td className="py-1 pr-3">{fmt(r.winPct, "%")}</td>
-                    <td className={`py-1 pr-3 ${r.avgR != null && r.avgR < 0 ? "text-signal-sell" : ""}`}>{fmt(r.avgR)}</td>
-                    <td className="py-1 pr-3">{fmt(r.lowerR)}</td>
-                    <td className="py-1">{r.tone ? <Chip tone={r.tone}>{r.verdictText}</Chip> : <span className="text-mist">{r.verdictText}</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="mt-2" data-testid="setup-table">
+            <DataTable dense columns={scoreColumns(v.minTrades)} rows={v.rows} rowKey={(r) => r.key} rowClass={(r) => (r.isAll ? "font-bold" : "")} />
           </div>
         )}
         {v.warnings.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-5 text-[12px]" data-testid="setup-warnings">{v.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>}

@@ -117,12 +117,20 @@ test("HomePositions is read-only: GET positions only, only with an admin session
   assert.ok(!/<button|onClick|method:|POST|close|kill|commit|arm\(|disarm/.test(h), "no control, no write");
   assert.ok(/setVisibleInterval\(load, POLL_MS\)/.test(h), "pauses with the hidden tab");
 });
-test("market strip: real fields only (Nifty, Sensex, mood), no invented Bank Nifty / VIX / breadth, direction never colour-only", () => {
+test("market strip: Nifty, Sensex, mood always; Bank Nifty / VIX only when the gateway sends a usable tile, direction never colour-only", () => {
   const m = rd("./components/MarketSentimentHeader.tsx");
   assert.ok(m.includes('label="NIFTY 50"') && m.includes('label="SENSEX"') && m.includes('label="Market mood"'));
-  assert.ok(!/bank\s*nifty|vix|breadth/i.test(code(m)), "no tile for data the API does not send");
+  assert.ok(/extraTiles\(data\)\.map/.test(m) && !/BANK NIFTY|INDIA VIX/.test(code(m)), "the two extra tiles come only from extraTiles, never hard-coded");
   assert.ok(/api\.marketIndices\(/.test(m) && /setVisibleInterval\(\(\) => fetchData\(false\), 60000\)/.test(m), "same call, same 60 s poll");
   assert.ok(rd("./components/kit/Stat.tsx").includes("▲ ") && rd("./components/kit/Stat.tsx").includes("▼ "));
+});
+test("extraTiles: nothing for an old gateway or a bad tile; a VIX rise is a warning with the sign in the text; a fall is plain", () => {
+  assert.deepEqual(home.extraTiles(null), []); assert.deepEqual(home.extraTiles({}), []);
+  assert.deepEqual(home.extraTiles({ banknifty: { price: 0, change: 0, change_pct: 0 }, vix: { price: NaN, change: 1, change_pct: 1 } }), [], "zero price and NaN are dropped, never shown as a flat day");
+  assert.deepEqual(home.extraTiles({ banknifty: { price: 50500, change: 500, change_pct: 1 } }).map((x) => [x.key, x.value, x.tone, x.delta]), [["banknifty", "50,500.00", "up", "+500.00 (+1.00%)"]]);
+  const up = home.extraTiles({ vix: { price: 15.2, change: 0.8, change_pct: 5.56 } })[0], dn = home.extraTiles({ vix: { price: 13.3, change: -0.7, change_pct: -5 } })[0];
+  assert.equal(up.tone, "warn"); assert.ok(up.delta.startsWith("+")); assert.equal(dn.tone, "flat"); assert.ok(dn.delta.startsWith("-"));
+  assert.deepEqual(home.extraTiles({ banknifty: { price: 1, change: 1, change_pct: 1 }, vix: { price: 1, change: 1, change_pct: 1 } }).map((x) => x.key), ["banknifty", "vix"]);
 });
 test("Home order: search, market strip, positions, then insights + movers; a result opens straight under the search", () => {
   const d = rd("./components/app/DashboardView.tsx"); const at = (s) => d.indexOf(s);
@@ -144,7 +152,7 @@ test("every Home / decision class used in the sources is defined in home.css", (
 });
 test("home.css: loads right before trading.css, control.css and markets.css, tokens only, no animation, no !important, no blur or gradient, no hex colour, 16px search input", () => {
   const css = stripCss(rd("./styles/home.css")); const main = rd("./main.tsx");
-  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
+  const imports = cascadeOrder();   // E558: base, tokens, components, then the page sheets
   assert.equal(imports[imports.length - 4], "styles/home.css");   // trading.css (E537), control.css (E539) and markets.css (E540) are the only later files
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");

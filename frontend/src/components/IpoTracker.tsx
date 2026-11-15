@@ -22,6 +22,8 @@ import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import IpoFeedHealth from "./IpoFeedHealth";
 import IpoLifecycle from "./IpoLifecycle";   // design v5
+import { Button, Card, Chip, type ChipTone } from "./kit";   // E538 (F3 part 2)
+import { RowSpark, useSparklines } from "./RowSpark";   // E557 (B3)
 import { KpiStrip } from "./ui/KpiStrip";
 import { MarketsFilterBar, NoMatch } from "./MarketsFilterBar";   // E541
 import { NO_FILTER, applyMarketFilter, isFilteredEmpty, sortsFor, type MarketAccess, type MarketFilter } from "../marketsFilter";   // E541
@@ -47,25 +49,13 @@ const WINDOW_3M = 90;
 const WINDOW_6M = 180;
 const WINDOW_WIDE = 365;
 
-function decisionBadgeClass(decision?: string): string {
+// E538 (F3 part 2): the decision badge is a kit chip; the symbol says the same as the colour.
+function decisionChip(decision?: string): { tone: ChipTone; symbol: string } {
   const d = (decision || "").toUpperCase();
-  if (d === "BUY NOW") return "bg-signal-buy/20 text-signal-buy border-signal-buy/40";
-  if (d === "PREPARE TO BUY") return "bg-signal-prepare/20 text-signal-prepare border-signal-prepare/40";
-  if (d === "SELL") return "bg-signal-sell/20 text-signal-sell border-signal-sell/40";
-  if (d === "DO NOT BUY") return "bg-mist/10 text-mist/70 border-slate/50";
-  return "bg-signal-hold/10 text-signal-hold border-signal-hold/30"; // HOLD
-}
-
-// Same small spinner pattern used everywhere else in the app (ScanPanel,
-// DecisionCard, BuySniperModal, StockChart) — IpoTracker's busy buttons
-// previously only changed their label text with no spinner at all, the
-// one visible inconsistency reported against this page.
-function BusySpinner({ className = "" }: { className?: string }) {
-  return (
-    <span
-      className={`inline-block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin ${className}`}
-    />
-  );
+  if (d === "BUY NOW") return { tone: "up", symbol: "▲" };
+  if (d === "PREPARE TO BUY") return { tone: "warn", symbol: "◆" };
+  if (d === "SELL") return { tone: "down", symbol: "▼" };
+  return { tone: "neutral", symbol: "●" }; // DO NOT BUY / HOLD
 }
 
 const IPO_ACCESS: MarketAccess<IpoAnalysis> = { symbol: (r) => r.symbol, name: (r) => r.company_name, score: (r) => r.ipo_score, change: (r) => r.current_vs_issue_pct };   // E541: change = % vs issue price
@@ -430,6 +420,7 @@ export default function IpoTracker({
       : 0;
 
   const shownIpo = applyMarketFilter(ipoList, IPO_ACCESS, mfilter);   // E541
+  const sparkOf = useSparklines(shownIpo.map((i) => i.symbol));   // E557 (B3): unlisted names have no history and show no line
 
   return (
     <div className="space-y-4">
@@ -509,84 +500,27 @@ export default function IpoTracker({
               </button>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setIpoAddOpen(!ipoAddOpen)}
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-mist/20 border border-mist/40 text-paper hover:bg-mist/30"
-            >
+            <Button variant="ghost" size="sm" aria-expanded={ipoAddOpen} onClick={() => setIpoAddOpen(!ipoAddOpen)}>
               + Add IPO
-            </button>
-            <button
-              type="button"
-              onClick={() => void startIpoScan(true, true)}
-              disabled={ipoScanning}
-              title="Wipes ipo_static_feed and the cached list, then bulk-seeds fresh from upstream (NSE + ipoalerts + yfinance) — same job the morning 'IPO Premarket Refresh' GitHub Action runs on a schedule (without the wipe), triggered here on demand. Only wipes once the fresh fetch is confirmed healthy; downgrades to a safe merge instead if NSE looks partially blocked, so a bad fetch can't erase good data."
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-hold/20 border border-signal-hold/40 text-white hover:bg-signal-hold/30 disabled:opacity-40"
-            >
-              {ipoScanning ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-signal-hold" /> Feeding…
-                </span>
-              ) : (
-                "📥 Premarket Feed"
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => void loadFromDb()}
-              disabled={dbLoadBusy}
-              title="Reads ipo_static_feed / the cached list only — never calls NSE/yfinance. Use Force Rescan for that."
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 text-white hover:bg-signal-prepare/30 disabled:opacity-40"
-            >
-              {dbLoadBusy ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-signal-prepare" /> Loading…
-                </span>
-              ) : (
-                "↻ Scan IPOs (DB)"
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => void startIpoScan(true, false)}
-              disabled={ipoScanning}
-              title="Re-scans every IPO from scratch, straight from upstream (NSE + yfinance), merging fresh results into the existing cache/DB (new data wins per symbol, nothing already-known disappears) — a one-off refresh mid-session without the full wipe Premarket Feed does."
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 text-signal-prepare/80 hover:bg-signal-prepare/20 disabled:opacity-40"
-            >
-              {ipoScanning ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <BusySpinner className="border-signal-prepare" /> Scanning…
-                </span>
-              ) : (
-                "Force Scan (upstream)"
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => void stopIpoScan()}
-              disabled={!ipoScanning || stopBusy}
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-sell/20 border border-signal-sell/40 text-white hover:bg-signal-sell/30 disabled:opacity-40"
-            >
+            </Button>
+            <Button variant="soft" size="sm" onClick={() => void startIpoScan(true, true)} loading={ipoScanning} title="Wipes ipo_static_feed and the cached list, then bulk-seeds fresh from upstream (NSE + ipoalerts + yfinance) — same job the morning 'IPO Premarket Refresh' GitHub Action runs on a schedule (without the wipe), triggered here on demand. Only wipes once the fresh fetch is confirmed healthy; downgrades to a safe merge instead if NSE looks partially blocked, so a bad fetch can't erase good data.">
+              {ipoScanning ? "Feeding…" : "📥 Premarket Feed"}
+            </Button>
+            <Button variant="soft" size="sm" onClick={() => void loadFromDb()} loading={dbLoadBusy} title="Reads ipo_static_feed / the cached list only — never calls NSE/yfinance. Use Force Rescan for that.">
+              {dbLoadBusy ? "Loading…" : "↻ Scan IPOs (DB)"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => void startIpoScan(true, false)} loading={ipoScanning} title="Re-scans every IPO from scratch, straight from upstream (NSE + yfinance), merging fresh results into the existing cache/DB (new data wins per symbol, nothing already-known disappears) — a one-off refresh mid-session without the full wipe Premarket Feed does.">
+              {ipoScanning ? "Scanning…" : "Force Scan (upstream)"}
+            </Button>
+            <Button variant="danger" size="sm" onClick={() => void stopIpoScan()} disabled={!ipoScanning} loading={stopBusy}>
               {stopBusy ? "Stopping…" : "■ Stop"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleSearchBuysFromIpo()}
-              disabled={sniperLoading || ipoList.length === 0}
-              title="Rank every tracked IPO with a live price and pick the 1-4 best buy setups among them"
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl border border-signal-buy/50 bg-signal-buy/20 text-white hover:bg-signal-buy/35 disabled:opacity-40 shadow-lg shadow-emerald-900/20"
-            >
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => void handleSearchBuysFromIpo()} disabled={sniperLoading || ipoList.length === 0} loading={sniperLoading && !sniperBusySymbol} title="Rank every tracked IPO with a live price and pick the 1-4 best buy setups among them">
               {sniperLoading && !sniperBusySymbol ? "Sniping…" : "🎯 Search for Buy Stocks (1-4)"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void notifyTop5(5)}
-              disabled={notifyBusy || ipoList.length === 0}
-              title="Send the top 5 IPO Tracker picks to Telegram (uses the same notification channel configured in Settings)"
-              className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-prepare/20 border border-signal-prepare/40 text-white hover:bg-signal-prepare/30 disabled:opacity-40"
-            >
+            </Button>
+            <Button variant="soft" size="sm" onClick={() => void notifyTop5(5)} disabled={ipoList.length === 0} loading={notifyBusy} title="Send the top 5 IPO Tracker picks to Telegram (uses the same notification channel configured in Settings)">
               {notifyBusy ? "Sending…" : "📨 Send Top 5 to Telegram"}
-            </button>
+            </Button>
           </div>
           {notifyMsg && (
             <p className="font-display tabular-nums text-[10px] text-mist mt-1">{notifyMsg}</p>
@@ -611,30 +545,25 @@ export default function IpoTracker({
                 {ipoAddNotice.suggestions.length > 0 && (
                   <div className="mt-1 flex flex-wrap gap-1">
                     {ipoAddNotice.suggestions.map((s) => (
-                      <button
+                      <Button
                         key={s}
-                        type="button"
+                        variant="ghost"
+                        size="sm"
                         onClick={() => {
                           setIpoForm({ company_name: s });
                           setIpoAddNotice(null);
                         }}
-                        className="rounded border border-signal-hold/40 px-1.5 py-0.5 text-white hover:bg-signal-hold/20"
                       >
                         {s}
-                      </button>
+                      </Button>
                     ))}
                   </div>
                 )}
               </div>
             )}
-            <button
-              type="button"
-              onClick={() => void submitIpoAdd()}
-              disabled={ipoAddBusy || !ipoForm.company_name.trim()}
-              className="font-display tabular-nums text-xs px-3 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 text-white hover:bg-signal-buy/30 disabled:opacity-40"
-            >
+            <Button variant="primary" onClick={() => void submitIpoAdd()} disabled={!ipoForm.company_name.trim()} loading={ipoAddBusy}>
               {ipoAddBusy ? "Looking it up…" : "Add & Scan"}
-            </button>
+            </Button>
           </div>
         )}
 
@@ -689,19 +618,12 @@ export default function IpoTracker({
               const v = ipoRowView(ipo);   // E162: formatted text, dashes for missing values
               const stage = { text: v.stage.text, tone: v.stage.tone === "up" ? "text-signal-buy" : v.stage.tone === "warn" ? "text-signal-hold" : v.stage.tone === "down" ? "text-signal-sell/70" : "text-mist/60" };
               return (
-                <div
-                  key={ipo.symbol}
-                  className={`mk-ipo-row ${v.stage.tone} rounded-xl border border-slate/50 bg-ink/50 px-3 py-2.5`}
-                >
+                <Card quiet key={ipo.symbol} className={`mk-ipo-row ${v.stage.tone}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-[140px]">
-                    <button
-                      type="button"
-                      onClick={() => onSelect?.(ipo.symbol)}
-                      className="font-display tabular-nums text-xs text-paper hover:text-signal-buy text-left"
-                    >
+                    <Button variant="ghost" size="sm" onClick={() => onSelect?.(ipo.symbol)}>
                       {ipo.symbol}
-                    </button>
+                    </Button>
                     <p className={`font-display tabular-nums text-[10px] ${stage.tone}`}>{stage.text}</p>
                   </div>
 
@@ -721,6 +643,8 @@ export default function IpoTracker({
                       {v.gain.text}
                     </p>
                   )}
+
+                  <RowSpark symbol={ipo.symbol} closes={sparkOf(ipo.symbol)} />
 
                   {v.score && (
                     <span className={`mk-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
@@ -745,30 +669,22 @@ export default function IpoTracker({
                     </p>
                   )}
 
-                  <span
-                    className={`font-display tabular-nums text-[10px] px-2 py-1 rounded-xl border ${decisionBadgeClass(
-                      ipo.decision
-                    )}`}
-                  >
-                    {ipo.decision || stage.text}
-                  </span>
+                  <Chip as="span" tone={decisionChip(ipo.decision).tone} symbol={decisionChip(ipo.decision).symbol}>{ipo.decision || stage.text}</Chip>
 
                   {(ipo.buy_suggestion || Number(ipo.current_price) > 0) && (
-                    <button
-                      type="button"
+                    <Button
+                      variant="soft"
+                      size="sm"
                       onClick={() => void openIpoSuggestion(ipo)}
-                      disabled={sniperLoading && sniperBusySymbol === ipo.symbol}
+                      loading={sniperLoading && sniperBusySymbol === ipo.symbol}
                       title={
                         ipo.buy_suggestion
                           ? "Show the stored buy setup"
                           : "No stored setup yet — scan live for one"
                       }
-                      className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-xl bg-signal-buy/20 border border-signal-buy/40 text-signal-buy hover:bg-signal-buy/30 disabled:opacity-50"
                     >
                       {sniperLoading && sniperBusySymbol === ipo.symbol ? (
-                        <span className="inline-flex items-center gap-1.5">
-                          <BusySpinner className="border-signal-buy" /> Scanning…
-                        </span>
+                        "Scanning…"
                       ) : ipo.buy_suggestion ? (
                         ipo.decision === "BUY NOW" ? (
                           "Buy Now →"
@@ -778,16 +694,12 @@ export default function IpoTracker({
                       ) : (
                         "🎯 Scan for Buy →"
                       )}
-                    </button>
+                    </Button>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={() => setExpandedSymbol((cur) => (cur === ipo.symbol ? null : ipo.symbol))}
-                    className="font-display tabular-nums text-[10px] text-mist/50 hover:text-paper transition uppercase tracking-wide"
-                  >
+                  <Button variant="ghost" size="sm" aria-expanded={expandedSymbol === ipo.symbol} onClick={() => setExpandedSymbol((cur) => (cur === ipo.symbol ? null : ipo.symbol))}>
                     {expandedSymbol === ipo.symbol ? "Hide detail ▴" : "Detail ▾"}
-                  </button>
+                  </Button>
                 </div>
 
                 {expandedSymbol === ipo.symbol && (
@@ -867,7 +779,7 @@ export default function IpoTracker({
                     )}
                   </div>
                 )}
-                </div>
+                </Card>
               );
             })}
           </div>

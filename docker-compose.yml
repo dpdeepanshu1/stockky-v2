@@ -710,6 +710,11 @@ services:
     ports:
       - "127.0.0.1:8012:8012"
     environment:
+      GEMINI_API_KEY: ${AGENT_GEMINI_API_KEY:-${GEMINI_API_KEY:-}}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+      AGENT_MODE: ${AGENT_MODE:-report}
       PORT: "8012"
       SESSION_SECRET: ${SESSION_SECRET:-}
       # A4b: signs its job token with its own secret; verifies the page's real-trade / position-stocks tokens
@@ -768,6 +773,14 @@ services:
       AUTOCALIB_COOLDOWN_H: ${AUTOCALIB_COOLDOWN_H:-24}
       AUTOCALIB_MAX_AGE_DAYS: ${AUTOCALIB_MAX_AGE_DAYS:-40}
       AUTOCALIB_STEP_PCT: ${AUTOCALIB_STEP_PCT:-25}
+      # E553 (round 533): the nightly AI idea source (agent.py). Ideas only; AGENT_MODE=off | report | propose (propose also queues the existing tests behind the ideas)
+      AGENT_MAX_IDEAS: ${AGENT_MAX_IDEAS:-5}
+      AGENT_MAX_QUEUE: ${AGENT_MAX_QUEUE:-3}
+      AGENT_MIN_RERUN_H: ${AGENT_MIN_RERUN_H:-20}
+      AGENT_MAX_CALLS_DAY: ${AGENT_MAX_CALLS_DAY:-40}
+      AGENT_MIN_GAP_S: ${AGENT_MIN_GAP_S:-7}
+      AGENT_RUN_AFTER_IST: ${AGENT_RUN_AFTER_IST:-16:10}
+      AGENT_GEMINI_BACKUP_MODEL: ${AGENT_GEMINI_BACKUP_MODEL:-gemini-3.1-flash-lite}
     volumes:
       - runner-data:/data/runner
       - bar-records:/data/bars:ro

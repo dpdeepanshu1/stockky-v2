@@ -4,6 +4,7 @@ import { SessionPill, useAdminSession } from "../AdminGate";
 import { NavIcon } from "../ui/NavIcon";
 import { Sheet } from "../kit/Sheet";
 import { Tabs } from "../kit/Tabs";
+import { Button } from "../kit/Button";
 import { StatusClock } from "./clocks";
 import type { Tab } from "./appTypes";
 import {
@@ -329,30 +330,13 @@ export function BackendDownBanner({ isWaking, handleWakeBackend, checkBackend, o
   isWaking: boolean; handleWakeBackend: () => void; checkBackend: () => void; openSettings: () => void;
 }) {
   return (
-        <div className="border-b border-signal-sell/30 bg-signal-sell/5">
-          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3 flex-wrap">
-            <p className="font-mono text-xs text-signal-sell">
-              Can't reach the backend at <span className="text-signal-sell/80">{getApiUrl() || "(not set)"}</span>.
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={handleWakeBackend}
-                disabled={isWaking}
-                className="font-mono text-xs text-paper bg-signal-prepare/20 border border-signal-prepare/40 rounded-lg px-4 py-1.5 hover:bg-signal-prepare/30 transition disabled:opacity-50"
-              >
-                {isWaking ? "Waking..." : "Wake Backend"}
-              </button>
-              <button onClick={checkBackend} className="font-mono text-xs text-mist hover:text-paper underline">
-                Retry
-              </button>
-              <button
-                onClick={openSettings}
-                className="font-mono text-xs text-signal-sell hover:text-paper underline"
-              >
-                Fix in Settings
-              </button>
-            </div>
-          </div>
-        </div>
+    <div className="sh-banner" role="alert">
+      <p className="sh-banner-text">Can't reach the backend at <span className="sh-banner-url">{getApiUrl() || "(not set)"}</span>.</p>
+      <div className="sh-banner-actions">
+        <Button size="sm" onClick={handleWakeBackend} loading={isWaking}>{isWaking ? "Waking..." : "Wake Backend"}</Button>
+        <Button size="sm" variant="ghost" onClick={checkBackend}>Retry</Button>
+        <Button size="sm" variant="ghost" onClick={openSettings}>Fix in Settings</Button>
+      </div>
+    </div>
   );
 }

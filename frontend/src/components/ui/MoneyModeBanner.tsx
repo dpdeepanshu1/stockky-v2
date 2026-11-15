@@ -1,6 +1,7 @@
 // frontend/src/components/ui/MoneyModeBanner.tsx  (design v5 - one shared "where is my money" banner for Trades, Real Auto Trade, Position Stocks)
 // Presentation only: the mode and the safety chips are passed in from state the page already has. It never changes mode and never shows a money amount.
 // The mode is always spelled out in words and every chip carries a symbol (✓ / ⚠ / ✕), so nothing relies on colour alone.
+import { Chip, ChipList } from "../kit/Chip";
 export type MoneyMode = "PAPER" | "DEMO" | "REAL";
 export type SafetyChip = { label: string; state: "ok" | "warn" | "bad" };
 
@@ -28,11 +29,9 @@ export function MoneyModeBanner({ mode, detail, chips = [] }: { mode: MoneyMode;
         <span className="w-money-line">{detail || c.line}</span>
       </div>
       {chips.length > 0 && (
-        <ul className="w-money-chips">
-          {chips.map((x) => (
-            <li key={x.label} className={`w-money-chip ${x.state}`}><span aria-hidden="true">{SYMBOL[x.state]}</span> {x.label}</li>
-          ))}
-        </ul>
+        <ChipList>
+          {chips.map((x) => <Chip key={x.label} tone={x.state} symbol={SYMBOL[x.state]}>{x.label}</Chip>)}
+        </ChipList>
       )}
     </div>
   );

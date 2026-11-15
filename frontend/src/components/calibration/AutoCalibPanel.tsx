@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { runnerApi, type AutoReport, type AutoStatus } from "../../calibrationApi";
 import { Btn, Card, Chip, Msg } from "./ui";
+import AgentCard from "./AgentCard";
 
 const when = (ts: number) => new Date(ts * 1000).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false }).slice(0, 17);
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | undefined> = { changed: "good", ok: "good", would_change: "warn", waiting: "warn", cooldown: "warn", error: "bad", service_unreachable: "bad" };
@@ -71,6 +72,8 @@ export default function AutoCalibPanel() {
           </div>
         </Card>
       )}
+
+      <AgentCard />
 
       <Card title="Which test decides which switch">
         <div className="space-y-1">

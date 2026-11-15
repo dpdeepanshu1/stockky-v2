@@ -79,3 +79,16 @@ def test_schedule_roundtrip(client):
     bad = client.put("/schedule", headers=H(), json={"entries": [{"id": "x", "pack": "nope", "days": [0], "time": "09:00"}]})
     assert bad.status_code == 400
     client.put("/schedule", headers=H(), json={"enabled": True})
+
+
+def test_agent_routes_need_login_and_never_show_a_key(client):
+    """E553: /agent/status and /agent/run are admin-only; the status shows key flags, never a key; an unknown mode is refused."""
+    assert client.get("/agent/status").status_code == 401
+    assert client.post("/agent/run", json={}).status_code == 401
+    assert client.post("/agent/resume").status_code == 401, "round 536: resume is admin-only too"
+    st = client.get("/agent/status", headers=H())
+    assert st.status_code == 200, st.text
+    d = st.json()
+    assert d["mode"] in ("off", "report", "propose") and set(d["keys"]) == {"gemini", "groq"} and all(isinstance(v, bool) for v in d["keys"].values())
+    assert "BROKER_STOP_ENABLED" not in d["allow_list"] and "KRONOS_GATE_MODE" in d["allow_list"]
+    assert client.post("/agent/run", headers=H(), json={"mode": "apply"}).status_code == 400

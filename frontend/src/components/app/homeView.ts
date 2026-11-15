@@ -69,3 +69,18 @@ export function pctText(n: number | null | undefined): string {
   if (!fin(n)) return "—";
   return `${n > 0 ? "+" : ""}${n.toFixed(2)}%`;
 }
+
+// E555 (round 539, B2): the optional Bank Nifty and India VIX tiles. They exist only when the gateway sent a finite tile; a missing, partial or
+// zero-price tile is simply not shown (nothing is made up, and an old gateway keeps the strip exactly as it was).
+export type ExtraTile = { key: "banknifty" | "vix"; label: string; value: string; tone: "up" | "down" | "warn" | "flat"; delta: string; sub?: string };
+type RawTile = { price?: unknown; change?: unknown; change_pct?: unknown } | null | undefined;
+const usable = (t: RawTile): t is { price: number; change: number; change_pct: number } =>
+  !!t && fin(t.price) && t.price > 0 && fin(t.change) && fin(t.change_pct);
+
+/** VIX is a fear gauge: a rise is a warning (the sign is in the text and the tone shows the warning mark), a fall is shown plain. */
+export function extraTiles(d: { banknifty?: RawTile; vix?: RawTile } | null | undefined): ExtraTile[] {
+  const out: ExtraTile[] = [];
+  if (d && usable(d.banknifty)) out.push({ key: "banknifty", label: "BANK NIFTY", value: indexValue(d.banknifty.price), tone: toneOf(d.banknifty.change), delta: indexDelta(d.banknifty.change, d.banknifty.change_pct) });
+  if (d && usable(d.vix)) out.push({ key: "vix", label: "INDIA VIX", value: indexValue(d.vix.price), tone: d.vix.change > 0 ? "warn" : "flat", delta: indexDelta(d.vix.change, d.vix.change_pct), sub: "Fear gauge: higher means more worry" });
+  return out;
+}

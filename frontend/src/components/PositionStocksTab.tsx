@@ -28,6 +28,7 @@ import { PsHistoryTab } from "./positionStocks/PsHistoryTab";
 import { PsDhanOrdersTab } from "./positionStocks/PsDhanOrdersTab";
 import { PsChargesTab } from "./positionStocks/PsChargesTab";
 import { PsSettingsTab } from "./positionStocks/PsSettingsTab";
+import { Button } from "./kit";   // round 537
 
 export default function PositionStocksTab() {
   const s = usePositionStocks();
@@ -44,7 +45,7 @@ export default function PositionStocksTab() {
             value={apiUrlInput}
             onChange={e => setApiUrlInput(e.target.value)}
           />
-          <button onClick={saveApiUrl} className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy">Save</button>
+          <Button variant="primary" onClick={saveApiUrl}>Save</Button>
         </div>
       </div>
     );
@@ -116,7 +117,7 @@ export default function PositionStocksTab() {
       ) : (
         <div className="ra-session ra-session-ok">
           <span className="font-display tabular-nums">● Admin session active</span>
-          <button onClick={logoutEverywhere} className="font-display tabular-nums">Log out</button>
+          <Button variant="ghost" size="sm" onClick={logoutEverywhere}>Log out</Button>
         </div>
       )}
 

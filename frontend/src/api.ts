@@ -1,4 +1,6 @@
 import type { DecisionStructure } from "./structureView";
+import type { AlertHistory } from "./components/alertsFeed";
+export type { AlertHistory, AlertItem } from "./components/alertsFeed";
 // frontend/src/api/api.ts
 
 const STORAGE_KEY = "stockky:api_url";
@@ -552,6 +554,9 @@ export interface IndexData {
 export interface MarketIndicesResponse {
   nifty: IndexData;
   sensex: IndexData;
+  /** round 539 (B2): optional; only present when the gateway could read them */
+  banknifty?: IndexData;
+  vix?: IndexData;
   market_mood: "BULLISH" | "BEARISH" | "NEUTRAL";
   market_score: number;
   fetched_at?: string;
@@ -1235,6 +1240,15 @@ export const api = {
 
   clearNotificationChannel: (channel: "discord" | "slack" | "telegram" | "callmebot") =>
     request<NotificationConfig>(`/notifications/config/${channel}`, { method: "DELETE" }, 2, 30000),
+
+  // E557 (B3): the last closes per symbol for the row sparklines (public read; the gateway caps it at 40 names a call).
+  marketSparklines: (symbols: string[]) =>
+    request<{ days: number; series: Record<string, number[]>; missing: string[]; enabled: boolean }>(
+      `/market/sparklines?symbols=${encodeURIComponent(symbols.slice(0, 40).join(","))}&days=30`, undefined, 1, 15000),
+  // E556 (B1): the Alerts feed. Admin login (the gateway answers 401 "admin session" otherwise; request() adds the log-in hint).
+  getNotificationHistory: (limit = 100) =>
+    request<AlertHistory>(`/notifications/history?limit=${Math.max(1, Math.min(200, Math.trunc(limit) || 100))}`, undefined, 1, 20000),
+  markAlertsRead: () => request<{ ok: boolean; read_at: number; unread: number }>("/notifications/read-all", { method: "POST" }, 1, 20000),
 
   testNotifications: () =>
     // Fix: this fires a REAL alert to every enabled channel (CallMeBot can

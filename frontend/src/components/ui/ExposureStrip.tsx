@@ -3,6 +3,8 @@
 // an arrow, and a short is hatched, so nothing relies on colour alone. Blocks rise in once; nothing loops.
 import type { CSSProperties } from "react";
 import { exposureView, type ExposureRow } from "../../v7View";
+import { Card } from "../kit/Card";
+import { Chip, ChipList } from "../kit/Chip";
 
 const inr = (n: number): string => `₹${Math.round(n).toLocaleString("en-IN")}`;
 const signed = (n: number): string => `${n > 0 ? "+" : n < 0 ? "-" : ""}₹${Math.abs(Math.round(n)).toLocaleString("en-IN")}`;
@@ -12,15 +14,15 @@ export function ExposureStrip({ rows, title = "Where the open money sits" }: { r
   if (!v.count) return null;
   const pnlTone = v.pnlTotal == null || Math.abs(v.pnlTotal) < 0.5 ? "flat" : v.pnlTotal > 0 ? "up" : "down";
   return (
-    <section className="w-expo" aria-label={title}>
+    <Card className="w-expo" aria-label={title}>
       <header className="w-expo-head">
         <b>{title}</b>
-        <ul className="w-expo-chips">
-          <li className="w-expo-chip">{v.count} open · {inr(v.totalValue)} in</li>
-          {v.shortCount > 0 && <li className="w-expo-chip">↗ {v.longCount} long · ↘ {v.shortCount} short</li>}
-          {v.pnlTotal != null && <li className={`w-expo-chip pnl ${pnlTone}`}>{pnlTone === "up" ? "▲ " : pnlTone === "down" ? "▼ " : ""}now {signed(v.pnlTotal)}</li>}
-          {v.nearStop.length > 0 && <li className="w-expo-chip warn">⚠ {v.nearStop.length} near stop: {v.nearStop.slice(0, 3).join(", ")}{v.nearStop.length > 3 ? "…" : ""}</li>}
-        </ul>
+        <ChipList>
+          <Chip>{v.count} open · {inr(v.totalValue)} in</Chip>
+          {v.shortCount > 0 && <Chip>↗ {v.longCount} long · ↘ {v.shortCount} short</Chip>}
+          {v.pnlTotal != null && <Chip tone={pnlTone === "flat" ? "neutral" : pnlTone} symbol={pnlTone === "up" ? "▲" : pnlTone === "down" ? "▼" : undefined}>now {signed(v.pnlTotal)}</Chip>}
+          {v.nearStop.length > 0 && <Chip tone="warn" symbol="⚠">{v.nearStop.length} near stop: {v.nearStop.slice(0, 3).join(", ")}{v.nearStop.length > 3 ? "…" : ""}</Chip>}
+        </ChipList>
       </header>
       <ul className="w-expo-bar" aria-label="Open positions by money put in">
         {v.segments.map((s, i) => (
@@ -32,6 +34,6 @@ export function ExposureStrip({ rows, title = "Where the open money sits" }: { r
         ))}
       </ul>
       <p className="w-expo-note">Block width = money put in (entry × quantity). ▲ up, ▼ down right now. Hatched blocks are shorts.</p>
-    </section>
+    </Card>
   );
 }

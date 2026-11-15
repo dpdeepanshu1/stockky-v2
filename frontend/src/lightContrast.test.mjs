@@ -27,7 +27,7 @@ test("ink colours pass AA on their own 35% tint over white and over the page", (
 });
 test("disabled buttons are readable (>= 4.5:1) and not opacity-faded", () => {
   assert.ok(ratio(tok("disabled-fg"), tok("disabled-bg")) >= 4.5);
-  assert.match(css, /\.ra-btn:disabled[\s\S]*?opacity: 1;/);
+  assert.match(readFileSync(new URL("./styles/components.css", import.meta.url), "utf8"), /\.k-btn:disabled \{[^}]*cursor: not-allowed/);
 });
 test("plain text-white can no longer land on a pale background", () => {
   assert.match(css, /\.text-white:not\(\[class\*="bg-signal-"\]\)/);

@@ -28,7 +28,7 @@ from _repo_walk import walk_py  # noqa: E402  (skips .venv / site-packages / cac
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "ENV_REFERENCE.txt"
 SKIP = frozenset({"tests", "scripts"})  # our own test code and helper scripts are not production reads
-HELPER_FN = re.compile(r"(^|_)(env|og|bs|kg|flag)(_|$)|_(float|int|bool|str|csv)$", re.I)  # E170: _env_int("X", 5), _bs_bool("X", "true") ...
+HELPER_FN = re.compile(r"(^|_)(env|og|bs|kg|flag)(_|$)|_(float|int|bool|str|csv)$|^_[sibf]$", re.I)  # round 536: also the one-letter helpers calibration-runner-service/config.py uses (_s, _i, _b, _f)  # E170: _env_int("X", 5), _bs_bool("X", "true") ...
 HELPER_NAME = re.compile(r"[A-Z][A-Z0-9]*(_[A-Z0-9]+)+")
 CALLS = {"os.getenv", "os.environ.get", "_os.getenv", "_os.environ.get", "environ.get", "getenv"}
 

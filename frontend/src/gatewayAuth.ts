@@ -8,7 +8,7 @@ const TOKEN_KEY = "stockky:real_trade_session_token";
 // so the gateway calls (training, alerts...) went out bare and got a 401. Fall back to the Position Stocks token.
 const TOKEN_KEY_FALLBACK = "stockky:position_stocks_session_token";
 const ADMIN_PATH =
-  /^\/(?:notifications\/(?:config|call\/me|test|send-picks)|training\/train|ops\/(?:power-off|circuit-reset|overnight\/(?:config|run)|resume-activity|qstash\/publish)|(?:data-)?feed\/(?:hard-reset|purge-over-cap)|(?:surprise\/)?ipo\/(?:notify-top-picks|purge-non-equity)|(?:surprise|stockky-hot)\/notify-top-picks|scan\/universe\/cache)(?:[/?#]|$)/;
+  /^\/(?:notifications\/(?:config|call\/me|test|send-picks|history|read-all)|training\/train|ops\/(?:power-off|circuit-reset|overnight\/(?:config|run)|resume-activity|qstash\/publish)|(?:data-)?feed\/(?:hard-reset|purge-over-cap)|(?:surprise\/)?ipo\/(?:notify-top-picks|purge-non-equity)|(?:surprise|stockky-hot)\/notify-top-picks|scan\/universe\/cache)(?:[/?#]|$)/;
 // E148 (F-12): the training service's own system-level actions, reached through the gateway's /training/* proxy. Mirrors admin_guard._TRAINING_ADMIN
 // (exact paths only, so the progress poll /training/api/train/progress goes out unchanged).
 const ADMIN_TRAINING_PATH =

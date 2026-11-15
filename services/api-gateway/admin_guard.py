@@ -30,6 +30,8 @@ PROTECTED = (
     "/notifications/config",
     "/notifications/config/{channel}",
     "/notifications/call/me",
+    "/notifications/history",       # E556 (B1): the alert text can name picks and positions
+    "/notifications/read-all",
     "/notifications/test",
     "/notifications/send-picks",
     "/training/train",

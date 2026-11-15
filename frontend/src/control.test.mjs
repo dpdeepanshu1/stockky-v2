@@ -162,7 +162,7 @@ test("Switch rows show a one-line description and the last-changed line; apply, 
 /* ---------- CSS ---------- */
 test("control.css: loads last, tokens only, no animation, no !important, no blur or gradient, no hex colour; every oc- / cx- class used is defined", () => {
   const css = stripCss(rd("./styles/control.css")); const main = rd("./main.tsx");
-  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
+  const imports = cascadeOrder();   // E558: base, tokens, components, then the page sheets
   assert.equal(imports[imports.length - 2], "styles/control.css");   // markets.css (E540) is the only later file
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");

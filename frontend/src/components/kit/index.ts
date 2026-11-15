@@ -6,6 +6,8 @@ export type { PillState } from "./StatusPill";
 export { Tabs } from "./Tabs";
 export type { TabItem } from "./Tabs";
 export { Button } from "./Button";
+export { Chip, ChipList } from "./Chip";
+export type { ChipTone } from "./Chip";
 export { Field, Switch } from "./Field";
 export { DataTable } from "./DataTable";
 export type { Column } from "./DataTable";

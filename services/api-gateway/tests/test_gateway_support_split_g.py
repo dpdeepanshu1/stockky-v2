@@ -17,9 +17,9 @@ EXPECTED = {
     "set_notification_config": [("post", "/notifications/config", True)],
     "delete_notification_channel": [("delete", "/notifications/config/{channel}", True)],
     "notifications_call_me": [("api_route", "/notifications/call/me", True)],
-    "test_notification_channels": [("post", "/notifications/test", True)],
-    "notifications_history": [("api_route", "/notifications/history", True)],   # E556 (B1)
+    "notifications_history": [("api_route", "/notifications/history", True)],   # E556 (B1): GET only (see GET_ONLY_API_ROUTES); main.py includes it right after call_me
     "notifications_read_all": [("post", "/notifications/read-all", True)],   # E556 (B1)
+    "test_notification_channels": [("post", "/notifications/test", True)],
     "trigger_training": [("post", "/training/train", True)],
     "ops_circuit_reset": [("post", "/ops/circuit-reset", True), ("get", "/ops/circuit-reset", False)],   # the GET stayed open on purpose
     "ops_overnight_set_config": [("post", "/ops/overnight/config", True)],
@@ -28,6 +28,10 @@ EXPECTED = {
     "ops_resume_activity": [("post", "/ops/resume-activity", True)],
     "hard_reset_database": [("post", "/data-feed/hard-reset", True), ("post", "/api/data-feed/hard-reset", True), ("post", "/api/feed/hard-reset", True)],
 }
+
+
+# api_route handlers that are declared with methods=["GET"] only (api_route, not .get, because test_admin_guard's scanner reads post / delete / api_route decorators)
+GET_ONLY_API_ROUTES = {"notifications_history"}
 
 
 def _factory_handlers():
@@ -53,6 +57,9 @@ def test_every_expected_route_lives_in_the_factory_with_the_same_decorators_guar
         assert {d.func.value.id for d in decos} == {f"{name}_router"}, f"{name} must use its own router"
         for d in decos:   # no other dependency-like kwarg may slip in unguarded (api_route keeps its methods)
             assert {k.arg for k in d.keywords} <= {"dependencies", "methods"}, name
+    for name in GET_ONLY_API_ROUTES:
+        deco = got[name].decorator_list[0]
+        assert ast.unparse(next(k.value for k in deco.keywords if k.arg == "methods")) == "['GET']", name
     call_me = next(d for d in got["notifications_call_me"].decorator_list)
     assert ast.unparse(next(k.value for k in call_me.keywords if k.arg == "methods")) == "['GET', 'POST']"
 
@@ -110,7 +117,7 @@ def test_live_app_registers_each_moved_route_once_guarded_and_signatures_resolve
     seen = Counter((m, r.path) for r in main.app.routes for m in (getattr(r, "methods", None) or ()))
     for name, routes in EXPECTED.items():
         for method, path, guarded in routes:
-            methods = ["GET", "POST"] if method == "api_route" else [method.upper()]
+            methods = (["GET"] if name in GET_ONLY_API_ROUTES else ["GET", "POST"]) if method == "api_route" else [method.upper()]
             for m in methods:
                 assert seen[(m, path)] == 1, f"{m} {path} registered {seen[(m, path)]} times"
                 route = next(r for r in main.app.routes if r.path == path and m in (getattr(r, "methods", None) or ()))

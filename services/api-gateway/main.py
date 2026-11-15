@@ -6537,7 +6537,7 @@ app.include_router(_bound_routes_g.delete_notification_channel_router)
 # E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
 notifications_call_me = _bound_routes_g.notifications_call_me
 app.include_router(_bound_routes_g.notifications_call_me_router)
-notifications_history = _bound_routes_g.notifications_history   # E556 (B1)
+notifications_history = _bound_routes_g.notifications_history
 app.include_router(_bound_routes_g.notifications_history_router)
 notifications_read_all = _bound_routes_g.notifications_read_all
 app.include_router(_bound_routes_g.notifications_read_all_router)

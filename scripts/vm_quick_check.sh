@@ -14,6 +14,12 @@ bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $1"; [ -n "${2:-}" ] && echo "$2" | sed
 warn() { WARN=$((WARN+1)); echo "  WARN  $1"; [ -n "${2:-}" ] && echo "$2" | sed 's/^/        | /'; }
 info() { echo "  INFO  $1"; }
 
+# E586 (round 561): right after `docker compose up` containers read "health: starting" for up to a minute, which made check 1 (and the gateway checks) FAIL for a healthy stack.
+# Wait until none is starting / unhealthy / restarting (QC_WAIT_S seconds, default 90; QC_WAIT_S=0 skips the wait). A container that is still not healthy after that is a real FAIL.
+QC_WAIT_S="${QC_WAIT_S:-90}"; _t0=$SECONDS
+while [ $((SECONDS-_t0)) -lt "$QC_WAIT_S" ] && docker compose ps --format '{{.Status}}' 2>/dev/null | grep -qE 'starting|unhealthy|Restarting'; do sleep 3; done
+[ $((SECONDS-_t0)) -ge 4 ] && echo "  (waited $((SECONDS-_t0)) s for containers to settle)"
+
 echo "== 1. containers"
 BAD=$(docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null | grep -v -E ' Up ' ; docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null | grep -E 'unhealthy|starting|Restarting')
 N=$(docker compose ps --format '{{.Name}}' 2>/dev/null | wc -l)
@@ -69,6 +75,30 @@ assert sum(c.get(k,0) for k in ("long_buildup","short_covering","short_buildup",
 nb=sum(1 for x in r if x.get("basis_pct") is None)
 assert nb<len(r)*0.5, "basis missing for "+str(nb)+" of "+str(len(r))+" stocks (cash price column?)"
 print("close of "+td+(" (STALE, expected "+str(d.get("expected_date"))+")" if d.get("stale") else "")+", "+str(len(r))+" stocks, "+str(nb)+" without basis")' >/tmp/qc_feod.txt 2>&1 && ok "F&O end-of-day pack (round 554): $(cat /tmp/qc_feod.txt)" || bad "F&O end-of-day pack" "$(cat /tmp/qc_feod.txt)"
+
+# E586 (round 561): rounds 559-560 wiring on the live stack. Bank Nifty is served by market-data (:8001) and the F&O service (:8007), NOT by the gateway (:8000), and the stock
+# popup's liquidity badge by position-stocks (:8006). WARN, not FAIL: they depend on Dhan / the session. The two token checks run only with ADMIN_TOKEN set.
+MD="${MD:-http://localhost:8001}"; FNO="${FNO:-http://localhost:8007}"; PS="${PS:-http://localhost:8006}"
+BNX=$(curl -s --max-time 20 "$MD/dhan/options/expiries?underlying=BANKNIFTY")
+echo "$BNX" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); e=d.get("expiries") if isinstance(d,dict) else None
+assert e, "no expiry list: "+str(d)[:160]
+print(str(len(e))+" expiries, nearest "+str(e[0]))' >/tmp/qc_bnx.txt 2>&1 && ok "Bank Nifty view only (round 559): $(cat /tmp/qc_bnx.txt)" || warn "Bank Nifty expiries from market-data" "$(tail -2 /tmp/qc_bnx.txt)"
+if [ -n "${ADMIN_TOKEN:-}" ]; then
+  curl -s --max-time 20 "$FNO/fno/overview" -H "Authorization: Bearer $ADMIN_TOKEN" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); u=d.get("underlyings")
+assert u is not None, "no underlyings key: "+str(d)[:160]
+assert sorted(u)==["NIFTY","SENSEX"], "the engine lists "+str(u)+" (Bank Nifty must stay view only)"
+print("engine lists "+",".join(u))' >/tmp/qc_fnou.txt 2>&1 && ok "F&O engine underlyings (round 559): $(cat /tmp/qc_fnou.txt)" || warn "F&O engine underlyings" "$(tail -2 /tmp/qc_fnou.txt)"
+  curl -s --max-time 25 "$PS/board/RELIANCE" -H "Authorization: Bearer $ADMIN_TOKEN" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); assert "liquidity" in d, "no liquidity key on /board/RELIANCE: "+str(d)[:160]
+l=d["liquidity"] or {}; print("key present, fields: "+",".join(sorted(l)) if isinstance(l,dict) else "key present")' >/tmp/qc_liq.txt 2>&1 && ok "popup liquidity badge (round 559): $(cat /tmp/qc_liq.txt)" || warn "popup liquidity badge" "$(tail -2 /tmp/qc_liq.txt)"
+else
+  info "set ADMIN_TOKEN to also check the F&O engine list and the popup liquidity key"
+fi
 
 echo "== 4. runner"
 curl -s --max-time 10 "$RUNNER/health" | grep -q '"status":"ok"' && ok "calibration runner health ok" || bad "runner health not ok"

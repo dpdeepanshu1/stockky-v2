@@ -1,3 +1,8 @@
+## 15 Nov 2026 - Round 540 closed (E561): F4 is finished at 14 `!important`; the screenshot check is skipped by decision
+
+ * **Decision:** the Dashboard / Auto Trade / Settings screenshot check is dropped. The 6 `!important` that compete with Tailwind colour utilities (input colour, input background, `.h-1.5`, manual-trade focus ring, main panel background and border) stay as they are; the other 8 stay as deliberate. F4 ends at 17 -> 14 (ratchet 14 in `cssClean.test.mjs`).
+ * **No code change in this entry;** plan v6 has the full VM run order.
+
 ## 15 Nov 2026 - Round 540 (E560), F4 part 3a: footer `!important` removed, ratchet 15 -> 14
 
  * **What:** `.app-footer { border-top-color }` in `styles/base.css` no longer uses `!important`. Nothing else sets that property with `!important`, Tailwind has no `important` option, and the footer's `border-slate/40` utility has the same specificity but comes earlier (`@tailwind utilities` is at the top of `base.css`), so the later rule wins. No computed style changes.

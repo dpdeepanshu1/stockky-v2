@@ -27,7 +27,7 @@ from fno import capital as fno_capital
 from fno import liveparams
 from fno import vix_rank          # round 550 (P1): read-only, used by the chain route only
 from fno.params import Params
-from fno.provider import HttpProvider
+from fno.provider import VIEW_ONLY_UNDERLYINGS, HttpProvider
 from fno.runtime import Runner, market_open
 from fno.store import Store, day_of
 
@@ -247,16 +247,17 @@ def probe_note(body: ProbeNote, admin=Depends(require_admin)) -> Dict[str, Any]:
 @app.get("/fno/expiries")
 def expiries(underlying: str = "NIFTY", admin=Depends(require_admin)) -> Dict[str, Any]:
     u = underlying.upper()
-    if u not in ("NIFTY", "SENSEX"):
-        raise HTTPException(status_code=400, detail="underlying must be NIFTY or SENSEX")
-    return {"underlying": u, "expiries": provider.expiries(u)}
+    if u not in ("NIFTY", "SENSEX") + VIEW_ONLY_UNDERLYINGS:
+        raise HTTPException(status_code=400, detail="underlying must be NIFTY or SENSEX (BANKNIFTY for viewing only)")
+    return {"underlying": u, "expiries": provider.expiries(u), "view_only": u in VIEW_ONLY_UNDERLYINGS}
 
 
 @app.get("/fno/chain")
 def chain(underlying: str = "NIFTY", expiry: str = "", admin=Depends(require_admin)) -> Dict[str, Any]:
     u = underlying.upper()
-    if u not in ("NIFTY", "SENSEX"):
-        raise HTTPException(status_code=400, detail="underlying must be NIFTY or SENSEX")
+    if u not in ("NIFTY", "SENSEX") + VIEW_ONLY_UNDERLYINGS:
+        raise HTTPException(status_code=400, detail="underlying must be NIFTY or SENSEX (BANKNIFTY for viewing only)")
+    view_only = u in VIEW_ONLY_UNDERLYINGS      # round 559 (P7): shown, never traded; no bias is computed for it (the signal thresholds were never tested on it)
     if expiry and not _DAY_RE.match(expiry):
         raise HTTPException(status_code=400, detail="expiry must be YYYY-MM-DD")
     p = liveparams.current()
@@ -265,13 +266,13 @@ def chain(underlying: str = "NIFTY", expiry: str = "", admin=Depends(require_adm
     if ch is None:
         raise HTTPException(status_code=503, detail="option chain unavailable (market-data / Dhan)")
     summ = analytics.chain_summary(ch, p.strikes_each_side)
-    bias = signals.index_bias(provider.daily(u), provider.intraday(u), summ, p)
+    bias = None if view_only else signals.index_bias(provider.daily(u), provider.intraday(u), summ, p)
     # round 550 (P1): India VIX against its own recorded history, for the Chain tab. A separate key (not part of `summary`, which the bias reads); the engine never calls this.
     try:
         vr = vix_rank.read(config.DATA_DIR, eng.now_ist().date().isoformat(), provider.vix())
     except Exception:  # noqa: BLE001 - display only
         vr = None
-    return {"chain": ch.to_json(), "summary": summ, "bias": bias, "expiries": provider.expiries(u), "age_s": round(ch.age_s(), 1), "vix_rank": vr}
+    return {"chain": ch.to_json(), "summary": summ, "bias": bias, "expiries": provider.expiries(u), "age_s": round(ch.age_s(), 1), "vix_rank": vr, "view_only": view_only}
 
 
 @app.get("/fno/strategies")

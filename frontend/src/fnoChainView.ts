@@ -10,8 +10,8 @@ export interface ChainRow {
   ceOiPct: number; peOiPct: number;
 }
 
-/** how far from the ATM strike the table reaches (index points): Nifty 600, Sensex 2000 (the same window as before the redesign). */
-export const chainWindow = (und: string): number => (und === "NIFTY" ? 600 : 2000);
+/** how far from the ATM strike the table reaches (index points): Nifty 600, Sensex 2000 (the same window as before the redesign), Bank Nifty 1500 (round 559, view only: about 15 strikes of 100 each side). */
+export const chainWindow = (und: string): number => (und === "NIFTY" ? 600 : und === "BANKNIFTY" ? 1500 : 2000);
 
 export function atmStrike(strikes: ChainStrikeIn[] | null | undefined, spot: number): number | null {
   let best: number | null = null;

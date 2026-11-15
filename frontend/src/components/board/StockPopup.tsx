@@ -10,6 +10,7 @@ import { setVisibleInterval } from "../../visibleInterval";
 import { positionStocksApi } from "../../positionStocksApi";
 import ZoneChart from "./ZoneChart";
 import PopupFlow from "./PopupFlow";
+import { liquidityView } from "../../popupFlowView";
 import { zoneScoreLabel } from "./riskCap";
 import { convictionDots } from "./boardState";
 import { computeMomentum, fmtPct } from "./momentum";
@@ -64,6 +65,7 @@ export default function StockPopup({ row, onClose, reduced, extra }: { row: Boar
     const lo = Math.min(...spark), hi = Math.max(...spark), span = hi - lo || 1;
     sparkPts = spark.map((p, i) => `${((i / (spark.length - 1)) * 86).toFixed(1)},${(2 + (1 - (p - lo) / span) * 24).toFixed(1)}`).join(" ");
   }
+  const liq = liquidityView(v?.liquidity, Date.now());          // round 559 (P8): traded value rank + recorded spread, each with its time; hidden without either
   const mom = v ? computeMomentum(v.candles, ltp, num(v.vwap) ?? num(row?.vwap), v.tf_min) : null;
   const ob = v?.zone ?`${f2(v.zone.bottom)}-${f2(v.zone.top)}` : "-";
   const sr = v ? `${f2(v.levels.supports[0]?.price)} / ${f2(v.levels.resistances[0]?.price)}` : "-";
@@ -121,6 +123,18 @@ export default function StockPopup({ row, onClose, reduced, extra }: { row: Boar
               </div>
             )}
             <PopupFlow symbol={row.symbol} />
+            {liq.kind === "ok" && (
+              <div className="ob-mom" data-testid="stock-liquidity">
+                <div className="ob-mom-head"><span>Liquidity</span></div>
+                <div className="ob-mom-kv">
+                  <div><span>Traded value</span><b>{liq.turnover}</b></div>
+                  <div><span>Spread</span><b>{liq.spread}</b></div>
+                </div>
+                {liq.turnoverSub && <div className="ob-note">Traded value: {liq.turnoverSub}.</div>}
+                <div className="ob-note">Spread: {liq.spreadSub}.</div>
+                <div className="ob-note">{liq.note}</div>
+              </div>
+            )}
             {v ? <div className="ob-chart"><ZoneChart v={v} reduced={reduced} mode={mode} /></div> : !err && <div className="ob-note" style={{ padding: 12 }}>Loading chart…</div>}
             {v && (
               <div className="ob-levels">

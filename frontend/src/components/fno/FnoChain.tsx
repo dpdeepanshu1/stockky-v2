@@ -1,5 +1,5 @@
 // F&O Options > Chain (E539, redesign round 6): the live option chain as a table. CE on the left, PE on the right, the strike in the middle, the ATM row marked
-// (and scrolled into view), open interest drawn as a bar behind the number. Same call and same 8 s poll as before; the bias card is unchanged. Nothing here places an order.
+// (and scrolled into view), open interest drawn as a bar behind the number. Same call and same 8 s poll as before; the bias card is unchanged (round 559: Bank Nifty is view only, no bias card). Nothing here places an order.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fnoApi } from "../../fnoApi";
 import { pcrReading } from "../../fnoView";
@@ -9,7 +9,8 @@ import { Msg } from "../calibration/ui";
 import { Card, CardHeader, DataTable, Stat, Stats, StatusPill, Tabs, type Column } from "../kit";
 import { useFno } from "./useFno";
 
-const UNDS = [{ id: "NIFTY" as const, label: "Nifty" }, { id: "SENSEX" as const, label: "Sensex" }];
+const UNDS = [{ id: "NIFTY" as const, label: "Nifty" }, { id: "SENSEX" as const, label: "Sensex" }, { id: "BANKNIFTY" as const, label: "Bank Nifty (view only)" }];
+type Und = (typeof UNDS)[number]["id"];
 
 /** a number with its open-interest bar behind it: --oi is the bar width, side says which edge it grows from (always from the strike side) */
 function OiCell({ v, pct, side }: { v: number | null | undefined; pct: number; side: "ce" | "pe" }) {
@@ -31,7 +32,7 @@ const COLS: Column<ChainRow>[] = [
 ];
 
 export default function FnoChain() {
-  const [und, setUnd] = useState<"NIFTY" | "SENSEX">("NIFTY");
+  const [und, setUnd] = useState<Und>("NIFTY");
   const [expiry, setExpiry] = useState("");
   const c = useFno(() => fnoApi.chain(und, expiry), 8000, [und, expiry]);
   const d = c.data;
@@ -54,7 +55,8 @@ export default function FnoChain() {
     box.scrollTop = Math.max(0, tr.offsetTop - box.clientHeight / 2 + tr.offsetHeight / 2);
     placed.current = key;
   }, [rows, und, d?.chain.expiry]);
-  const dir = d?.bias.direction;
+  const bias = d?.bias ?? null;                                     // null for a view-only index (round 559): no signal is computed, nothing to show
+  const dir = bias?.direction;
   return (
     <div className="space-y-3">
       <Tabs items={UNDS} value={und} onChange={(v) => { setUnd(v); setExpiry(""); }} label="Index" />
@@ -94,11 +96,17 @@ export default function FnoChain() {
           </>
         ) : <p className="text-mist">{c.loading ? "Loading…" : "No chain."}</p>}
       </Card>
-      {d && (
+      {d && bias && (
         <Card>
-          <CardHeader title="What the signal sees" action={<StatusPill state={dir === "UP" ? "live" : dir === "DOWN" ? "offline" : "closed"}>{dir === "UP" ? "▲ UP (CE)" : dir === "DOWN" ? "▼ DOWN (PE)" : "FLAT (no trade)"} · score {Math.round(d.bias.score)}</StatusPill>} />
-          <ul className="list-disc space-y-0.5 pl-4">{(d.bias.reasons || []).map((r, i) => <li key={i}>{r}</li>)}</ul>
-          {!d.bias.reasons?.length && <p className="text-mist">No reasons reported.</p>}
+          <CardHeader title="What the signal sees" action={<StatusPill state={dir === "UP" ? "live" : dir === "DOWN" ? "offline" : "closed"}>{dir === "UP" ? "▲ UP (CE)" : dir === "DOWN" ? "▼ DOWN (PE)" : "FLAT (no trade)"} · score {Math.round(bias.score)}</StatusPill>} />
+          <ul className="list-disc space-y-0.5 pl-4">{(bias.reasons || []).map((r, i) => <li key={i}>{r}</li>)}</ul>
+          {!bias.reasons?.length && <p className="text-mist">No reasons reported.</p>}
+        </Card>
+      )}
+      {d && !bias && (
+        <Card>
+          <CardHeader title="View only" />
+          <p className="text-mist">{und === "BANKNIFTY" ? "Bank Nifty" : und} is shown here for reading. No signal is computed for it and the F&amp;O engine never trades it. Its expiry dates are the ones Dhan lists.</p>
         </Card>
       )}
     </div>

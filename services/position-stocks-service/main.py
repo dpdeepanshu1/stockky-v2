@@ -3609,6 +3609,11 @@ def board_symbol(symbol: str, db: Session = Depends(get_db)):
     view = board.symbol_view(sym, held)
     if view is None:
         raise HTTPException(status_code=404, detail=f"no bars for {sym} today (untracked, illiquid or market closed)")
+    try:                                                    # round 559 (P8): liquidity facts for the popup badge; display only, a failure leaves the popup as it was
+        from screening import liquidity_badge
+        view["liquidity"] = liquidity_badge.build(sym)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("board: liquidity badge for %s unavailable (%s)", sym, e)
     return view
 
 

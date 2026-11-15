@@ -17,6 +17,9 @@ from .models import Chain
 
 IST = timezone(timedelta(hours=5, minutes=30))
 INDEX_SYMBOL = {"NIFTY": "^NSEI", "SENSEX": "^BSESN"}
+# round 559 (P7): indices the Chain tab may SHOW but the engine never trades. Not in INDEX_SYMBOL on purpose (no candles are read for them: the bias is not computed) and never read by
+# Engine.underlyings(), the recorder, the backtests or any order path. market-data owns the matching list (dhan_data/options.py VIEW_ONLY_UNDERLYINGS).
+VIEW_ONLY_UNDERLYINGS = ("BANKNIFTY",)
 VIX_SYMBOL = "^INDIAVIX"
 try:                                                           # E322: the same tolerance the market-structure engine's prep applies (0.05 %)
     from stockky_ms.params import MSParams

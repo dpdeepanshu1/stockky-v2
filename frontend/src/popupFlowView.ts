@@ -53,3 +53,49 @@ export function popupFlowView(doc: SymbolTapeDoc | null | undefined, loadedAtMs?
     note: `ESTIMATE from quote snapshots, not a trade feed. Read ${asOf} IST${isNum(doc.tape_minutes) ? `, ${doc.tape_minutes} min of tape` : ""}. For reading only; it does not change any trade.`,
   };
 }
+
+// ── round 559 (P8): the liquidity badge. Two recorded facts with the time each was read; a missing one is a dash, never 0; no verdict ("liquid" / "illiquid") is given. ──
+export interface LiquidityView { kind: "hidden" | "ok"; turnover: string; turnoverSub: string; spread: string; spreadSub: string; note: string }
+
+/** rupees in the Indian way: 12.4 Cr, 8.6 L, or the plain number below a lakh; a dash when it is not a positive number */
+export function rupeesShort(v: unknown): string {
+  if (!isNum(v) || v <= 0) return DASH;
+  if (v >= 1e7) return `\u20B9${(v / 1e7).toFixed(v >= 1e9 ? 0 : 1)} Cr`;
+  if (v >= 1e5) return `\u20B9${(v / 1e5).toFixed(1)} L`;
+  return `\u20B9${Math.round(v).toLocaleString("en-IN")}`;
+}
+
+/** "14:32 IST", or "13 Nov 15:29 IST" when the read is from another IST day than `nowMs` (a closed market shows the last session, and says so). "" when it is not a time. */
+export function istStamp(sec: unknown, nowMs: number): string {
+  if (!isNum(sec) || sec <= 0) return "";
+  const clock = istClock(sec * 1000);
+  if (!clock) return "";
+  const day = (ms: number) => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
+  if (!isNum(nowMs) || nowMs <= 0 || day(sec * 1000) === day(nowMs)) return `${clock} IST`;
+  const d = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", day: "numeric", month: "short" }).format(new Date(sec * 1000));
+  return `${d} ${clock} IST`;
+}
+
+/** Words for the popup's liquidity line. Hidden when the service sent nothing or neither fact has a time (no number without a time). `nowMs` = the browser's clock. */
+export function liquidityView(doc: unknown, nowMs: number): LiquidityView {
+  const none: LiquidityView = { kind: "hidden", turnover: DASH, turnoverSub: "", spread: DASH, spreadSub: "", note: "" };
+  if (!doc || typeof doc !== "object") return none;
+  const d = doc as { turnover?: any; spread?: any };
+  const t = d.turnover && typeof d.turnover === "object" ? d.turnover : null;
+  const sp = d.spread && typeof d.spread === "object" ? d.spread : null;
+  const tAt = t ? istStamp(t.as_of, nowMs) : "";
+  const sAt = sp ? istStamp(sp.last_at, nowMs) : "";
+  const tOk = !!t && !!tAt && isNum(t.value) && t.value > 0;
+  const sOk = !!sp && !!sAt && isNum(sp.last_pct) && sp.last_pct >= 0;
+  if (!tOk && !sOk) return none;
+  const rank = tOk && isNum(t.pct_rank) ? `higher than ${t.pct_rank.toFixed(0)}% of ${isNum(t.of) ? t.of : "the"} tracked stocks` : "rank not available";
+  const spreadSub = sOk
+    ? `${sAt}${isNum(sp.median_pct) ? `, session median ${sp.median_pct.toFixed(2)}%` : ""}${isNum(sp.max_pct) ? `, widest minute ${sp.max_pct.toFixed(2)}%` : ""}`
+    : "no recorded reading this session";
+  return {
+    kind: "ok",
+    turnover: tOk ? rupeesShort(t.value) : DASH, turnoverSub: tOk ? `${rank}, as of ${tAt}` : "",
+    spread: sOk ? `${sp.last_pct.toFixed(2)}%` : DASH, spreadSub,
+    note: "Traded value so far this session, ranked among the board's tracked stocks; spread = the recorded bid-ask spread (last minute). Facts for reading only; they do not change any trade.",
+  };
+}

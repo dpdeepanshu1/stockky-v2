@@ -34,6 +34,12 @@ UNDERLYINGS: Dict[str, Dict[str, str]] = {
     "SENSEX": {"index": "^BSESN", "exchange": "BSE", "segment": "BSE_FNO", "prefix": "SENSEX"},
 }
 
+# round 559 (P7): VIEW-ONLY indices. The chain viewer may read the option chain of these; they are deliberately NOT in UNDERLYINGS, so no contract of theirs is parsed,
+# stored or found (find_contract() never returns one, status() never counts one) and no order can be built from them. Only _underlying_ident / fetch_expiries / fetch_chain know them.
+VIEW_ONLY_UNDERLYINGS: Dict[str, Dict[str, str]] = {
+    "BANKNIFTY": {"index": "^NSEBANK", "exchange": "NSE", "segment": "NSE_FNO", "prefix": "BANKNIFTY"},
+}
+
 _TRADING_SYMBOL_RE = re.compile(r"^(?P<und>[A-Z0-9&]+)-(?P<mon>[A-Za-z]{3})(?P<yr>\d{4})-(?P<strike>[\d.]+)-(?P<ot>CE|PE)$")
 
 
@@ -264,9 +270,10 @@ def _chain_limiter():
 def _underlying_ident(underlying: str) -> Tuple[str, int]:
     from . import scrip_master
     from .errors import DhanNoDataError
-    spec = UNDERLYINGS.get((underlying or "").upper())
+    u = (underlying or "").upper()
+    spec = UNDERLYINGS.get(u) or VIEW_ONLY_UNDERLYINGS.get(u)
     if spec is None:
-        raise DhanNoDataError(f"{underlying}: only NIFTY and SENSEX are supported")
+        raise DhanNoDataError(f"{underlying}: only NIFTY and SENSEX are supported (BANKNIFTY for viewing only)")
     ident = scrip_master.security_id(spec["index"])
     if not ident:
         raise DhanNoDataError(f"{underlying}: index id not in the Dhan scrip master")
@@ -292,7 +299,12 @@ def fetch_chain(underlying: str, expiry: str, max_age_s: Optional[float] = None)
     """Normalised chain for one expiry. Cached for max_age_s (default DHAN_OPTIONCHAIN_CACHE_S, 3 s) so several readers share a call."""
     from . import client
     u = (underlying or "").upper()
-    ttl = config.env_float("DHAN_OPTIONCHAIN_CACHE_S", 3.0, 0.0) if max_age_s is None else float(max_age_s)
+    if max_age_s is not None:
+        ttl = float(max_age_s)
+    elif u in VIEW_ONLY_UNDERLYINGS:                 # round 559: the viewer's own longer cache, so it takes the shared 3.2 s Dhan slot from the engine's NIFTY / SENSEX reads at most once per 10 s
+        ttl = config.env_float("DHAN_OPTIONCHAIN_VIEW_CACHE_S", 10.0, 3.0)
+    else:
+        ttl = config.env_float("DHAN_OPTIONCHAIN_CACHE_S", 3.0, 0.0)
     now = time.monotonic()
     with _cache_lock:
         hit = _cache.get((u, expiry))

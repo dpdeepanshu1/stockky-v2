@@ -37,4 +37,11 @@ export interface SymbolView {
   // group311
   zone_score?: number | null; invalidation_risk?: { invalidation: number; risk_per_share: number } | null; backfilled?: boolean;
   day?: { open: number; high: number; low: number; prev_close: number | null } | null;
+  // round 559 (P8): liquidity facts for the popup badge; optional, an older service sends none
+  liquidity?: LiquidityDoc | null;
+}
+export interface LiquidityDoc {
+  session: string | null;
+  turnover: { value: number | null; pct_rank: number | null; of: number; as_of: number | null } | null;
+  spread: { last_pct: number | null; last_at: number | null; median_pct: number | null; max_pct: number | null; minutes: number } | null;
 }

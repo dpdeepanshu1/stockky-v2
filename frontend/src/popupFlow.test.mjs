@@ -1,7 +1,7 @@
 // round 555 (P6): the stock popup's order-flow section. An estimate, hidden when the tape is not reliable, every number stamped with a time, a missing number is a dash.
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { istClock, popupFlowView, DASH } from "./popupFlowView.ts";
+import { istClock, istStamp, liquidityView, popupFlowView, rupeesShort, DASH } from "./popupFlowView.ts";
 
 const ok = (m) => console.log("ok - " + m);
 const NOW = Date.UTC(2026, 10, 16, 9, 2, 0);           // 14:32 IST
@@ -53,3 +53,44 @@ assert.match(comp, /catch \{ if \(alive\) \{ setDoc\(null\); setAt\(undefined\)/
 const popup = readFileSync(new URL("./components/board/StockPopup.tsx", import.meta.url), "utf8");
 assert.match(popup, /<PopupFlow symbol=\{row\.symbol\} \/>/);
 ok("wired into the popup, read-only, clears on a failed read");
+
+// ── round 559 (P8): liquidity badge ──
+const NOWS = NOW / 1000;                                    // 14:32 IST, in seconds
+const liq = (o = {}) => ({ session: "2026-11-16", turnover: { value: 124000000, pct_rank: 72.5, of: 40, as_of: NOWS - 60 }, spread: { last_pct: 0.18, last_at: NOWS - 120, median_pct: 0.15, max_pct: 0.25, minutes: 12 }, ...o });
+
+assert.equal(rupeesShort(124000000), "\u20B912.4 Cr");
+assert.equal(rupeesShort(1240000000), "\u20B9124 Cr");
+assert.equal(rupeesShort(860000), "\u20B98.6 L");
+assert.equal(rupeesShort(54321), "\u20B954,321");
+for (const bad of [0, -5, NaN, null, undefined, "x", Infinity]) assert.equal(rupeesShort(bad), DASH);
+ok("rupees in Cr / L, a dash for a missing value");
+
+assert.equal(istStamp(NOWS, NOW), "14:32 IST");
+assert.equal(istStamp(NOWS - 3 * 86400, NOW), "13 Nov 14:32 IST", "another IST day says the date");
+for (const bad of [0, -1, NaN, null, undefined, "x"]) assert.equal(istStamp(bad, NOW), "");
+ok("a stamp is a time, with the date when it is not today");
+
+const lv = liquidityView(liq(), NOW);
+assert.deepEqual([lv.kind, lv.turnover, lv.spread], ["ok", "\u20B912.4 Cr", "0.18%"]);
+assert.equal(lv.turnoverSub, "higher than 73% of 40 tracked stocks, as of 14:31 IST");
+assert.equal(lv.spreadSub, "14:30 IST, session median 0.15%, widest minute 0.25%");
+assert.doesNotMatch(lv.note + lv.turnoverSub + lv.spreadSub, /liquid|illiquid|buy|sell|safe|avoid/i, "facts only, no verdict");
+ok("both facts, each with its time");
+
+const noSpread = liquidityView(liq({ spread: null }), NOW);
+assert.deepEqual([noSpread.kind, noSpread.turnover, noSpread.spread, noSpread.spreadSub], ["ok", "\u20B912.4 Cr", DASH, "no recorded reading this session"]);
+const noRank = liquidityView(liq({ turnover: { value: 9000000, pct_rank: null, of: 12, as_of: NOWS } }), NOW);
+assert.match(noRank.turnoverSub, /^rank not available, as of 14:32 IST$/);
+assert.match(liquidityView(liq({ turnover: { value: 9000000, pct_rank: 0, of: 40, as_of: NOWS } }), NOW).turnoverSub, /^higher than 0% of 40/);
+const noTime = liquidityView(liq({ turnover: { value: 9000000, pct_rank: 50, of: 40, as_of: null } }), NOW);
+assert.deepEqual([noTime.kind, noTime.turnover], ["ok", DASH], "turnover without a time is not shown; the spread still is");
+assert.equal(liquidityView(liq({ turnover: { value: 9000000, pct_rank: 50, of: 40, as_of: null }, spread: { last_pct: 0.1, last_at: null } }), NOW).kind, "hidden");
+for (const d of [null, undefined, "x", 5, {}, { turnover: null, spread: null }, liq({ turnover: { value: 0, as_of: NOWS }, spread: { last_pct: -1, last_at: NOWS } })]) assert.equal(liquidityView(d, NOW).kind, "hidden");
+assert.equal(liquidityView(liq({ spread: { last_pct: 0, last_at: NOWS, median_pct: 0, max_pct: 0, minutes: 1 } }), NOW).spread, "0.00%", "a recorded 0.00 % spread is shown, not dashed");
+ok("missing = dash, no time = not shown, a real zero is kept");
+
+const popup2 = readFileSync(new URL("./components/board/StockPopup.tsx", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
+assert.match(popup2, /liquidityView\(v\?\.liquidity, Date\.now\(\)\)/);
+assert.match(popup2, /liq\.kind === "ok"/);
+assert.ok(!/method:\s*"(POST|PUT|DELETE|PATCH)"|setSwitch|placeOrder/i.test(popup2));
+ok("wired into the popup, hidden unless a fact has a time");

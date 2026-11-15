@@ -111,4 +111,4 @@ def test_unsupported_underlying_raises_no_data():
     import pytest
     from dhan_data.errors import DhanNoDataError
     with pytest.raises(DhanNoDataError):
-        options._underlying_ident("BANKNIFTY")
+        options._underlying_ident("FINNIFTY")           # round 559: BANKNIFTY is now readable (view only, see test_round559_view_only_index.py); the others are still refused

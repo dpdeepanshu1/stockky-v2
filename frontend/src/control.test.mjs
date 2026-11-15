@@ -27,6 +27,8 @@ test("chainRows: sorted by strike, only strikes within the window of the ATM, ex
   assert.equal(rows.find((r) => r.atm).strike, 24500);
   assert.equal(ch.atmIndex(rows), 2);
   assert.equal(ch.chainWindow("SENSEX"), 2000); assert.equal(ch.chainWindow("NIFTY"), 600);
+  assert.equal(ch.chainWindow("BANKNIFTY"), 1500);   // round 559 (P7): view-only index
+  assert.deepEqual(ch.chainRows([{ strike: 54000, ce: null, pe: null }, { strike: 55000, ce: null, pe: null }, { strike: 56600, ce: null, pe: null }], 55040, "BANKNIFTY").map((r) => r.strike), [54000, 55000]);   // 56600 is 1600 from the ATM strike: out
   assert.equal(ch.chainRows(strikes, 24512, "SENSEX").length, 10);
   assert.deepEqual(ch.chainRows([], 1, "NIFTY"), []);
 });
@@ -126,7 +128,8 @@ test("FnoChain draws a kit DataTable (no hand-made table), keeps the 8 s poll an
   assert.ok(/<DataTable/.test(s) && !/<table/.test(s));
   assert.ok(/fnoApi\.chain\(und, expiry\)/.test(s) && /8000/.test(s));
   assert.ok(!/fnoApi\.(?!chain)\w+\(/.test(s), "only the chain call");
-  assert.ok(/oc-row-atm/.test(s) && /ATM/.test(s) && /pcrReading/.test(s) && /d\.bias\.reasons/.test(s), "ATM row, PCR reading and the bias reasons are kept");
+  assert.ok(/oc-row-atm/.test(s) && /ATM/.test(s) && /pcrReading/.test(s) && /bias\.reasons/.test(s), "ATM row, PCR reading and the bias reasons are kept");
+  assert.ok(/BANKNIFTY/.test(s) && /d\?\.bias \?\? null/.test(s) && /View only/.test(s), "round 559: Bank Nifty tab, a null bias shows the view-only card instead of a signal");
 });
 test("DataTable keeps working for older callers: rowClass, cellClass and wrapRef are optional", () => {
   const s = code(rd("./components/kit/DataTable.tsx"));

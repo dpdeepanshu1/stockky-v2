@@ -1591,6 +1591,7 @@ services/fno-options-service/tests/test_round507_suspect_days_and_parts.py
 services/fno-options-service/tests/test_round509_entry_extension.py
 services/fno-options-service/tests/test_round550_vix_rank.py
 services/fno-options-service/tests/test_round552_chain_fields.py
+services/fno-options-service/tests/test_round559_view_only_chain.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile
@@ -1750,6 +1751,7 @@ services/market-data-service/tests/test_round205_feed_coverage_unknown.py
 services/market-data-service/tests/test_round222_prev_close_guard.py
 services/market-data-service/tests/test_round553_global_strip.py
 services/market-data-service/tests/test_round554_fo_eod.py
+services/market-data-service/tests/test_round559_view_only_index.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -1972,6 +1974,7 @@ services/position-stocks-service/screening/board_selfcheck.py
 services/position-stocks-service/screening/engine.py
 services/position-stocks-service/screening/gate_prefilter.py
 services/position-stocks-service/screening/intraday_eligibility.py
+services/position-stocks-service/screening/liquidity_badge.py
 services/position-stocks-service/screening/market_structure.py
 services/position-stocks-service/screening/ms_engine_switch.py
 services/position-stocks-service/screening/opening_gate.py
@@ -2302,6 +2305,7 @@ services/position-stocks-service/tests/test_round225_entry_stage_timer.py
 services/position-stocks-service/tests/test_round227_entry_stage_marks.py
 services/position-stocks-service/tests/test_round242_capital_board.py
 services/position-stocks-service/tests/test_round551_sector_traded_value.py
+services/position-stocks-service/tests/test_round559_liquidity_badge.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py

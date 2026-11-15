@@ -517,7 +517,7 @@ JOB_LIST = [
          timeout_s=180, needs=["export_records"],
          after="POSITIVE needs a 90 % lower bound above 0 AND a Deflated Sharpe probability of at least 0.95 AND net above 0. NOT_PROVEN is the normal state: change nothing because of it. It never moves a switch."),
     _job("strategy_registry", "Strategy registry (lifecycle: testing / proven / watch / demoted)", "daily", "Every day after evidence_report (daily close pack)",
-         "One lifecycle status per strategy (source tab + decision label), moved only after 3 separate days in a row of the same evidence verdict: POSITIVE makes it proven, NEGATIVE makes it demoted, NOT_PROVEN takes a proven one to watch. Keeps its own state file (state/strategy_registry.json).", b_strategy_registry,
+         "One lifecycle status per strategy (source tab + decision label), moved only after 3 separate days in a row (each with new closed trades) of the same evidence verdict: POSITIVE makes it proven, NEGATIVE makes it demoted, NOT_PROVEN takes a proven one to watch. Keeps its own state file (state/strategy_registry.json).", b_strategy_registry,
          [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"]),
           P("min_n", "Min trades for a verdict", "int", 30, 5, 500), P("since", "Judge only from date (YYYY-MM-DD)", "str", "", help="Leave empty for the whole saved window.")],
          timeout_s=240, needs=["export_records"],

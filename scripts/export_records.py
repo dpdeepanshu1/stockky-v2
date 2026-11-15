@@ -73,6 +73,10 @@ def main(argv: Optional[list] = None) -> int:
     except urllib.error.HTTPError as e:
         print(f"{a.base}: HTTP {e.code} {'(login failed or the session token expired)' if e.code == 401 else ''}", file=sys.stderr)
         return 1
+    except EOFError:
+        # round 572: no terminal (cron, the runner, a pipe): input()/getpass raised and the run ended in a traceback
+        print("no admin username/password could be read (no terminal): set TOKEN=<admin bearer token>, or ADMIN_USER and ADMIN_PASSWORD", file=sys.stderr)
+        return 1
     except (urllib.error.URLError, OSError, ValueError) as e:
         print(f"{a.base}: {e} (is the real-trade container up, and is this its published port? see `docker compose ps`)", file=sys.stderr)
         return 1
@@ -81,8 +85,15 @@ def main(argv: Optional[list] = None) -> int:
         return 1
     from datetime import date
     out = a.out or f"rt_{date.today().isoformat()}.json"
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh)
+    # round 572: written beside and renamed, so a stop halfway never leaves a cut file for records_report.py / the evidence report to read
+    tmp = out + ".part"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        os.replace(tmp, out)
+    except OSError as e:
+        print(f"{out}: could not be written: {e}", file=sys.stderr)
+        return 1
     print(f"{out}: {summarize(doc)}")
     return 0 if doc["records"] else 1
 

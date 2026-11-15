@@ -13,10 +13,13 @@ Status (a record of what the evidence says, never an instruction and never a swi
 
 Rules: NOT_ENOUGH_DATA counts as no information (the streak and status stay as they are). A verdict that differs from the streak's verdict restarts the streak at 1.
 A status changes only when the streak reaches --confirm (3) days, and the streak counts one evidence DATE once (a re-run on the same day refreshes the numbers, never the streak).
-demoted -> testing after 3 days in a row of NOT_PROVEN; proven / watch / demoted -> demoted after 3 days of NEGATIVE; testing / watch -> proven after 3 days of POSITIVE.
+Round 563: a day also counts only when the strategy has MORE closed trades than on the last counted day (the cell's `n`). The same trades read again, on a quiet day, a holiday run or a weekend re-run,
+are no new evidence: the numbers are refreshed, the streak does not move. (Before this, a strategy with no new trade could reach `proven` just by three days passing.)
+demoted -> testing after 3 days in a row of NOT_PROVEN or (round 567) of POSITIVE; proven / watch / demoted -> demoted after 3 days of NEGATIVE; testing / watch -> proven after 3 days of POSITIVE.
+Rounds 565 / 566: "more closed trades" is judged by the newest closed time of the cell (`last_closed`, robust to the sliding 60-day export), or when that is missing by the count of rows with a readable return (`n_ret`, else `n`).
 An evidence report older than --max-age-days (3) is refused (exit 1) so a stale file can never advance a streak.
 Drift (optional, --drift drift_monitor.json from scripts/drift_monitor.py, round 554): a PROVEN strategy whose recent trades read DECAY on 3 separate days in a row moves to `watch`
-(any other state on a new day restarts that count). Drift never promotes, never demotes to `demoted`, and is refused when older than --max-age-days like the evidence.
+(any other state on a new day restarts that count; the same new-trades rule applies, using the drift cell's `n`). Drift never promotes, never demotes to `demoted`, and is refused when older than --max-age-days like the evidence.
 
 It changes no switch, no setting and no trade. It writes only the --store file and the --json file you name.
 
@@ -46,6 +49,43 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _n(v: Any) -> Optional[int]:
+    """A cell's trade count as an int, or None when it is missing or not a usable number (then the day counts as before: no guard)."""
+    try:
+        if isinstance(v, bool) or v is None:
+            return None
+        f = float(v)
+        return int(f) if f >= 0 and f == f and f != float("inf") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def trades_counted(c: Dict[str, Any]) -> Any:
+    """Round 564: the trade count that decides whether a day brought new evidence. `n` counts every closed row, but the verdict is built from the rows with a readable net
+    return (`n_ret`: net P&L, entry price and quantity all present and positive). A row without them raised `n` and changed nothing in the verdict, so it counted as a
+    new day. Use `n_ret` when the report has it, else `n` (older reports, drift cells whose `n` is already the usable count)."""
+    if isinstance(c, dict) and _n(c.get("n_ret")) is not None:
+        return c.get("n_ret")
+    return c.get("n") if isinstance(c, dict) else None
+
+
+def new_since(prev_closed: Any, cur_closed: Any, last_n: Any, c: Dict[str, Any]) -> bool:
+    """Round 566: True when the cell holds closed trades newer than the last counted day. The export is a rolling window (the endpoint's newest 60 days), so a day can drop old
+    trades while adding new ones and the COUNT falls or stays flat although there is new evidence (and a count can rise while the window shifts). The newest closed_at of the
+    cell (`last_closed`) says it directly. If either timestamp is missing the round 563 / 565 count test decides, as before. Pure."""
+    a, b = (str(prev_closed) if prev_closed else None), (str(cur_closed) if cur_closed else None)
+    if a and b:
+        return b > a
+    return not no_new_trades(last_n, trades_counted(c))
+
+
+def no_new_trades(last_n: Any, n_now: Any) -> bool:
+    """True when this cell has no MORE closed trades than on the last day that was counted (same trades, or fewer = a different export filter).
+    Missing numbers on either side mean 'cannot tell': False, so the day counts as before. Pure."""
+    a, b = _n(last_n), _n(n_now)
+    return a is not None and b is not None and b <= a
+
+
 def next_status(status: str, verdict: str, streak_n: int, confirm: int = CONFIRM) -> Tuple[str, Optional[str]]:
     """(new status, why or None) after the streak of `verdict` reached streak_n days. Pure. retired never moves."""
     if status == "retired" or streak_n < confirm:
@@ -58,6 +98,8 @@ def next_status(status: str, verdict: str, streak_n: int, confirm: int = CONFIRM
         return "watch", f"{confirm} days in a row of NOT_PROVEN"
     if verdict == "NOT_PROVEN" and status == "demoted":
         return "testing", f"{confirm} days in a row of NOT_PROVEN"
+    if verdict == "POSITIVE" and status == "demoted":                   # round 567: a swing straight to POSITIVE re-opens the case, it does not restore trust
+        return "testing", f"{confirm} days in a row of POSITIVE (back to testing, not straight to proven)"
     return status, None
 
 
@@ -107,6 +149,15 @@ def update(store: Dict[str, Any], rep: Dict[str, Any], today: str, confirm: int 
             s["last_seen"] = day
             continue                                                    # no information: streak and status stay
         if st.get("last_day") != day:                                   # one evidence date counts once
+            cnt, cur = trades_counted(c), c.get("last_closed") or None  # round 565: rows with a usable return; round 566: and the newest closed time
+            if not new_since(st.get("last_closed"), cur, st.get("last_n"), c):   # round 563: the same closed trades again are not new evidence
+                if cur is None and _n(cnt) is not None and _n(cnt) < _n(st.get("last_n")):
+                    st["last_n"] = _n(cnt)                              # fewer trades = another export filter: new baseline, still not counted
+                s["last_seen"] = day
+                continue
+            st["last_n"] = _n(cnt)
+            if cur:
+                st["last_closed"] = cur
             if st.get("verdict") == verdict:
                 st["days"] = int(st.get("days") or 0) + 1
             else:
@@ -136,6 +187,14 @@ def apply_drift(store: Dict[str, Any], drift: Dict[str, Any], today: str, confir
         ds = s.setdefault("drift_streak", {"days": 0, "last_day": None})
         if state in ("NOT_ENOUGH_DATA", "") or ds.get("last_day") == day:
             continue
+        cur = c.get("last_closed") or None
+        if not new_since(ds.get("last_closed"), cur, ds.get("last_n"), c):     # round 563 / 566: no new closed trades since the last counted day: nothing to count
+            if cur is None and _n(trades_counted(c)) is not None and _n(trades_counted(c)) < _n(ds.get("last_n")):
+                ds["last_n"] = _n(trades_counted(c))
+            continue
+        ds["last_n"] = _n(trades_counted(c))
+        if cur:
+            ds["last_closed"] = cur
         ds["last_day"] = day
         ds["days"] = int(ds.get("days") or 0) + 1 if state == "DECAY" else 0
         if s.get("status") == "proven" and ds["days"] >= confirm:

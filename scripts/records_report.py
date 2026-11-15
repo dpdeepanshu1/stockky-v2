@@ -186,6 +186,16 @@ def exit_slippage_pct(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
     return {"n": len(vals), "mean": round(st.mean(vals), 3), "worst": round(min(vals), 3), "best": round(max(vals), 3)}
 
 
+# round 574: the exit reasons that are a stop order filling (not a trailing profit exit, not a time stop). The stop-overshoot line used to read
+# "stop_hit" only, but with BROKER_STOP on most real stops fill as `broker_stop` (the stop order at Dhan) and gaps as `emergency_gap_down`, so
+# the line counted a fraction of the stops and its overshoot (the number the sizing rule is built on) came from the few that were left.
+STOP_HIT_REASONS = frozenset({"stop", "stop_hit", "stop_loss", "stop_breach_exit", "broker_stop", "emergency_gap_down"})
+
+
+def is_stop_hit(reason: Any) -> bool:
+    return str(reason or "").strip().lower().split(":")[0] in STOP_HIT_REASONS
+
+
 def entry_minute_bucket(r: Dict[str, Any]) -> str:
     """E285 round 154 (plan item 8): the 15-minute IST slot of opened_at, so the opening minutes show on their own (09:15-09:29, 09:30-09:44, ...).
     opened_at without a zone is read as UTC (how the records are exported). Broker-imported rows carry the import time, not the buy time: use --origin system."""
@@ -317,7 +327,7 @@ def build_report(records: List[Dict[str, Any]], since: str = "", until: str = ""
     rep["exit_slippage"] = exit_slippage_stored(rows)
     sl = [v for v in (num(r.get("entry_slippage_pct")) for r in rows) if v is not None]
     rep["entry_slippage_pct"] = {"n": len(sl), "mean": round(st.mean(sl), 3), "max": round(max(sl), 3)} if sl else None
-    stops = [r for r in rows if r.get("exit_reason") == "stop_hit"]
+    stops = [r for r in rows if is_stop_hit(r.get("exit_reason"))]
     def _loss_pct(r):
         """round 150: the price move against the entry. return_pct is NET of charges (~0.5-1% on a 2-3 share position), so comparing it with the planned stop
         distance made every small stop-out look like an overshoot; the gross price move is the like-for-like number. Falls back to return_pct when no prices."""
@@ -330,7 +340,10 @@ def build_report(records: List[Dict[str, Any]], since: str = "", until: str = ""
     over_overnight = [(_loss_pct(r) - num(r["stop_pct"])) for r in stops if _loss_pct(r) is not None and num(r.get("stop_pct")) is not None and (num(r.get("held_days")) or 0) >= 1]
     mg = [v for v in (num(r.get("max_gain_pct")) for r in stops) if v is not None]
     beyond = [o for o in over if o > 0.05]                                  # lost MORE than the planned initial stop (a gap / slow fill)
-    rep["stop_hits"] = {"n": len(stops), "with_stop_pct": len(over), "n_beyond": len(beyond), "n_inside": len(over) - len(beyond), "n_beyond_overnight": len([o for o in over_overnight if o > 0.05]), "n_overnight": len(over_overnight),
+    by_stop_reason: Dict[str, int] = defaultdict(int)
+    for r in stops:
+        by_stop_reason[str(r.get("exit_reason") or "").strip().lower().split(":")[0]] += 1
+    rep["stop_hits"] = {"n": len(stops), "by_reason": dict(sorted(by_stop_reason.items(), key=lambda kv: (-kv[1], kv[0]))), "with_stop_pct": len(over), "n_beyond": len(beyond), "n_inside": len(over) - len(beyond), "n_beyond_overnight": len([o for o in over_overnight if o > 0.05]), "n_overnight": len(over_overnight),
                         "mean_overshoot_pct": round(st.mean(beyond), 2) if beyond else None, "max_overshoot_pct": round(max(beyond), 2) if beyond else None,
                         "with_max_gain": len(mg), "mean_max_gain_pct_before_stop": round(st.mean(mg), 2) if mg else None}
     rep["late_eod_squareoff"] = [{"position_id": r.get("position_id"), "symbol": r.get("symbol"), "opened_at": r.get("opened_at"), "closed_at": r.get("closed_at"),
@@ -361,6 +374,8 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     sh = rep["stop_hits"]
     if sh["n"]:
         part = f"Stop hits: {sh['n']}"
+        if len(sh.get("by_reason") or {}) > 1:
+            part += " (" + ", ".join(f"{k} {v}" for k, v in sh["by_reason"].items()) + ")"
         if sh["with_stop_pct"]:
             part += (f"; {sh['n_beyond']} lost MORE than the planned initial stop (on average {f(sh['mean_overshoot_pct'])} points more, worst {f(sh['max_overshoot_pct'])}); " if sh["n_beyond"] else "; none lost more than the planned initial stop; ")
             part += f"{sh['n_inside']} closed inside it (a trailed / ratcheted stop)"

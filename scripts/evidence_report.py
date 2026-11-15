@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import re
 import math
 import os
 import sys
@@ -138,6 +139,28 @@ def verdict(n_ret: int, lower: Optional[float], upper: Optional[float], dsr: Opt
     return "NOT_PROVEN"
 
 
+_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2})?")
+
+
+def stamp(v: Any) -> Optional[str]:
+    """A closed_at value as a sortable text 'YYYY-MM-DDTHH:MM:SS' (or just the date), or None when it is not ISO-like. Zones are ignored: one export, one clock. Never raises."""
+    try:
+        m = _STAMP.match(str(v or "").strip())
+        return m.group(0).replace(" ", "T") if m else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def latest_closed(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """The newest readable closed_at among the rows. The registry compares it between days: a rolling export window drops old trades, so a COUNT cannot tell new trades from a shifted window."""
+    best = None
+    for r in rows:
+        t = stamp(r.get("closed_at"))
+        if t and (best is None or t > best):
+            best = t
+    return best
+
+
 def group_stats(rows: List[Dict[str, Any]], n_trials: int = 1, min_n: int = MIN_N) -> Dict[str, Any]:
     """Evidence numbers for one group of records. Pure; never raises."""
     pnl = [rr.num(r.get("net_pnl")) for r in rows]
@@ -148,9 +171,11 @@ def group_stats(rows: List[Dict[str, Any]], n_trials: int = 1, min_n: int = MIN_
     losses = -sum(v for v in nets if v < 0)
     rets: List[float] = []
     days: List[str] = []
+    usable_rows: List[Dict[str, Any]] = []
     for r in rows:
         v = net_return_pct(r)
         if v is not None:
+            usable_rows.append(r)
             rets.append(v)
             days.append(str(r.get("opened_at") or "")[:10])
     lower, upper = lower_upper_bound(rets, days)
@@ -160,7 +185,7 @@ def group_stats(rows: List[Dict[str, Any]], n_trials: int = 1, min_n: int = MIN_
     srt = sorted(rets)
     median = None if not srt else (srt[len(srt) // 2] if len(srt) % 2 else (srt[len(srt) // 2 - 1] + srt[len(srt) // 2]) / 2.0)
     return {
-        "n": len(rows), "n_ret": len(rets),
+        "n": len(rows), "n_ret": len(rets), "last_closed": latest_closed(usable_rows),
         "win_pct": round(100.0 * sum(1 for v in nets if v > 0) / len(nets), 1) if nets else None,
         "net": round(net_total, 2), "gross": round(gross, 2), "charges": round(charges, 2),
         "charges_pct_of_gross": round(100.0 * charges / abs(gross), 1) if abs(gross) > 1e-9 else None,

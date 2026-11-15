@@ -145,3 +145,40 @@ def test_main_uses_drift_only_when_fresh_and_readable(tmp_path):
     json.dump({"generated_at": "2026-11-16T00:00:00+00:00", "groups": {"strategy": {}}}, open(ev, "w"))
     open(dr, "w").write("{broken")
     assert sr.main(["--evidence", ev, "--drift", dr, "--store", store, "--today", "2026-11-16"]) == 1
+
+
+# ---------------------------------------------------------------------------------------------------- round 563: the drift streak counts only days with new closed trades
+def drift_n(i, state, n, key=KEY):
+    d = drift(i, state, key)
+    d["strategies"][key]["n"] = n
+    return d
+
+
+def test_decay_days_without_new_trades_do_not_move_proven_to_watch():
+    s = _proven()
+    for i in range(5):
+        assert sr.apply_drift(s, drift_n(i, "DECAY", 60), "2026-11-16") == []       # the same 60 trades, five days
+    assert s["strategies"][KEY]["status"] == "proven" and s["strategies"][KEY]["drift_streak"]["days"] == 1
+
+
+def test_decay_days_with_new_trades_still_move_proven_to_watch():
+    s = _proven()
+    assert sr.apply_drift(s, drift_n(0, "DECAY", 60), "x") == [] and sr.apply_drift(s, drift_n(1, "DECAY", 62), "x") == []
+    ch = sr.apply_drift(s, drift_n(2, "DECAY", 65), "x")
+    assert ch and ch[0]["to"] == "watch"
+
+
+def test_a_quiet_day_does_not_reset_a_decay_count():
+    s = _proven()
+    sr.apply_drift(s, drift_n(0, "DECAY", 60), "x"); sr.apply_drift(s, drift_n(1, "DECAY", 62), "x")
+    sr.apply_drift(s, drift_n(2, "STABLE", 62), "x")                                # no new trades: not read at all
+    assert s["strategies"][KEY]["drift_streak"]["days"] == 2
+    assert sr.apply_drift(s, drift_n(3, "DECAY", 64), "x")[0]["to"] == "watch"
+
+
+def test_round566_cell_carries_the_newest_closed_time_of_usable_rows():
+    rows = [{"net_pnl": 1.0, "entry_price": 100, "quantity": 1, "closed_at": f"2026-11-{10 + i:02d}T10:00:00"} for i in range(5)]
+    rows.append({"net_pnl": 1.0, "entry_price": 0, "quantity": 1, "closed_at": "2026-11-30T10:00:00"})   # no readable return: ignored
+    c = dm.cell(rows, 20, 30)
+    assert c["n"] == 5 and c["last_closed"] == "2026-11-14T10:00:00"
+    assert dm.cell([], 20, 30)["last_closed"] is None

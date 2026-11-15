@@ -42,3 +42,28 @@ def test_groups_and_markdown_and_missing_numbers():
     md = es.to_markdown(rep)
     assert "Verdict" in md and "by entry hour IST" in md
     assert es.review([])["verdict"] == "too_few_trades"
+
+
+# ----------------------------------------------------------------------------------------------- E594 round 569: a losing book is judged against charges plus loss
+def test_losing_book_material_by_share_of_charges_plus_loss():
+    """Mean 0.05 % is under the 0.15 % limit, but the book lost money and the slippage is more than 10 % of what it lost: material."""
+    losing = [_r(i, 0.05, entry=1000.0, qty=100, gross=-30.0) for i in range(30)]
+    rep = es.review(losing)
+    assert rep["share_of_gross_pct"] is None and rep["share_of_loss_pct"] is not None and rep["share_of_loss_pct"] >= 10.0
+    assert rep["verdict"] == "material" and "charges plus the gross loss" in rep["reason"]
+    assert "of the charges plus the gross loss" in es.to_markdown(rep)
+
+
+def test_losing_book_with_small_slippage_is_not_material_and_charges_count():
+    small = [_r(i, 0.02, gross=-50.0) for i in range(30)]
+    rep = es.review(small)
+    assert rep["verdict"] == "not_material" and rep["share_of_loss_pct"] is not None and rep["share_of_loss_pct"] < 10.0
+    with_charges = [dict(_r(i, 0.05, entry=1000.0, qty=100, gross=-30.0), charges=500.0) for i in range(30)]
+    r2 = es.review(with_charges)
+    assert r2["charges"] == 15000.0 and r2["share_of_loss_pct"] < 10.0                      # charges enlarge the base: 1499 / 15900
+
+
+def test_winning_book_and_a_slippage_gain_leave_the_loss_share_empty():
+    assert es.review([_r(i, 0.02, gross=500.0) for i in range(30)])["share_of_loss_pct"] is None
+    gain = es.review([_r(i, -0.3, gross=-30.0) for i in range(30)])                         # paid BELOW the signal: a gain, no cost to share
+    assert gain["share_of_loss_pct"] is None and gain["verdict"] == "not_material"

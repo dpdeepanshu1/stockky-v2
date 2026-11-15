@@ -70,6 +70,7 @@ def build(rt_url: str, token: str, symbols: Sequence[str], chunk: int = 150, ben
     out: Dict[str, Any] = {"read_only": True, "n_requested": len(symbols), "n_chunks": 0, "failed_chunks": [], "failed_symbols": [], "asof_bar_date": None, "rows": []}
     rows: List[Dict[str, Any]] = []
     asofs: Counter = Counter()
+    per_chunk: List[tuple] = []           # (asof bar date or None, rows) of each chunk that answered
     for i in range(0, len(symbols), max(1, chunk)):
         part = list(symbols[i: i + chunk])
         try:
@@ -78,14 +79,22 @@ def build(rt_url: str, token: str, symbols: Sequence[str], chunk: int = 150, ben
             out["failed_chunks"].append({"first": part[0], "n": len(part), "reason": str(e)[:100]})
             continue
         out["n_chunks"] += 1
-        rows += doc.get("rows") or []
-        out["failed_symbols"] += [f.get("symbol") for f in (doc.get("failed") or []) if isinstance(f, dict)]
+        per_chunk.append((doc.get("asof_bar_date") or None, list(doc.get("rows") or [])))
+        out["failed_symbols"] += [f.get("symbol") for f in (doc.get("failed") or []) if isinstance(f, dict) and f.get("symbol")]
         if doc.get("asof_bar_date"):
             asofs[doc["asof_bar_date"]] += 1
         if pause_s:
             time.sleep(pause_s)
     if asofs:
         out["asof_bar_date"] = max(asofs)                       # the newest bar date any chunk saw
+    # round 572: the file is named after that date and its forward returns are measured from it. A chunk that answered with an OLDER bar date
+    # (or none) holds closes of another day; ranked together with the rest it put those rows into today's file. Such a chunk is kept out and counted.
+    out["stale_chunks"] = 0
+    for asof, part_rows in per_chunk:
+        if asof == out["asof_bar_date"]:
+            rows += part_rows
+        else:
+            out["stale_chunks"] += 1
     out["rows"] = merge_and_rank(rows) if rows else []
     out["n_ranked"] = sum(1 for r in out["rows"] if r.get("rank") is not None)
     out["n_screen"] = sum(1 for r in out["rows"] if r.get("screen"))
@@ -105,6 +114,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"NO SYMBOLS: {a.hist_dir} has no symbol files", file=sys.stderr)
         return 1
     snap = build(a.rt_url, os.getenv("TOKEN", ""), syms, a.chunk, a.benchmark)
+    if snap.get("stale_chunks"):
+        print(f"warning: {snap['stale_chunks']} chunk(s) answered with an older bar date than {snap['asof_bar_date']} and were left out of the file", file=sys.stderr)
     for f in snap["failed_chunks"]:
         print(f"chunk starting {f['first']} ({f['n']} symbols) failed: {f['reason']}", file=sys.stderr)
     if not snap["asof_bar_date"] or snap["n_ranked"] < 5:

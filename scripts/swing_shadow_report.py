@@ -20,7 +20,7 @@ import json
 import os
 import sys
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "services" / "real-trade-service"))
 import swing_backtest as sb  # noqa: E402
 from swing import stats  # noqa: E402
 
+_IST = timezone(timedelta(hours=5, minutes=30))
 MAX_GAP_DAYS = {1: 4, 3: 6, 5: 9, 10: 18, 20: 34}      # E141: 10 and 20 sessions (about 2 and 4 calendar weeks, plus a holiday or two)
 HORIZONS = (1, 3, 5, 10, 20)
 
@@ -42,13 +43,42 @@ def load_snapshots(folder: Path) -> List[Dict[str, Any]]:
             snaps.append(_snap(d.get("asof_bar_date") or f.stem.replace("swing_snap_", ""), d.get("rows") or []))
         except Exception as e:  # noqa: BLE001
             print(f"skip {f.name}: {type(e).__name__}: {e}", file=sys.stderr)
-    snaps.sort(key=lambda s: s["day"])
-    return snaps
+    return _one_per_day(snaps)
+
+
+def _one_per_day(snaps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sorted by day, ONE snapshot per day (the last one given wins). Round 573: a hand copy or a second run saved under another file name gave two
+    snapshots of one day; the h-th "later saved day" was then the same day and every horizon was measured over 0 calendar days."""
+    by: Dict[str, Dict[str, Any]] = {}
+    for s in snaps:
+        by[s["day"]] = s
+    return [by[d] for d in sorted(by)]
+
+
+def _bar_day(r: Dict[str, Any]) -> Optional[str]:
+    if r.get("last_bar_day"):
+        return str(r["last_bar_day"])[:10]
+    try:
+        return datetime.fromtimestamp(float(r["last_t"]), tz=_IST).date().isoformat()
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def _snap(day: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     date.fromisoformat(day)
-    return {"day": day, "rows": {r["symbol"]: r for r in rows if r.get("last_close") and r.get("rank") is not None}}
+    # round 573: a stock whose newest bar is OLDER than the snapshot day (halted, no trade that day) carries a stale close. Its return from that
+    # close to a later fresh close spans extra days, or reads 0.00 when stale on both sides, and it sat in the screened or the rest group as if
+    # it had traded. A row with no readable bar day (older files) is kept as before.
+    ok, stale = {}, 0
+    for r in rows:
+        if not (r.get("last_close") and r.get("rank") is not None):
+            continue
+        bd = _bar_day(r)
+        if bd is not None and bd != day:
+            stale += 1
+            continue
+        ok[r["symbol"]] = r
+    return {"day": day, "rows": ok, "stale_rows": stale}
 
 
 def load_service(url: str, token: str, days: int = 120) -> List[Dict[str, Any]]:
@@ -57,7 +87,7 @@ def load_service(url: str, token: str, days: int = 120) -> List[Dict[str, Any]]:
         doc = json.loads(r.read().decode())
     if doc.get("error"):
         raise RuntimeError(doc["error"])
-    return sorted((_snap(s["asof_bar_date"], s.get("rows") or []) for s in doc.get("snapshots") or []), key=lambda s: s["day"])
+    return _one_per_day([_snap(s["asof_bar_date"], s.get("rows") or []) for s in doc.get("snapshots") or []])
 
 
 def forward_rows(snaps: List[Dict[str, Any]], h: int, cost_pct: float, slip_pct: float) -> List[Dict[str, Any]]:
@@ -89,7 +119,7 @@ def edge_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def build_report(snaps: List[Dict[str, Any]], hold: int, size: float, slip: float, min_n: int, min_days: int, n_boot: int) -> Dict[str, Any]:
     cost = sb.delivery_round_trip_pct(size, sb.cost_constants()[0])
-    rep: Dict[str, Any] = {"days_saved": len(snaps), "size": size, "cost_pct": round(cost, 3), "slip_pct": slip, "hold": hold, "horizons": {}}
+    rep: Dict[str, Any] = {"days_saved": len(snaps), "stale_rows_left_out": sum(int(s.get("stale_rows") or 0) for s in snaps), "size": size, "cost_pct": round(cost, 3), "slip_pct": slip, "hold": hold, "horizons": {}}
     for h in HORIZONS:
         rows = forward_rows(snaps, h, cost, slip)
         sel = [r for r in rows if r["screen"]]
@@ -120,7 +150,8 @@ def build_report(snaps: List[Dict[str, Any]], hold: int, size: float, slip: floa
 def to_markdown(rep: Dict[str, Any]) -> str:
     f = lambda x: "-" if x is None else str(x)  # noqa: E731
     L = [f"VERDICT: {rep['verdict']}", "", f"# Swing shadow report: screened stocks after the screening day, hold {rep['hold']} sessions, net of cost", "",
-         f"{rep['days_saved']} saved days; cost {rep['cost_pct']}% round trip at Rs {int(rep['size'])} + {rep['slip_pct']}% slippage.", ""]
+         f"{rep['days_saved']} saved days; cost {rep['cost_pct']}% round trip at Rs {int(rep['size'])} + {rep['slip_pct']}% slippage."
+         + (f" {rep['stale_rows_left_out']} stock-days left out (newest bar older than the saved day)." if rep.get("stale_rows_left_out") else ""), ""]
     if rep["reasons"]:
         L += ["Why:"] + [f"- {x}" for x in rep["reasons"]] + [""]
     L += ["| horizon | screened n | days | net mean % | win % | 90% interval | rest net mean % | edge 90% interval |", "| --- | --- | --- | --- | --- | --- | --- | --- |"]

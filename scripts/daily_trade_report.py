@@ -150,6 +150,15 @@ def group(rows: List[Dict[str, Any]], keyf) -> Dict[Any, Dict[str, Any]]:
     return {k: stats(v) for k, v in d.items()}
 
 
+# round 570: the exits that ARE the stop. The flag used to know three spellings (stop_hit, STOP_HIT, STOP_BREACH_EXIT) and missed broker_stop (the stop order at Dhan, which is how
+# most real stops fill while BROKER_STOP is on), emergency_gap_down and trail_stop_approx. real-trade's own list is trade_records.STOP_REASONS (group 394); time_stop is NOT a price stop.
+STOP_FAMILY = frozenset({"stop", "stop_hit", "stop_loss", "stop_breach_exit", "broker_stop", "emergency_gap_down", "trail_stop_approx"})
+
+
+def is_stop_reason(reason: Any) -> bool:
+    return str(reason or "").strip().lower().split(":")[0] in STOP_FAMILY
+
+
 def hold_bucket(minutes: float) -> str:
     for name, lo, hi in HOLD_BUCKETS:
         if lo <= minutes < hi:
@@ -233,9 +242,10 @@ def build_report(rows: List[Dict[str, Any]], days: int, min_n: int = 8, header: 
     for h, s in sorted(he.items()):
         if s["n"] >= min_n and s["net"] < 0 and (s["avg_ret"] or 0) < 0:
             flags.append(f"entries in the {h:02d}:00 hour lost {money(s['net'])} over {s['n']} trades (win {s['win_pct']}%): look at that hour before changing anything else")
-    for reason, s in group(rows, lambda r: r["reason"]).items():
-        if s["n"] >= min_n and s["net"] < 0 and reason in ("stop_hit", "STOP_HIT", "STOP_BREACH_EXIT"):
-            flags.append(f"stop exits cost {money(s['net'])} over {s['n']} trades")
+    stop_rows = [r for r in rows if is_stop_reason(r["reason"])]            # round 570: all stop spellings together, not one reason name at a time
+    ss = stats(stop_rows)
+    if ss["n"] >= min_n and ss["net"] < 0:
+        flags.append(f"stop exits cost {money(ss['net'])} over {ss['n']} trades")
     L += ["FLAGS (only buckets with >= %d trades):" % min_n] + (["  - " + f for f in flags] if flags else ["  none"]) + [""]
     L.append("This is a description of what already happened, not a forecast. Small samples move a lot: read '(few)' rows as noise.")
     return "\n".join(L) + "\n"

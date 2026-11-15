@@ -28,6 +28,11 @@ def _get(url: str, token: str, timeout: float = 20.0) -> Any:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def _load(path: str) -> Any:
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _val(v: Any) -> str:
     return "-" if v is None else str(v)
 
@@ -51,11 +56,11 @@ def render(doc: Dict[str, Any], only_changes: bool = False) -> str:
             if f.get("matches_recommended") is False:
                 marks.append(f"!= RECOMMENDED ({_val(f.get('recommended'))})")
             if f.get("override"):
-                o = f["override"]
+                o = f["override"] if isinstance(f["override"], dict) else {}
                 marks.append(f"OVERRIDE by {o.get('by')} {str(o.get('at'))[:16]}")
             if only_changes and not marks:
                 continue
-            rows.append(f"  {str(f.get('title'))[:60]:<60} {_val(f.get('effective')):<9} {'live   ' if f.get('live') else 'restart'}  {f.get('source'):<8} {'; '.join(marks)}   [{f.get('key')}]")
+            rows.append(f"  {str(f.get('title'))[:60]:<60} {_val(f.get('effective')):<9} {'live   ' if f.get('live') else 'restart'}  {_val(f.get('source')):<8} {'; '.join(marks)}   [{f.get('key')}]")
         if rows:
             L.append(f"-- {g}")
             L += rows
@@ -79,7 +84,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     errors = 0
     for name, url, file in (("real-trade-service", a.rt_url, a.rt_file), ("position-stocks-service", a.ps_url, a.ps_file)):
         try:
-            doc = json.load(open(file, encoding="utf-8")) if file else _get(url.rstrip("/") + "/control/flags", a.token)
+            doc = _load(file) if file else _get(url.rstrip("/") + "/control/flags", a.token)
             out.append(render(doc, a.only_changes))
             ok += 1
         except Exception as e:  # noqa: BLE001

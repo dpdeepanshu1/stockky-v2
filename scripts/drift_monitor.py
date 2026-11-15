@@ -89,7 +89,7 @@ def cell(rows: List[Dict[str, Any]], recent_n: int, min_base: int) -> Dict[str, 
         if v is not None:
             usable.append((v, rr.num(r.get("net_pnl")) or 0.0))
     n = len(usable)
-    out: Dict[str, Any] = {"n": n, "recent_n": min(recent_n, n), "base_n": max(0, n - recent_n), "state": "NOT_ENOUGH_DATA", "z": None}
+    out: Dict[str, Any] = {"n": n, "last_closed": er.latest_closed([r for r in rows if er.net_return_pct(r) is not None]), "recent_n": min(recent_n, n), "base_n": max(0, n - recent_n), "state": "NOT_ENOUGH_DATA", "z": None}
     if n - recent_n < min_base or n < recent_n:
         return out
     rec, base = usable[-recent_n:], usable[:-recent_n]

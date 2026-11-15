@@ -9,7 +9,7 @@ REAL-mode stop-outs came within minutes of the entry. Read-only; it only reads t
   D1  FOLLOW-UP: for every closed trade whose exit was STAGNATION_EXIT or a trailing stop (STOP_HIT / TRAIL_STOP closed ABOVE entry for a long, BELOW for a short),
       look at the recorded 1-minute bars after the exit and report the best price within 30 and 60 minutes (and to the end of that day), as a % of entry, and whether
       the trade's own target (or its stop, whichever came first) would have been reached. Needs <bars>/<YYYY-MM-DD>/<SYMBOL>.json (feed/bar_recorder.py).
-  D2  EARLY STOP-OUTS: per mode, how many stop-outs (STOP_HIT / STOP_BREACH_EXIT at a loss) closed within --early-min minutes of the entry, out of all stop-outs.
+  D2  EARLY STOP-OUTS: per mode, how many stop-outs (every stop spelling: STOP_HIT / STOP_BREACH_EXIT / STOP_LOSS / broker_stop / emergency_gap_down, at a loss) closed within --early-min minutes of the entry, out of all stop-outs.
 
 Records are de-duplicated by (mode, position_id), the newest file wins. A trade without bars after its exit is counted as "no bars", never guessed.
 A bucket under --min-trades (default 20) is printed but gets no verdict. Stdlib only.
@@ -27,7 +27,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _intraday_data as _bars  # noqa: E402
 
 EARLY_EXIT_STATUSES = ("STAGNATION_EXIT",)
-STOP_STATUSES = ("STOP_HIT", "STOP_BREACH_EXIT")
+# round 575: the records of BOTH services go in (--records ps_*.json rt_*.json). position-stocks writes STOP_HIT / STOP_BREACH_EXIT / STOP_LOSS; real-trade
+# writes stop_hit, and with BROKER_STOP on most real stops fill as broker_stop (the stop order at Dhan), gaps as emergency_gap_down, trails as
+# trail_stop_approx. D2 ("how many REAL stop-outs came within minutes of the entry") read only the first two and so counted a fraction of them.
+STOP_STATUSES = ("STOP_HIT", "STOP_BREACH_EXIT", "BROKER_STOP", "EMERGENCY_GAP_DOWN", "STOP_LOSS", "STOP")
+STOP_ORDER_STATUSES = ("STOP_HIT", "BROKER_STOP", "STOP_LOSS", "STOP")     # a stop order that fills ABOVE entry (long) is a trailed stop = a trail exit
+TRAIL_STATUSES = ("TRAIL_STOP", "TRAIL_STOP_APPROX")
 
 
 def _num(v: Any) -> Optional[float]:
@@ -74,7 +79,7 @@ def load_records(paths: List[str]) -> List[Dict[str, Any]]:
 
 
 def _status(r: Dict[str, Any]) -> str:
-    return str(r.get("exit_reason") or r.get("status") or "").upper()
+    return str(r.get("exit_reason") or r.get("status") or "").strip().upper().split(":")[0]
 
 
 def _is_short(r: Dict[str, Any]) -> bool:
@@ -87,9 +92,9 @@ def classify_exit(r: Dict[str, Any]) -> Optional[str]:
     entry, ex = _num(r.get("entry_price")), _num(r.get("exit_price"))
     if st in EARLY_EXIT_STATUSES:
         return "stagnation"
-    if st == "TRAIL_STOP":
+    if st in TRAIL_STATUSES:
         return "trail"
-    if st == "STOP_HIT" and entry and ex:
+    if st in STOP_ORDER_STATUSES and entry and ex:
         return "trail" if ((ex < entry) if _is_short(r) else (ex > entry)) else None
     return None
 
@@ -150,7 +155,7 @@ def study_followup(records: List[Dict[str, Any]], days: Dict[str, Dict[str, Any]
         d: Dict[str, Any] = {"n": n, "enough": n >= min_trades}
         for key in ("best_30m_pct", "best_60m_pct", "best_day_pct"):
             vals = sorted(x[key] for x in rows if x.get(key) is not None)
-            d[key + "_median"] = vals[len(vals) // 2] if vals else None
+            d[key + "_median"] = (vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals) // 2 - 1] + vals[len(vals) // 2]) / 2.0) if vals else None   # round 575: even n was the upper middle value
         d["target_first"] = sum(1 for x in rows if x["first_level"] == "target")
         d["stop_first"] = sum(1 for x in rows if x["first_level"] == "stop")
         d["neither"] = sum(1 for x in rows if x["first_level"] == "none")

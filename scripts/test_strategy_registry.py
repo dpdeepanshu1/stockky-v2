@@ -18,7 +18,8 @@ def day(i):
     return (D0 + timedelta(days=i)).isoformat()
 
 
-def rep(i, verdict, key=KEY, n=40, **extra):
+def rep(i, verdict, key=KEY, n=None, **extra):
+    n = 40 + i if n is None else n                     # round 563: a new day normally brings new closed trades; pass n= to model a quiet day
     cell = {"n": n, "verdict": verdict, "mean_net_ret_pct": 0.2, "lower90_pct": 0.1, "dsr_prob": 0.9, "win_pct": 55.0}
     cell.update(extra)
     return {"generated_at": f"{day(i)}T11:00:00+00:00", "groups": {"strategy": {key: cell}}}
@@ -64,7 +65,7 @@ def test_a_different_verdict_restarts_the_streak_and_not_enough_data_changes_not
     s = fresh()
     run(s, 0, "POSITIVE"); run(s, 1, "POSITIVE")
     run(s, 2, "NOT_ENOUGH_DATA")                       # no information: streak stays at 2
-    assert s["strategies"][KEY]["streak"] == {"verdict": "POSITIVE", "days": 2, "last_day": day(1)}
+    assert s["strategies"][KEY]["streak"] == {"verdict": "POSITIVE", "days": 2, "last_day": day(1), "last_n": 41}
     run(s, 3, "NOT_PROVEN")                            # restarts
     assert s["strategies"][KEY]["streak"]["verdict"] == "NOT_PROVEN" and s["strategies"][KEY]["streak"]["days"] == 1 and s["strategies"][KEY]["status"] == "testing"
 
@@ -165,3 +166,157 @@ def test_damaged_store_starts_fresh_and_render_lists_a_demotion_note(tmp_path):
         ch = run(s, i, "NEGATIVE")
     txt = sr.render(s, ch)
     assert "demoted" in txt and "decide yourself" in txt and "moves no switch" in txt
+
+
+# ---------------------------------------------------------------------------------------------------- round 563: a day without new closed trades is not new evidence
+def test_no_new_trades_helper_table():
+    assert sr.no_new_trades(40, 40) is True and sr.no_new_trades(40, 39) is True
+    assert sr.no_new_trades(40, 41) is False
+    assert sr.no_new_trades(None, 40) is False and sr.no_new_trades(40, None) is False and sr.no_new_trades("x", "y") is False
+    assert sr.no_new_trades(True, 40) is False and sr.no_new_trades(-1, 5) is False
+
+
+def test_days_without_new_closed_trades_do_not_advance_the_streak():
+    s = fresh()
+    for i in range(3):
+        assert run(s, i, "POSITIVE", n=40) == []              # the same 40 trades read on three days
+    st = s["strategies"][KEY]
+    assert st["status"] == "testing" and st["streak"]["days"] == 1 and st["last_seen"] == day(2)
+    assert run(s, 3, "POSITIVE", n=41) == [] and st["streak"]["days"] == 2
+    ch = run(s, 4, "POSITIVE", n=45)
+    assert ch and ch[0]["to"] == "proven"
+
+
+def test_a_quiet_day_in_the_middle_does_not_break_or_advance_the_streak():
+    s = fresh()
+    run(s, 0, "POSITIVE", n=40); run(s, 1, "POSITIVE", n=41)
+    run(s, 2, "POSITIVE", n=41)                                 # quiet day: streak stays at 2
+    st = s["strategies"][KEY]
+    assert st["streak"] == {"verdict": "POSITIVE", "days": 2, "last_day": day(1), "last_n": 41}
+    assert run(s, 3, "POSITIVE", n=44)[0]["to"] == "proven"
+
+
+def test_fewer_trades_is_a_new_baseline_and_is_not_counted():
+    s = fresh()
+    run(s, 0, "POSITIVE", n=50)
+    run(s, 1, "POSITIVE", n=30)                                 # another export filter: baseline 30, no count
+    st = s["strategies"][KEY]
+    assert st["streak"]["days"] == 1 and st["streak"]["last_n"] == 30
+    run(s, 2, "POSITIVE", n=31)
+    assert st["streak"]["days"] == 2
+
+
+def test_a_cell_without_n_counts_as_before():
+    s = fresh()
+    for i in range(3):
+        doc = rep(i, "POSITIVE")
+        del doc["groups"]["strategy"][KEY]["n"]
+        sr.update(s, doc, day(i))
+    assert s["strategies"][KEY]["status"] == "proven"
+
+
+# ----------------------------------------------------------------------------------------------- E590 round 565: count rows with a usable return
+def test_trades_counted_prefers_n_ret_and_falls_back_to_n():
+    assert sr.trades_counted({"n": 50, "n_ret": 44}) == 44
+    assert sr.trades_counted({"n": 50}) == 50
+    assert sr.trades_counted({"n": 50, "n_ret": None}) == 50
+    assert sr.trades_counted({"n": 50, "n_ret": "x"}) == 50
+    assert sr.trades_counted("junk") is None
+
+
+def test_rows_without_a_readable_return_do_not_make_a_new_day():
+    """n grows by one a day (a closed row with no entry price), n_ret stays at 40: the verdict has seen nothing new, so no day counts after the first."""
+    s = fresh()
+    for i in range(5):
+        run(s, i, "POSITIVE", n=50 + i, n_ret=40)
+    st = s["strategies"][KEY]
+    assert st["status"] == "testing" and st["streak"]["days"] == 1 and st["streak"]["last_n"] == 40
+
+
+def test_new_usable_trades_still_count_when_n_ret_is_present():
+    s = fresh()
+    for i in range(3):
+        run(s, i, "POSITIVE", n=50 + i, n_ret=40 + i)
+    assert s["strategies"][KEY]["status"] == "proven"
+
+
+def test_drift_cell_n_is_already_the_usable_count():
+    d = lambda i, n: {"generated_at": f"{day(i)}T12:00:00+00:00", "strategies": {KEY: {"state": "DECAY", "z": -3.0, "n": n}}}
+    s = fresh()
+    run(s, 0, "POSITIVE"); run(s, 1, "POSITIVE"); run(s, 2, "POSITIVE")
+    assert s["strategies"][KEY]["status"] == "proven"
+    for i in range(3, 6):
+        sr.apply_drift(s, d(i, 60), day(i))                                           # same 60 trades each day
+    assert s["strategies"][KEY]["status"] == "proven" and s["strategies"][KEY]["drift_streak"]["days"] == 1
+
+
+# ----------------------------------------------------------------------------------------------- E591 round 566: newest closed time, not a count
+def test_rolling_window_new_trades_count_even_when_the_count_falls():
+    """The export keeps only the newest 60 days: each day 3 old trades fall out and 1 new one closes, so n goes DOWN while there is new evidence."""
+    s = fresh()
+    for i in range(3):
+        run(s, i, "POSITIVE", n=50 - 2 * i, n_ret=50 - 2 * i, last_closed=f"{day(i)}T10:30:00")
+    st = s["strategies"][KEY]
+    assert st["status"] == "proven"
+    assert st["streak"]["last_closed"] == f"{day(2)}T10:30:00"
+
+
+def test_same_newest_closed_time_is_not_new_even_if_the_count_grows():
+    s = fresh()
+    for i in range(5):
+        run(s, i, "POSITIVE", n=40 + i, n_ret=40 + i, last_closed=f"{day(0)}T10:30:00")     # window shifts, nothing new closed
+    st = s["strategies"][KEY]
+    assert st["status"] == "testing" and st["streak"]["days"] == 1
+
+
+def test_an_older_newest_time_from_another_filter_never_lowers_the_baseline():
+    s = fresh()
+    run(s, 0, "POSITIVE", last_closed=f"{day(0)}T10:30:00")
+    run(s, 1, "POSITIVE", n=10, n_ret=10, last_closed=f"{day(0)}T09:00:00")                 # another --since: older newest trade
+    run(s, 2, "POSITIVE", n=90, n_ret=90, last_closed=f"{day(0)}T10:30:00")                 # back to the full set: still the same newest trade
+    st = s["strategies"][KEY]["streak"]
+    assert st["days"] == 1 and st["last_closed"] == f"{day(0)}T10:30:00"
+
+
+def test_missing_last_closed_falls_back_to_the_count_rule():
+    assert sr.new_since(None, None, 40, {"n": 41}) is True
+    assert sr.new_since(None, None, 40, {"n": 40}) is False
+    assert sr.new_since("2026-11-16T10:00:00", None, 40, {"n": 41}) is True
+    assert sr.new_since("2026-11-16T10:00:00", "2026-11-16T10:00:00", 40, {"n": 90}) is False
+    assert sr.new_since("2026-11-16T10:00:00", "2026-11-17T09:20:00", 40, {"n": 30}) is True
+
+
+def test_drift_streak_uses_newest_closed_time_too():
+    d = lambda i, n, lc: {"generated_at": f"{day(i)}T12:00:00+00:00", "strategies": {KEY: {"state": "DECAY", "z": -3.0, "n": n, "last_closed": lc}}}
+    s = fresh()
+    for i in range(3):
+        run(s, i, "POSITIVE")
+    assert s["strategies"][KEY]["status"] == "proven"
+    for i in range(3, 6):
+        sr.apply_drift(s, d(i, 60 - i, f"{day(i)}T11:00:00"), day(i))                       # count falls, newest trade is new each day
+    assert s["strategies"][KEY]["status"] == "watch"
+
+
+# ----------------------------------------------------------------------------------------------- E592 round 567: demoted -> testing on POSITIVE
+def test_demoted_that_turns_positive_goes_back_to_testing_not_to_proven():
+    assert sr.next_status("demoted", "POSITIVE", 3)[0] == "testing" and sr.next_status("demoted", "POSITIVE", 2)[0] == "demoted"
+    s = fresh()
+    for i in range(3):
+        run(s, i, "NEGATIVE")
+    assert s["strategies"][KEY]["status"] == "demoted"
+    for i in range(3, 6):
+        run(s, i, "POSITIVE")
+    assert s["strategies"][KEY]["status"] == "testing"                                       # not proven yet
+    for i in range(6, 9):
+        run(s, i, "POSITIVE")
+    assert s["strategies"][KEY]["status"] == "proven"                                        # three more new-trade days re-earn it
+    assert [h["to"] for h in s["strategies"][KEY]["history"]] == ["demoted", "testing", "proven"]
+
+
+def test_demoted_positive_days_without_new_trades_do_not_count():
+    s = fresh()
+    for i in range(3):
+        run(s, i, "NEGATIVE")
+    for i in range(3, 8):
+        run(s, i, "POSITIVE", n=43)                                                          # the same trades every day
+    assert s["strategies"][KEY]["status"] == "demoted"

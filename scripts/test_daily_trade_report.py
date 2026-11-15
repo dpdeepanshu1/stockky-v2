@@ -155,3 +155,22 @@ def test_round150_imported_split_line_and_gross_tag():
     r = d._row("real-trade", 9, "ITC", "2026-10-29T07:00:00Z", "2026-10-30T09:30:00Z", -11.0, 1.5, "eod_squareoff", None, "imported", "gross_price")
     t = d.build_report([r], 10)
     assert "[ret = gross price move, not net]" in t and "[imported]" in t
+
+
+# ----------------------------------------------------------------------------------------------- E595 round 570: every stop spelling counts in the stop-exit flag
+def test_stop_family_covers_broker_stop_and_leaves_time_stop_out():
+    for r in ("stop_hit", "STOP_HIT", "STOP_BREACH_EXIT", "broker_stop", "emergency_gap_down", "trail_stop_approx", "STOP_LOSS", "stop", "broker_stop:x"):
+        assert d.is_stop_reason(r), r
+    for r in ("time_stop", "target_hit", "stagnation_exit:flat_band", "eod_squareoff", "manual_sell", None, "-"):
+        assert not d.is_stop_reason(r), r
+
+
+def test_stop_flag_adds_up_the_spellings():
+    rows = []
+    for i, reason in enumerate(["stop_hit", "broker_stop", "STOP_HIT", "broker_stop", "trail_stop_approx", "stop_hit", "broker_stop", "STOP_LOSS"]):
+        rows.append(d._row("real-trade", i, f"S{i}", "2026-10-15T04:00:00Z", "2026-10-15T05:00:00Z", -40.0, -0.4, reason))
+    rows.append(d._row("real-trade", 99, "W", "2026-10-15T04:00:00Z", "2026-10-15T05:00:00Z", 500.0, 2.0, "time_stop"))          # a time exit is not a stop
+    txt = d.build_report(rows, 10, min_n=8)
+    assert "stop exits cost -320 over 8 trades" in txt                                        # no single spelling reaches 8 alone
+    few = d.build_report(rows[:5], 10, min_n=8)
+    assert "stop exits cost" not in few

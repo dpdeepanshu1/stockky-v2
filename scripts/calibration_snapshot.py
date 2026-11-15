@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 PREFIXES = ("STRUCTURE_", "PS_STRUCTURE_", "CANDIDATE_", "ENTRY_", "RISK_", "TIMESFM_")
+LIVE_TAGS = ("real-trade", "position-stocks")
 SECRET_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASS|TOTP|PIN|DSN)", re.I)
 
 
@@ -129,7 +130,18 @@ def make_snapshot(out_dir: Path, env_path: Optional[str], label: str, environ: O
 def two_newest(store: Path) -> Optional[tuple]:
     """(older, newer) snapshot dicts: the two newest files of `store` by their time-stamped names. None with fewer than two readable ones."""
     docs = [d for d in (_json(p) for p in sorted(store.glob("*.json"))) if d and d.get("seeds") is not None]
+    # round 571: the file name carries the stamp in the writer's own clock to the second, so two snapshots taken in one second (or by
+    # writers on different offsets) sorted by LABEL. Order by the created_at inside (as UTC); the file-name order stays the tie-break.
+    docs = [d for _, d in sorted(enumerate(docs), key=lambda t: (_created_utc(t[1]), t[0]))]
     return (docs[-2], docs[-1]) if len(docs) >= 2 else None
+
+
+def _created_utc(doc: Dict[str, Any]) -> float:
+    try:
+        d = datetime.fromisoformat(str(doc.get("created_at")))
+        return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _slug(label: str) -> str:
@@ -154,6 +166,20 @@ def _delta(a: Any, b: Any) -> Optional[float]:
 def compare(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     """Pure. Settings diff and per-seed metric movement from snapshot a (before) to b (after)."""
     sa, sb = a.get("settings") or {}, b.get("settings") or {}
+    warnings: List[str] = []
+    # round 571: a service that could not be read when one snapshot was taken leaves NO `tag:KEY` lines in it (live_flags returns {} and only
+    # prints to stderr). Compared as is, every switch of that service read as "added" or "removed". Such a service is left out of the settings
+    # diff and named in the warnings instead.
+    skip: set = set()
+    for tag in LIVE_TAGS:
+        in_a = any(k.startswith(tag + ":") for k in sa)
+        in_b = any(k.startswith(tag + ":") for k in sb)
+        if in_a != in_b:
+            skip.add(tag + ":")
+            warnings.append(f"the {tag} switches are only in the {'after' if in_b else 'before'} snapshot (that service could not be read for the other): "
+                            f"its switches are not compared")
+    sa = {k: v for k, v in sa.items() if not k.startswith(tuple(skip))}
+    sb = {k: v for k, v in sb.items() if not k.startswith(tuple(skip))}
     settings = {"changed": {k: [sa[k], sb[k]] for k in sorted(set(sa) & set(sb)) if sa[k] != sb[k]},
                 "added": {k: sb[k] for k in sorted(set(sb) - set(sa))},
                 "removed": {k: sa[k] for k in sorted(set(sa) - set(sb))}}
@@ -174,7 +200,6 @@ def compare(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
             "complete": [x.get("complete"), y.get("complete")],
         }
     shared = [s for s, v in seeds.items() if "only_in" not in v]
-    warnings: List[str] = []
     if not shared:
         warnings.append("no seed appears in both snapshots: the runs are not comparable")
     for s in set(seeds) - set(shared):
@@ -199,13 +224,13 @@ def to_markdown(diff: Dict[str, Any]) -> str:
         L.append(f"- added `{k}` = {v}")
     for k, v in st["removed"].items():
         L.append(f"- removed `{k}` (was {v})")
-    L += ["", "## Metrics per seed", "", "| seed | verdict | edge pp (before -> after, change) | kept % | candidate n | candidate mean net | complete |", "|---|---|---|---|---|---|---|"]
+    L += ["", "## Metrics per seed", "", "| seed | verdict | edge pp (before -> after, change) | 90% CI (before -> after) | kept % | candidate n | candidate mean net | complete |", "|---|---|---|---|---|---|---|---|"]
     for seed, v in diff["seeds"].items():
         if "only_in" in v:
-            L.append(f"| {seed} | only in the {v['only_in']} snapshot | | | | | |")
+            L.append(f"| {seed} | only in the {v['only_in']} snapshot | | | | | | |")
             continue
         e, k, n, m = v["edge_pp"], v["kept_pct"], v["candidate_n"], v["candidate_mean_net"]
-        L.append(f"| {seed} | {f(v['verdict'][0])} -> {f(v['verdict'][1])} | {f(e[0])} -> {f(e[1])} ({f(e[2])}) | {f(k[0])} -> {f(k[1])} | "
+        L.append(f"| {seed} | {f(v['verdict'][0])} -> {f(v['verdict'][1])} | {f(e[0])} -> {f(e[1])} ({f(e[2])}) | {f(v['ci90'][0])} -> {f(v['ci90'][1])} | {f(k[0])} -> {f(k[1])} | "
                  f"{f(n[0])} -> {f(n[1])} | {f(m[0])} -> {f(m[1])} ({f(m[2])}) | {f(v['complete'][0])}/{f(v['complete'][1])} |")
     if diff["warnings"]:
         L += ["", "## Read this first", ""] + [f"- {w}" for w in diff["warnings"]]

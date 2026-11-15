@@ -92,10 +92,13 @@ d=json.load(sys.stdin); u=d.get("underlyings")
 assert u is not None, "no underlyings key: "+str(d)[:160]
 assert sorted(u)==["NIFTY","SENSEX"], "the engine lists "+str(u)+" (Bank Nifty must stay view only)"
 print("engine lists "+",".join(u))' >/tmp/qc_fnou.txt 2>&1 && ok "F&O engine underlyings (round 559): $(cat /tmp/qc_fnou.txt)" || warn "F&O engine underlyings" "$(tail -2 /tmp/qc_fnou.txt)"
-  curl -s --max-time 25 "$PS/board/RELIANCE" -H "Authorization: Bearer $ADMIN_TOKEN" | python3 -c '
-import json,sys
-d=json.load(sys.stdin); assert "liquidity" in d, "no liquidity key on /board/RELIANCE: "+str(d)[:160]
-l=d["liquidity"] or {}; print("key present, fields: "+",".join(sorted(l)) if isinstance(l,dict) else "key present")' >/tmp/qc_liq.txt 2>&1 && ok "popup liquidity badge (round 559): $(cat /tmp/qc_liq.txt)" || warn "popup liquidity badge" "$(tail -2 /tmp/qc_liq.txt)"
+  # E587 (round 562): outside market hours /board/RELIANCE answers 404 "no bars ... today" and has no liquidity key yet: that is INFO, not a WARN (qc_liquidity_check.py decides).
+  LQ=$(curl -s --max-time 25 "$PS/board/RELIANCE" -H "Authorization: Bearer $ADMIN_TOKEN" | python3 scripts/qc_liquidity_check.py 2>&1); LQ_RC=$?
+  case "$LQ_RC" in
+    0) ok "popup liquidity badge (round 559): $LQ" ;;
+    3) info "popup liquidity badge (round 559): $LQ" ;;
+    *) warn "popup liquidity badge" "$LQ" ;;
+  esac
 else
   info "set ADMIN_TOKEN to also check the F&O engine list and the popup liquidity key"
 fi

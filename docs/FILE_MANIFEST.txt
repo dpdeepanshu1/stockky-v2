@@ -45,6 +45,7 @@ archive/stray-root-files/production_fixes_round2.patch
 archive/stray-root-files/production_fixes_round3.patch
 archive/stray-root-files/tier_breakdown.csv
 config/service_urls.py
+data/prediction-model/gate_anchor.json
 data/prediction-model/model.pkl
 data/prediction-model/model.pkl.backup-2026-10-30
 data/prediction-model/model_meta.json
@@ -563,6 +564,7 @@ scripts/oracle-vm-tune.sh
 scripts/p8_retest_evidence.py
 scripts/preopen_momentum_study.py
 scripts/price_source_allowlist.txt
+scripts/qc_liquidity_check.py
 scripts/records_report.py
 scripts/regime_history_replay.py
 scripts/regime_learner.py
@@ -645,6 +647,7 @@ scripts/test_policy_replay.py
 scripts/test_position_stocks_pipeline_offline.py
 scripts/test_preopen_momentum_study.py
 scripts/test_provider_order_shipped.py
+scripts/test_qc_liquidity_check.py
 scripts/test_records_report.py
 scripts/test_regime_overlay.py
 scripts/test_repo_scripts.py
@@ -652,6 +655,11 @@ scripts/test_resume_checkpoint.py
 scripts/test_retire_legacy_board.py
 scripts/test_robust_backtest.py
 scripts/test_robustness.py
+scripts/test_round571_snapshot_scripts.py
+scripts/test_round572_swing_snapshot.py
+scripts/test_round573_swing_shadow_report.py
+scripts/test_round574_records_report_stops.py
+scripts/test_round575_exit_followup_stops.py
 scripts/test_service_onoff_advice.py
 scripts/test_setup_engine.py
 scripts/test_short_exit_paths.py

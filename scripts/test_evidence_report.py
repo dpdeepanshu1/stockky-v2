@@ -171,3 +171,14 @@ def test_composite_key_and_default_strategy_groups():
     assert set(rep["groups"]["strategy"]) == {"swing | BUY NOW", "volume_shock | BUY NOW"}
     assert sum(c["n"] for c in rep["groups"]["strategy"].values()) == 8
     assert set(rep["groups"]["strategy_by_profile"]) == {"swing | BUY NOW | v1", "volume_shock | BUY NOW | v1"}
+
+
+def test_round566_last_closed_is_the_newest_readable_close_among_usable_rows():
+    rows = [{"net_pnl": 10, "entry_price": 100, "quantity": 1, "closed_at": "2026-11-16 10:00:00"},
+            {"net_pnl": -5, "entry_price": 100, "quantity": 1, "closed_at": "2026-11-17T09:20:05+00:00"},
+            {"net_pnl": 5, "entry_price": 0, "quantity": 1, "closed_at": "2026-11-30T09:20:05"},          # no readable return: not evidence
+            {"net_pnl": 1, "entry_price": 100, "quantity": 1, "closed_at": "garbage"}]
+    c = er.group_stats(rows)
+    assert c["last_closed"] == "2026-11-17T09:20:05" and c["n"] == 4 and c["n_ret"] == 3
+    assert er.group_stats([])["last_closed"] is None
+    assert er.stamp("2026-11-16") == "2026-11-16" and er.stamp(None) is None and er.stamp(5) is None

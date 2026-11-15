@@ -54,16 +54,19 @@ jobs:
       # E575 (round 550): champion / challenger. The challenger's model_meta.json is compared with the meta saved next to the model in production
       # (data/prediction-model/model_meta.json). Promoted unless it is clearly worse (F1 or top-slice precision down by more than GATE_MAX_DROP).
       # An unreadable challenger meta is NOT promoted. No champion meta yet = promote. The decision is printed in this step's log.
+      # E589 (round 564): drift floor. Champion-vs-challenger alone lets the model step down GATE_MAX_DROP every night. data/prediction-model/gate_anchor.json keeps the best F1 /
+      # top-slice precision any promoted model reached; a challenger more than GATE_MAX_TOTAL_DROP below it is kept out. The file is written only on a promotion and committed with the model.
       - name: Gate (champion / challenger)
         id: gate
         env:
           GATE_MAX_DROP: "0.03"
+          GATE_MAX_TOTAL_DROP: "0.05"
         run: |
           set +e
           python scripts/model_gate.py \
             --old data/prediction-model/model_meta.json \
             --new services/decision-prediction-service/prediction/model_meta.json \
-            --max-drop "$GATE_MAX_DROP" --json /tmp/model_gate.json
+            --max-drop "$GATE_MAX_DROP" --anchor data/prediction-model/gate_anchor.json --max-total-drop "$GATE_MAX_TOTAL_DROP" --json /tmp/model_gate.json
           rc=$?
           if [ "$rc" = "0" ]; then
             echo "promote=yes" >> "$GITHUB_OUTPUT"
@@ -86,6 +89,7 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add data/prediction-model/model.pkl data/prediction-model/model_meta.json || true
+          if [ -f data/prediction-model/gate_anchor.json ]; then git add data/prediction-model/gate_anchor.json || true; fi
           if git diff --staged --quiet; then
             echo "No changes to model"
           else

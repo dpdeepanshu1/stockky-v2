@@ -48,12 +48,20 @@ def review(records: List[Dict[str, Any]], mean_pct: float = 0.15, share_pct: flo
     rep["gross"] = round(gross, 2)
     cost = overall["rupees"]
     rep["share_of_gross_pct"] = round(100.0 * cost / gross, 1) if cost is not None and gross > 0 else None
+    # round 569: the docstring always promised "when gross is not positive, of the charges-plus-loss it adds to"; the code left the share empty there, so a LOSING book was judged
+    # by the mean alone. Charges plus the gross loss is the money the book already lost; slippage is part of it.
+    charges = sum(num(r.get("charges")) or 0.0 for r in records)
+    loss_base = charges + max(0.0, -gross)
+    rep["charges"] = round(charges, 2)
+    rep["share_of_loss_pct"] = round(100.0 * cost / loss_base, 1) if cost is not None and cost > 0 and gross <= 0 and loss_base > 0 else None
     if overall["n"] < min_n:
         rep["verdict"], rep["reason"] = "too_few_trades", f"{overall['n']} trade(s) with a slippage number, need {min_n}"
     elif overall["mean_pct"] is not None and overall["mean_pct"] >= mean_pct:
         rep["verdict"], rep["reason"] = "material", f"mean slippage {overall['mean_pct']}% is at least {mean_pct}%"
     elif rep["share_of_gross_pct"] is not None and rep["share_of_gross_pct"] >= share_pct:
         rep["verdict"], rep["reason"] = "material", f"slippage cost is {rep['share_of_gross_pct']}% of the gross profit (limit {share_pct}%)"
+    elif rep["share_of_loss_pct"] is not None and rep["share_of_loss_pct"] >= share_pct:
+        rep["verdict"], rep["reason"] = "material", f"slippage cost is {rep['share_of_loss_pct']}% of the charges plus the gross loss (limit {share_pct}%)"
     else:
         rep["verdict"], rep["reason"] = "not_material", "below both thresholds: a limit-order walk would save little"
     return rep
@@ -64,7 +72,8 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     f = lambda v: "-" if v is None else str(v)  # noqa: E731
     L = [f"# Entry slippage review - {rep['trades']} trades, {rep['with_slippage']} with a slippage number", "",
          f"Mean {f(o['mean_pct'])}%, median {f(o['median_pct'])}%, worst {f(o['worst_pct'])}%; net rupees against the signal: {f(o['rupees'])} (+ paid above it, - paid below it, i.e. a gain)"
-         + (f" ({rep['share_of_gross_pct']}% of the gross profit)" if rep.get("share_of_gross_pct") is not None else "") + ".",
+         + (f" ({rep['share_of_gross_pct']}% of the gross profit)" if rep.get("share_of_gross_pct") is not None else "")
+         + (f" ({rep['share_of_loss_pct']}% of the charges plus the gross loss)" if rep.get("share_of_loss_pct") is not None else "") + ".",
          f"Verdict: **{rep['verdict']}** - {rep['reason']}.", ""]
     for title, key in (("entry hour IST", "by_hour"), ("source tab", "by_source_tab")):
         L += [f"## by {title}", "", "| group | n | mean % | median % | worst % | rupees |", "|---|---|---|---|---|---|"]

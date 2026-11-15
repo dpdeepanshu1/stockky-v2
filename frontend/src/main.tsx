@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { installGatewayAuth } from "./gatewayAuth";
 import { getApiUrl } from "./api";
+import { reloadOnceForNewVersion } from "./chunkReload";
 import "./styles/base.css"; // round 532: Tailwind + former index.css + folded design layers (renamed, same cascade order; motion is opt-in)
 import "./styles/tokens.css"; // E513: calm palette, one font, flat surfaces
 import "./styles/components.css"; // E534: component kit (k- classes)
@@ -32,6 +33,9 @@ try {
 
 // E148 (F-09): apply the saved "Animations: Off" choice at start-up, so it holds on every tab (the Dashboard has no hero with the switch)
 try { if (window.localStorage.getItem("stockky:v6_calm") === "1") document.documentElement.classList.add("anim-off"); } catch { /* storage blocked: animations stay on */ }
+
+// E564: Vite fires this when a lazy page's file (or its CSS) cannot be preloaded, which is what an old tab sees after a redeploy: load the new build once
+try { window.addEventListener("vite:preloadError", (e) => { e.preventDefault(); reloadOnceForNewVersion(); }); } catch { /* no window */ }
 
 installGatewayAuth(getApiUrl); // group 453: adds the admin session token to the gateway's protected routes
 

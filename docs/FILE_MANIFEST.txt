@@ -343,6 +343,8 @@ frontend/src/labels.test.mjs
 frontend/src/lightContrast.test.mjs
 frontend/src/paletteContrast.test.mjs
 frontend/src/importSyntax.test.mjs
+frontend/src/chunkReload.ts
+frontend/src/chunkReload.test.mjs
 frontend/src/liveStateView.test.mjs
 frontend/src/liveStateView.ts
 frontend/src/main.tsx

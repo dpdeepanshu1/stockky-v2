@@ -8,6 +8,7 @@ import { runnerApi } from "../../calibrationApi";
 import { DIAL_LABEL, DIAL_ORDER, OVERLAY_SERVICES, SERVICE_TEXT, applyLines, dialsHelp, gateLine, lastWiringLine, overlayRows, overlaySummary, revertConfirmText, revertResultLine, STATE_PLAIN, STATE_TEXT, STATE_TONE, WEATHER_STAGES, hm, weatherView, type OverlayServiceName, type OverlayView, type WeatherStage, type WeatherStatus } from "../../weatherView";
 import { shortExposureLine } from "../../shortShadowView";
 import { Btn, Card, Chip, Msg } from "./ui";
+import GlobalCuesStrip from "../GlobalCuesStrip";   // round 553 (P4): read-only, display only; no dial is set from it
 
 const istToday = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 const STAGE_TEXT: Record<WeatherStage, string> = { morning: "08:00 morning", refine: "08:50 refine", lock: "09:14 lock", tick: "5-min tick" };
@@ -50,6 +51,7 @@ export default function WeatherPanel() {
   return (
     <div className="space-y-3" data-testid="weather">
       {err && <Msg kind="err">{err}</Msg>}
+      <GlobalCuesStrip />
       <Card
         title="Market Weather"
         tone={tone}

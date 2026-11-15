@@ -128,6 +128,17 @@ def test_weekly_and_csv_routes_are_admin_only_read_only_and_well_formed(client):
     assert c.text.splitlines()[0].startswith("date,at_ist,mode,trigger") and client.get("/agent/history.csv?limit=0", headers=H()).status_code == 422
 
 
+def test_evidence_route_is_admin_only_read_only_and_has_both_blocks(client):
+    """Round 556: /agent/evidence needs login and returns the two aggregate blocks (each with a status and a sentence), whatever the registry state; it sets nothing."""
+    assert client.get("/agent/evidence").status_code == 401
+    r = client.get("/agent/evidence", headers=H())
+    assert r.status_code == 200
+    j = r.json()
+    for k in ("book_evidence", "strategy_status"):
+        assert j[k]["status"] in ("ok", "none", "stale", "unreadable") and isinstance(j[k]["text"], str) and j[k]["text"], k
+    assert client.post("/agent/evidence", headers=H(), json={}).status_code == 405
+
+
 def test_autocalib_settings_route_audits_who_changed_what(client):
     """Round 543 (S3): PUT /autocalib/settings needs login, still validates, and a real change shows up in GET /autocalib/status as one audit line by the caller."""
     url = "/autocalib/settings"

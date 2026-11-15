@@ -9,6 +9,7 @@ import BottomSheet from "../BottomSheet";
 import { setVisibleInterval } from "../../visibleInterval";
 import { positionStocksApi } from "../../positionStocksApi";
 import ZoneChart from "./ZoneChart";
+import PopupFlow from "./PopupFlow";
 import { zoneScoreLabel } from "./riskCap";
 import { convictionDots } from "./boardState";
 import { computeMomentum, fmtPct } from "./momentum";
@@ -119,6 +120,7 @@ export default function StockPopup({ row, onClose, reduced, extra }: { row: Boar
                 <button type="button" className="ob-chip" aria-pressed={mode === "line"} onClick={() => setMode("line")}>Line</button>
               </div>
             )}
+            <PopupFlow symbol={row.symbol} />
             {v ? <div className="ob-chart"><ZoneChart v={v} reduced={reduced} mode={mode} /></div> : !err && <div className="ob-note" style={{ padding: 12 }}>Loading chart…</div>}
             {v && (
               <div className="ob-levels">

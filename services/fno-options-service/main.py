@@ -25,6 +25,7 @@ from backtest import metrics as bt_metrics, portfolio as bt_portfolio, replay as
 from fno import analytics, costs, creds as dhan_creds, engine as eng, execution, gates, probecheck, readiness, recorder, signals, stages, strategies
 from fno import capital as fno_capital
 from fno import liveparams
+from fno import vix_rank          # round 550 (P1): read-only, used by the chain route only
 from fno.params import Params
 from fno.provider import HttpProvider
 from fno.runtime import Runner, market_open
@@ -265,7 +266,12 @@ def chain(underlying: str = "NIFTY", expiry: str = "", admin=Depends(require_adm
         raise HTTPException(status_code=503, detail="option chain unavailable (market-data / Dhan)")
     summ = analytics.chain_summary(ch, p.strikes_each_side)
     bias = signals.index_bias(provider.daily(u), provider.intraday(u), summ, p)
-    return {"chain": ch.to_json(), "summary": summ, "bias": bias, "expiries": provider.expiries(u), "age_s": round(ch.age_s(), 1)}
+    # round 550 (P1): India VIX against its own recorded history, for the Chain tab. A separate key (not part of `summary`, which the bias reads); the engine never calls this.
+    try:
+        vr = vix_rank.read(config.DATA_DIR, eng.now_ist().date().isoformat(), provider.vix())
+    except Exception:  # noqa: BLE001 - display only
+        vr = None
+    return {"chain": ch.to_json(), "summary": summ, "bias": bias, "expiries": provider.expiries(u), "age_s": round(ch.age_s(), 1), "vix_rank": vr}
 
 
 @app.get("/fno/strategies")

@@ -850,12 +850,13 @@ def _ensure_watchlist_link_columns(engine, dialect_name: str) -> None:
 # NULL/anything else, so this is a pure addition with no read-path change
 # for existing data.
 def _ensure_market_state_columns(engine, dialect_name: str) -> None:
-    """Market Weather stamp: nullable market_state / profile_version on trade_orders and trade_positions (additive, idempotent, never fails boot)."""
+    """Market Weather stamp (and, round 557, the strategy_version stamp): nullable market_state / profile_version / strategy_version on trade_orders and trade_positions (additive, idempotent, never fails boot)."""
     from sqlalchemy import inspect, text
 
     targets = [
         ("trade_orders",    "market_state",    16), ("trade_orders",    "profile_version", 24),
         ("trade_positions", "market_state",    16), ("trade_positions", "profile_version", 24),
+        ("trade_orders",    "strategy_version", 24), ("trade_positions", "strategy_version", 24),     # round 557: strategy_version.py stamp
     ]
     for table_name, col_name, width in targets:
         try:

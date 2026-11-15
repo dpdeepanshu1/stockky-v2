@@ -43,9 +43,10 @@
 .ob-body { display: grid; gap: 0; }
 .ob-body.wide { grid-template-columns: 176px minmax(0, 1fr); }
 .ob-rail { border-right: 1px solid var(--ob-line); padding: 6px 6px 6px 8px; background: rgba(7,9,13,.55); overflow-y: auto; }
-.ob-rail button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 46px auto; align-items: center; gap: 6px; text-align: left; padding: 0 6px; border-radius: 6px; font-size: 11px; color: var(--ob-dim); background: transparent; border: 0; cursor: pointer; transition: background .15s, color .15s; font-variant-numeric: tabular-nums; }
+.ob-rail button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto 46px auto; align-items: center; gap: 6px; text-align: left; padding: 0 6px; border-radius: 6px; font-size: 11px; color: var(--ob-dim); background: transparent; border: 0; cursor: pointer; transition: background .15s, color .15s; font-variant-numeric: tabular-nums; }
 .ob-rail button:hover { color: var(--ob-fg); background: rgba(255,255,255,.04); }
 .ob-rail button[aria-selected="true"] { color: var(--ob-fg); background: rgba(74,163,255,.14); box-shadow: inset 2px 0 0 var(--ob-cyan); }
+.ob-rail .tv { font-size: 10px; color: var(--ob-dim); opacity: .85; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ob-rail .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ob-rail .bar { position: relative; height: 4px; border-radius: 2px; background: #151c26; } .ob-rail .bar i { position: absolute; top: 0; bottom: 0; border-radius: 2px; transition: width .5s ease; }
 .ob-stage { position: relative; min-width: 0; padding: 0; }

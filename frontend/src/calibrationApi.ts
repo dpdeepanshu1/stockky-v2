@@ -12,6 +12,7 @@ import { getApiUrl } from "./api";
 import { getFnoApiUrl, fnoToken } from "./fnoApi";
 import type { AgentRunResult, AgentStatus } from "./agentView";
 import type { AgentSettingsView, AuditLine, HistoryView, LoopView, WeeklyView } from "./selfImproveView";
+import type { EvidenceView } from "./selfImproveEvidence";
 import type { OverlayRevertResult, OverlayView, WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
@@ -252,6 +253,7 @@ export const runnerApi = {
   agentLoop: () => R<LoopView>("/agent/loop"),
   agentHistory: (limit = 30) => R<HistoryView>(`/agent/history?limit=${limit}`),
   agentWeekly: () => R<WeeklyView>("/agent/weekly"),     // round 545 (S5): read only
+  agentEvidence: () => R<EvidenceView>("/agent/evidence"),   // round 556: real-trade verdict + strategy registry / drift, aggregates only; read only
   agentSettings: () => R<AgentSettingsView>("/agent/settings"),
   // round 543 (S3): change the agent's own settings (mode / run-after / caps). The body holds ONLY the fields to change; confirm is the second click for propose. It sets no trading switch.
   agentSetSettings: (body: { mode?: string; run_after?: string; max_ideas?: number; max_queue?: number; confirm?: boolean; reset?: boolean }) => R<AgentSettingsView>("/agent/settings", { method: "POST", body: JSON.stringify(body) }),

@@ -4,6 +4,7 @@ import DecisionCard from "../DecisionCard";
 import SignalStream, { BreadthStrip } from "../SignalStream";
 import ScanPanel from "../ScanPanel";
 import MarketSentimentHeader from "../MarketSentimentHeader";
+import GlobalCuesStrip from "../GlobalCuesStrip";   // round 553 (P4)
 import MarketMovers from "../MarketMovers";
 import HomePositions from "./HomePositions";
 import { ScanMenu } from "./ScanMenu";
@@ -294,6 +295,7 @@ export function DashboardView({
         )}
 
         <MarketSentimentHeader />
+        <GlobalCuesStrip />
         <HomePositions />
         <div className={active ? "hm-two single" : "hm-two"}>
           {!active && deck}

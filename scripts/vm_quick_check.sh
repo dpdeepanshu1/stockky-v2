@@ -50,6 +50,25 @@ import json,sys
 d=json.load(sys.stdin); s=d.get("series",{})
 assert len(s.get("TCS",[]))>=5 and len(s.get("INFY",[]))>=5, "TCS/INFY series short"
 assert "BADNAME" in d.get("missing",[]), "BADNAME not reported missing"' >/tmp/qc_spk.txt 2>&1 && ok "sparklines: TCS, INFY fine, BADNAME listed as missing" || bad "sparklines" "$(cat /tmp/qc_spk.txt)"
+GCU=$(curl -s --max-time 40 "$GW/market/global-cues")
+echo "$GCU" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); r=d.get("rows",{}); m=d.get("missing",[])
+assert len(r)+len(m)==6, "rows + missing is not 6"
+for k,v in r.items():
+    assert v.get("price",0)>0 and v.get("bar_date"), k+" row has no price or no date"
+print(str(len(r))+" of 6 cues read" + (", missing: "+",".join(m) if m else ""))' >/tmp/qc_gcu.txt 2>&1 && ok "global cues (round 553): $(cat /tmp/qc_gcu.txt)" || bad "global cues" "$(cat /tmp/qc_gcu.txt)"
+FEOD=$(curl -s --max-time 90 "$GW/market/fo-eod")
+echo "$FEOD" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); r=d.get("rows",[]); td=d.get("trade_date")
+assert td and len(td)==10, "no trade date on the pack: "+str(d.get("error"))
+assert len(r)>=100, "only "+str(len(r))+" F&O stocks in the pack (expected about 180-220)"
+c=d.get("counts",{})
+assert sum(c.get(k,0) for k in ("long_buildup","short_covering","short_buildup","long_unwinding"))>0, "no build-up classified at all"
+nb=sum(1 for x in r if x.get("basis_pct") is None)
+assert nb<len(r)*0.5, "basis missing for "+str(nb)+" of "+str(len(r))+" stocks (cash price column?)"
+print("close of "+td+(" (STALE, expected "+str(d.get("expected_date"))+")" if d.get("stale") else "")+", "+str(len(r))+" stocks, "+str(nb)+" without basis")' >/tmp/qc_feod.txt 2>&1 && ok "F&O end-of-day pack (round 554): $(cat /tmp/qc_feod.txt)" || bad "F&O end-of-day pack" "$(cat /tmp/qc_feod.txt)"
 
 echo "== 4. runner"
 curl -s --max-time 10 "$RUNNER/health" | grep -q '"status":"ok"' && ok "calibration runner health ok" || bad "runner health not ok"

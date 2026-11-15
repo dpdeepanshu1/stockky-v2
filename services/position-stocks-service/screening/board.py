@@ -131,6 +131,21 @@ def _rule_label(side: str, rank: int, conv: int, chase: Optional[float]) -> str:
     return f"{'PICK' if (rank <= 5 and conv >= 70) else 'WATCH'} · {word} #{rank}"
 
 
+def sector_rows(sector_stats: Dict[str, dict]) -> List[dict]:
+    """The board's sector list. round 551 (P2): besides the average change, each sector carries `turnover` (traded value in rupees, the sum of its tracked stocks' day turnover),
+    `turnover_share_pct` (its share of the traded value of ALL tracked stocks on the board, so the shares add up to 100) and `up` / `down` (stocks above / below the previous close).
+    This is TRADED value, not net buying: every trade has a buyer and a seller. A sector none of whose stocks has shown volume gets None (a dash on the page), never 0."""
+    total = sum(st.get("turn", 0.0) for st in sector_stats.values())
+    out = []
+    for st in sector_stats.values():
+        have = st.get("turn_n", 0) > 0 and st.get("turn", 0.0) > 0.0
+        out.append({"name": st["name"], "count": st["count"], "avg_change_pct": round(st["sum_chg"] / st["count"], 2),
+                    "bull": st["bull"], "bear": st["bear"], "up": st.get("up", 0), "down": st.get("down", 0),
+                    "turnover": round(st["turn"], 0) if have else None,
+                    "turnover_share_pct": round(st["turn"] / total * 100.0, 2) if (have and total > 0.0) else None})
+    return out
+
+
 def build(universe: Optional[str] = None, limit: Optional[int] = None, open_symbols: Optional[Iterable[str]] = None,
           now: Optional[float] = None, use_cache: bool = True) -> dict:
     """Full board payload: market summary, sectors, ranked bullish / bearish rows. Cached BOARD_CACHE_S seconds."""
@@ -175,9 +190,15 @@ def build(universe: Optional[str] = None, limit: Optional[int] = None, open_symb
         else:
             flat += 1
         sec = sector_map.sector_of(s)
-        st = sector_stats.setdefault(sec, {"name": sec, "count": 0, "sum_chg": 0.0, "bull": 0, "bear": 0})
+        st = sector_stats.setdefault(sec, {"name": sec, "count": 0, "sum_chg": 0.0, "bull": 0, "bear": 0, "up": 0, "down": 0, "turn": 0.0, "turn_n": 0})
         st["count"] += 1
         st["sum_chg"] += chg
+        st["up"] += 1 if chg > 0.0 else 0               # round 551 (P2): same rule as the market-wide up / down above
+        st["down"] += 1 if chg < 0.0 else 0
+        tv = bar_store.turnover(s)                      # day total (cumulative volume x last price) of the same session as `chg`; 0 = no volume seen = unknown, not a real zero
+        if tv > 0.0:
+            st["turn"] += tv
+            st["turn_n"] += 1
         pd = prev_day.peek(s)
         avg = pd.avg_range_pct if pd else None
         sr = ms.strength(d["ltp"], d["open"], d["high"], d["low"], avg, config.BOARD_ONESIDED_RATIO)
@@ -240,8 +261,7 @@ def build(universe: Optional[str] = None, limit: Optional[int] = None, open_symb
         out_sides[side] = shown
         for r in ranked[limit:]:
             r.pop("_bars", None); r.pop("_pd", None)
-    sectors = [{"name": st["name"], "count": st["count"], "avg_change_pct": round(st["sum_chg"] / st["count"], 2),
-                "bull": st["bull"], "bear": st["bear"]} for st in sector_stats.values()]
+    sectors = sector_rows(sector_stats)
     sectors.sort(key=lambda x: -x["avg_change_pct"])
     named = [x for x in sectors if x["name"] != "Other" and x["count"] >= 3]
     market = {"up": up, "down": down, "flat": flat, "tracked": up + down + flat,

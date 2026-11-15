@@ -7422,6 +7422,12 @@ app.include_router(_bound_routes_j.api_surprise_notify_top_picks_router)
 # E557 (round 539, B3): row sparklines (read-only, no login).
 from gateway_routers.sparklines import sparklines_router as _sparklines_router, market_sparklines  # noqa: E402,F401
 app.include_router(_sparklines_router)
+# E578 (round 553, P4): the global cues strip (read-only, no login).
+from gateway_routers.global_cues import global_cues_router as _global_cues_router, market_global_cues  # noqa: E402,F401
+app.include_router(_global_cues_router)
+# E579 (round 554, P5): the end-of-day F&O pack - OI Flow and futures basis (read-only, no login).
+from gateway_routers.fo_eod import fo_eod_router as _fo_eod_router, market_fo_eod  # noqa: E402,F401
+app.include_router(_fo_eod_router)
 
 # E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
 from gateway_routers.ipo_routes import ipo_scan_router as _ipo_scan_router, api_ipo_scan  # noqa: E402,F401

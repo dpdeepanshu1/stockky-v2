@@ -13,7 +13,8 @@ export interface BoardRow {
 }
 // group311: the popup can open from the command palette with just a symbol (no ranked row yet)
 export type BoardRowLite = Pick<BoardRow, "symbol"> & Partial<BoardRow>;
-export interface BoardSector { name: string; count: number; avg_change_pct: number; bull: number; bear: number }
+export interface BoardSector { name: string; count: number; avg_change_pct: number; bull: number; bear: number;
+  up?: number; down?: number; turnover?: number | null; turnover_share_pct?: number | null }     // round 551 (P2): optional, an older service sends none of the last four
 export interface BoardPayload {
   as_of: number; universe: string; params_version: string; stale: boolean; stale_day?: string; market_open: boolean;
   feed: { source: string | null; connected: boolean; last_tick_at: number | null; tick_age_s: number | null };

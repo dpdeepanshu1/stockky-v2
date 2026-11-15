@@ -47,6 +47,7 @@ archive/stray-root-files/tier_breakdown.csv
 config/service_urls.py
 data/prediction-model/model.pkl
 data/prediction-model/model.pkl.backup-2026-10-30
+data/prediction-model/model_meta.json
 deploy/deploy.sh
 deploy/nginx-stockky.conf
 docker-compose.yml
@@ -84,6 +85,7 @@ frontend/src/calibrationApi.ts
 frontend/src/calibrationNav.ts
 frontend/src/calibrationPlan.ts
 frontend/src/calibrationTrades.ts
+frontend/src/chainNumbers.test.mjs
 frontend/src/chargesRates.ts
 frontend/src/chartContext.test.mjs
 frontend/src/chartContext.ts
@@ -104,6 +106,7 @@ frontend/src/components/DataHealthAudit.tsx
 frontend/src/components/DecisionCard.tsx
 frontend/src/components/DhanMoneyCard.tsx
 frontend/src/components/FeedHealthPanel.tsx
+frontend/src/components/GlobalCuesStrip.tsx
 frontend/src/components/HotStocks.tsx
 frontend/src/components/IpoFeedHealth.tsx
 frontend/src/components/IpoLifecycle.tsx
@@ -160,6 +163,7 @@ frontend/src/components/board/FlowLines.tsx
 frontend/src/components/board/JournalPanel.tsx
 frontend/src/components/board/MarketBoard.tsx
 frontend/src/components/board/MarketStrip.tsx
+frontend/src/components/board/PopupFlow.tsx
 frontend/src/components/board/SectorRail.tsx
 frontend/src/components/board/SellOrdersCard.tsx
 frontend/src/components/board/SessionHealthPanel.tsx
@@ -183,6 +187,8 @@ frontend/src/components/board/momentum.test.mjs
 frontend/src/components/board/momentum.ts
 frontend/src/components/board/riskCap.test.mjs
 frontend/src/components/board/riskCap.ts
+frontend/src/components/board/sectorTraded.test.mjs
+frontend/src/components/board/sectorTraded.ts
 frontend/src/components/board/topPicks.test.mjs
 frontend/src/components/board/topPicks.ts
 frontend/src/components/board/topPicksView.ts
@@ -218,10 +224,12 @@ frontend/src/components/decision/EventParts.tsx
 frontend/src/components/decision/newsScore.ts
 frontend/src/components/decision/planView.ts
 frontend/src/components/feedView.ts
+frontend/src/components/fno/ChainCharts.tsx
 frontend/src/components/fno/EngineStatusRow.tsx
 frontend/src/components/fno/FnoBacktests.tsx
 frontend/src/components/fno/FnoChain.tsx
 frontend/src/components/fno/FnoControlCard.tsx
+frontend/src/components/fno/FnoEod.tsx
 frontend/src/components/fno/FnoJournal.tsx
 frontend/src/components/fno/FnoOverview.tsx
 frontend/src/components/fno/FnoProbeCard.tsx
@@ -276,6 +284,7 @@ frontend/src/components/realAuto/types.ts
 frontend/src/components/rowSpark.ts
 frontend/src/components/selfImprove/ChangesPanel.tsx
 frontend/src/components/selfImprove/ControlsPanel.tsx
+frontend/src/components/selfImprove/EvidencePanel.tsx
 frontend/src/components/selfImprove/HealthPanel.tsx
 frontend/src/components/selfImprove/IdeasPanel.tsx
 frontend/src/components/selfImprove/SiNav.tsx
@@ -338,8 +347,12 @@ frontend/src/fnoPoll.test.mjs
 frontend/src/fnoPoll.ts
 frontend/src/fnoView.test.mjs
 frontend/src/fnoView.ts
+frontend/src/foEodView.test.mjs
+frontend/src/foEodView.ts
 frontend/src/gatewayAuth.test.mjs
 frontend/src/gatewayAuth.ts
+frontend/src/globalCues.test.mjs
+frontend/src/globalCuesView.ts
 frontend/src/history.test.mjs
 frontend/src/home.test.mjs
 frontend/src/hooks/scanResult.ts
@@ -363,6 +376,8 @@ frontend/src/moneyView.ts
 frontend/src/paletteContrast.test.mjs
 frontend/src/paperNet.test.mjs
 frontend/src/paperNet.ts
+frontend/src/popupFlow.test.mjs
+frontend/src/popupFlowView.ts
 frontend/src/popupLayout.test.mjs
 frontend/src/positionSide.test.mjs
 frontend/src/positionSide.ts
@@ -381,6 +396,8 @@ frontend/src/screenerPresets.ts
 frontend/src/selfImprove.test.mjs
 frontend/src/selfImproveControls.test.mjs
 frontend/src/selfImproveControls.ts
+frontend/src/selfImproveEvidence.test.mjs
+frontend/src/selfImproveEvidence.ts
 frontend/src/selfImproveReview.test.mjs
 frontend/src/selfImproveView.ts
 frontend/src/sellOrders.test.mjs
@@ -424,6 +441,7 @@ frontend/src/useRealtime.ts
 frontend/src/v7.test.mjs
 frontend/src/v7View.ts
 frontend/src/visibleInterval.ts
+frontend/src/vixRank.test.mjs
 frontend/src/watchlistGain.test.mjs
 frontend/src/watchlistGain.ts
 frontend/src/watchlistOrder.ts
@@ -489,6 +507,7 @@ scripts/diagnose_never_priced.sh
 scripts/diagnose_yfinance.sh
 scripts/docker_frontend_check.sh
 scripts/docker_test.sh
+scripts/drift_monitor.py
 scripts/e276_check.py
 scripts/e277_vm_check.sh
 scripts/e278_run.sh
@@ -496,6 +515,7 @@ scripts/entry_rules_backtest.py
 scripts/entry_slippage_review.py
 scripts/env_review_check.py
 scripts/env_structure_check.py
+scripts/evidence_report.py
 scripts/exit_followup_study.py
 scripts/export_intraday.py
 scripts/export_records.py
@@ -531,6 +551,7 @@ scripts/live_vs_backtest.py
 scripts/ma_baseline.py
 scripts/ml_v2_walkforward.py
 scripts/mode_compare.py
+scripts/model_gate.py
 scripts/monday_check.py
 scripts/movers_review.py
 scripts/ms_ab_report.py
@@ -561,6 +582,7 @@ scripts/short_history_replay.py
 scripts/six_month_backtest.py
 scripts/stats_loop.sh
 scripts/strategy_readout.py
+scripts/strategy_registry.py
 scripts/structure_backtest.py
 scripts/structure_gate_check.py
 scripts/sweep_study.py
@@ -587,10 +609,12 @@ scripts/test_control_kit.py
 scripts/test_control_snapshot.py
 scripts/test_daily_trade_report.py
 scripts/test_docker_helper_scripts.py
+scripts/test_drift_monitor.py
 scripts/test_e257_report_fixes.py
 scripts/test_entry_rules_backtest.py
 scripts/test_env_review_check.py
 scripts/test_env_structure_check.py
+scripts/test_evidence_report.py
 scripts/test_exit_followup_study.py
 scripts/test_export_records.py
 scripts/test_flow_tape_report.py
@@ -609,6 +633,7 @@ scripts/test_legacy_gate_backtest.py
 scripts/test_live_vs_backtest.py
 scripts/test_ma_baseline.py
 scripts/test_ml_v2_walkforward.py
+scripts/test_model_gate.py
 scripts/test_movers_review.py
 scripts/test_ms_ab_report.py
 scripts/test_ms_g1_check.py
@@ -633,6 +658,7 @@ scripts/test_short_exit_paths.py
 scripts/test_short_live.py
 scripts/test_standalone_behaviour_scripts.py
 scripts/test_strategy_readout.py
+scripts/test_strategy_registry.py
 scripts/test_structure_backtest_resume.py
 scripts/test_structure_gate_check.py
 scripts/test_sweep_study.py
@@ -840,6 +866,8 @@ services/api-gateway/earnings_window.py
 services/api-gateway/env_util.py
 services/api-gateway/gateway_routers/__init__.py
 services/api-gateway/gateway_routers/feed_jobs.py
+services/api-gateway/gateway_routers/fo_eod.py
+services/api-gateway/gateway_routers/global_cues.py
 services/api-gateway/gateway_routers/hot_picks.py
 services/api-gateway/gateway_routers/ipo_routes.py
 services/api-gateway/gateway_routers/ops_status.py
@@ -1149,6 +1177,8 @@ services/api-gateway/tests/test_round211_nse_board_rows.py
 services/api-gateway/tests/test_round539_extra_index_tiles.py
 services/api-gateway/tests/test_round539_notifications_history_routes.py
 services/api-gateway/tests/test_round539_sparklines.py
+services/api-gateway/tests/test_round553_global_cues.py
+services/api-gateway/tests/test_round554_fo_eod.py
 services/api-gateway/tests/test_searched_list_selfclean.py
 services/api-gateway/tests/test_surprise_last_result_expiry_real_kv.py
 services/api-gateway/tests/test_surprise_premarket.py
@@ -1211,6 +1241,12 @@ services/calibration-runner-service/tests/test_round541_self_improve.py
 services/calibration-runner-service/tests/test_round543_autocalib_audit.py
 services/calibration-runner-service/tests/test_round544_daily_proof.py
 services/calibration-runner-service/tests/test_round545_review_export.py
+services/calibration-runner-service/tests/test_round550_evidence_job.py
+services/calibration-runner-service/tests/test_round551_book_evidence.py
+services/calibration-runner-service/tests/test_round553_strategy_registry_job.py
+services/calibration-runner-service/tests/test_round554_drift_monitor_job.py
+services/calibration-runner-service/tests/test_round555_strategy_status.py
+services/calibration-runner-service/tests/test_round556_evidence_view.py
 services/calibration-runner-service/tests/test_runner_engine.py
 services/calibration-runner-service/tests/test_short_history_replay.py
 services/calibration-runner-service/tests/test_weather.py
@@ -1424,6 +1460,7 @@ services/fno-options-service/fno/sizing.py
 services/fno-options-service/fno/stages.py
 services/fno-options-service/fno/store.py
 services/fno-options-service/fno/strategies.py
+services/fno-options-service/fno/vix_rank.py
 services/fno-options-service/main.py
 services/fno-options-service/requirements.txt
 services/fno-options-service/session_keys.py
@@ -1552,6 +1589,8 @@ services/fno-options-service/tests/test_round506_report_trades.py
 services/fno-options-service/tests/test_round507_recording_status.py
 services/fno-options-service/tests/test_round507_suspect_days_and_parts.py
 services/fno-options-service/tests/test_round509_entry_extension.py
+services/fno-options-service/tests/test_round550_vix_rank.py
+services/fno-options-service/tests/test_round552_chain_fields.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile
@@ -1596,6 +1635,7 @@ services/market-data-service/dhan_data/quotes.py
 services/market-data-service/dhan_data/scrip_master.py
 services/market-data-service/dhan_data/ws_feed.py
 services/market-data-service/env_util.py
+services/market-data-service/fo_eod.py
 services/market-data-service/instrument_filter.py
 services/market-data-service/kv_cache.py
 services/market-data-service/live_write_retry.py
@@ -1708,6 +1748,8 @@ services/market-data-service/tests/test_round190_first_candle_call_403.py
 services/market-data-service/tests/test_round191_global_cue_error_ttl.py
 services/market-data-service/tests/test_round205_feed_coverage_unknown.py
 services/market-data-service/tests/test_round222_prev_close_guard.py
+services/market-data-service/tests/test_round553_global_strip.py
+services/market-data-service/tests/test_round554_fo_eod.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -2259,6 +2301,7 @@ services/position-stocks-service/tests/test_round223_watchdog_leg_log.py
 services/position-stocks-service/tests/test_round225_entry_stage_timer.py
 services/position-stocks-service/tests/test_round227_entry_stage_marks.py
 services/position-stocks-service/tests/test_round242_capital_board.py
+services/position-stocks-service/tests/test_round551_sector_traded_value.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -2488,6 +2531,7 @@ services/real-trade-service/stockky_ms/timeframes.py
 services/real-trade-service/stockky_ms/volume_profile.py
 services/real-trade-service/stockky_ms/weekly.py
 services/real-trade-service/stockky_ms/wyckoff.py
+services/real-trade-service/strategy_version.py
 services/real-trade-service/swing/__init__.py
 services/real-trade-service/swing/engine.py
 services/real-trade-service/swing/lane.py
@@ -2868,6 +2912,7 @@ services/real-trade-service/tests/test_round226_account_wide_today.py
 services/real-trade-service/tests/test_round242_capital_board.py
 services/real-trade-service/tests/test_round323_atr_nan.py
 services/real-trade-service/tests/test_round512_market_research.py
+services/real-trade-service/tests/test_round557_strategy_version.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

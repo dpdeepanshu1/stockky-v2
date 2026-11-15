@@ -1,11 +1,12 @@
 // frontend/src/components/SelfImproveTab.tsx  (round 542, E567, S2 of the Self Improve plan)
-// "Self Improve System": ONE place for the nightly loop (tests -> AI agent -> queued tests -> auto-calibration). Five sections: Today / Loop, Ideas, Changes,
-// Controls (round 543, S3), Scoreboard & health. It reads GET /agent/loop, /agent/history, /agent/weekly (round 545) and /autocalib/status?coverage=false on calibration-runner-service
+// "Self Improve System": ONE place for the nightly loop (tests -> AI agent -> queued tests -> auto-calibration). Six sections: Today / Loop, Ideas, Changes,
+// Controls (round 543, S3), Evidence (round 556: real-trade verdict and strategy registry, read only), Scoreboard & health. It reads GET /agent/loop, /agent/history, /agent/weekly (round 545) and /agent/evidence (round 556) and /autocalib/status?coverage=false on calibration-runner-service
 // and refreshes every 30 s. The agent only SUGGESTS: nothing here sets a trading switch; Controls changes only the agent's own settings and auto-calibration's
 // master switch, dry-run and pinned list. The page sits behind the shared admin login (AdminGate, TabContent.tsx). Pure helpers: selfImproveView.ts, selfImproveControls.ts.
 import { useCallback, useEffect, useState } from "react";
 import { runnerApi } from "../calibrationApi";
 import type { AutoStatus } from "../calibrationApi";
+import type { EvidenceView } from "../selfImproveEvidence";
 import type { HistoryView, LoopView, SiSection, WeeklyView } from "../selfImproveView";
 import SiNav from "./selfImprove/SiNav";
 import TodayPanel from "./selfImprove/TodayPanel";
@@ -13,6 +14,7 @@ import IdeasPanel from "./selfImprove/IdeasPanel";
 import HealthPanel from "./selfImprove/HealthPanel";
 import ChangesPanel from "./selfImprove/ChangesPanel";
 import ControlsPanel from "./selfImprove/ControlsPanel";
+import EvidencePanel from "./selfImprove/EvidencePanel";
 import { Msg } from "./calibration/ui";
 
 export default function SelfImproveTab() {
@@ -20,6 +22,8 @@ export default function SelfImproveTab() {
   const [loop, setLoop] = useState<LoopView | null>(null);
   const [history, setHistory] = useState<HistoryView | null>(null);
   const [weekly, setWeekly] = useState<WeeklyView | null>(null);
+  const [evidence, setEvidence] = useState<EvidenceView | null>(null);
+  const [evErr, setEvErr] = useState<string | null>(null);
   const [ac, setAc] = useState<AutoStatus | null>(null);
   const [acErr, setAcErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -27,6 +31,8 @@ export default function SelfImproveTab() {
   const reload = useCallback(async () => {
     // the reads are independent: one failing must not blank the others (coverage=false: no call to the two trading services). The weekly review (round 545) is optional: an older runner answers 404 and the card is simply not shown.
     const [l, h, a, wk] = await Promise.allSettled([runnerApi.agentLoop(), runnerApi.agentHistory(30), runnerApi.autoStatus(false), runnerApi.agentWeekly()]);
+    // round 556: the evidence read is optional like the weekly one: an older runner answers 404, which only shows on the Evidence section and never blanks the others.
+    runnerApi.agentEvidence().then((e) => { setEvidence(e); setEvErr(null); }, (e: any) => setEvErr(e?.message || String(e)));
     if (wk.status === "fulfilled") setWeekly(wk.value);
     if (l.status === "fulfilled") setLoop(l.value);
     if (h.status === "fulfilled") setHistory(h.value);
@@ -51,7 +57,8 @@ export default function SelfImproveTab() {
           {section === "ideas" && <IdeasPanel history={history} weekly={weekly} />}
           {loop && section === "changes" && <ChangesPanel loop={loop} ac={ac} acError={acErr} />}
           {loop && section === "controls" && <ControlsPanel loop={loop} ac={ac} acError={acErr} reload={reload} />}
-          {loop && section === "health" && <HealthPanel loop={loop} reload={reload} />}
+          {section === "evidence" && <EvidencePanel view={evidence} error={evErr} />}
+          {loop && section === "health" && <HealthPanel loop={loop} evidence={evidence} reload={reload} />}
         </div>
       </div>
     </div>

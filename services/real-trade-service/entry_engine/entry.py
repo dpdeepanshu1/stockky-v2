@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 import config
 from control.kit import current_profile as _ms_current_profile
+from strategy_version import current as _sv_current
 import cost_model
 import entry_product
 import models
@@ -2198,6 +2199,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # Market Weather: the state in force when this order was placed (None when no state is active).
             market_state=_ms_current_profile()["market_state"],
             profile_version=_ms_current_profile()["profile_version"],
+            strategy_version=_sv_current(),                       # round 557: the calibrated strategy switches in force (None = could not be read)
             # 2026-09-18 fix (selective overnight hold): carry the candidate's
             # decision_label/conviction_score forward too, so portfolio.py can
             # stamp the resulting TradePosition and EOD square-off can decide

@@ -5,12 +5,13 @@ import { PageHero } from "../ui/PageHero";
 import { SubTabs } from "../ui/SubTabs";
 import FnoOverview from "./FnoOverview";
 import FnoChain from "./FnoChain";
+import FnoEod from "./FnoEod";
 import FnoBacktests from "./FnoBacktests";
 import { FnoHistory, FnoLog, FnoPositions } from "./FnoJournal";
 
-type Section = "overview" | "chain" | "positions" | "history" | "backtest" | "log";
+type Section = "overview" | "chain" | "eod" | "positions" | "history" | "backtest" | "log";
 const SECTIONS: { id: Section; label: string }[] = [
-  { id: "overview", label: "Overview" }, { id: "chain", label: "Option chain" }, { id: "positions", label: "Positions" },
+  { id: "overview", label: "Overview" }, { id: "chain", label: "Option chain" }, { id: "eod", label: "End of day" }, { id: "positions", label: "Positions" },
   { id: "history", label: "History & charges" }, { id: "backtest", label: "Backtests" }, { id: "log", label: "Decision log" },
 ];
 
@@ -24,6 +25,7 @@ export default function FnoTab() {
       <SubTabs items={SECTIONS} value={s} onChange={setS} label="Section" />
       {s === "overview" && <FnoOverview />}
       {s === "chain" && <FnoChain />}
+      {s === "eod" && <FnoEod />}
       {s === "positions" && <FnoPositions />}
       {s === "history" && <FnoHistory />}
       {s === "backtest" && <FnoBacktests />}

@@ -41,7 +41,15 @@ Round 545 (S5 of the Self Improve plan, E570: review and export):
   * weekly(): the last 7 days in one read (which weekdays had a run, ideas and their outcomes, the most repeated switches, one plain sentence);
   * history_csv(): the idea history as a CSV file (one row per idea, one row for a run with no ideas); free text is neutralised against spreadsheet formulas;
   * both are read only (GET /agent/weekly, GET /agent/history.csv) and set nothing.
-Stdlib only. Offline tests: tests/test_agent.py, tests/test_agent_hardening.py, tests/test_round541_self_improve.py, tests/test_round544_daily_proof.py and tests/test_round545_review_export.py.
+Round 551 (E576: the agent reads real-trade evidence):
+  * book_evidence(): the newest evidence_report job result (scripts/evidence_report.py) as aggregates only (verdict, trade count, mean net return %, 90 % lower bound, Deflated Sharpe
+    probability, charges %, the 3 weakest groups). No rupee amount and no trade field; group names are scrubbed. Only a report under 14 days old reaches the model, as context
+    ("never name a switch because of it alone"); the saved report and the Telegram message carry one plain line. It changes no switch, no allow-list entry and no rule.
+Round 555 (E580: the agent reads the strategy registry and drift):
+  * strategy_status(): reads state/strategy_registry.json (round 553 / 554) as aggregates only - how many strategies are testing / proven / watch / demoted, and up to 6 that need a look
+    (watch or demoted, or drift WARNING / DECAY) with name, status, drift state, last evidence verdict and trade count. Only a registry updated within 7 days reaches the model, as context
+    (same rule as book_evidence: never name a switch because of it alone). Names go through the same privacy filter. Report, last_report and Telegram carry one plain line. No switch, rule or allow-list change.
+Stdlib only. Offline tests: tests/test_round555_strategy_status.py, tests/test_round551_book_evidence.py, tests/test_agent.py, tests/test_agent_hardening.py, tests/test_round541_self_improve.py, tests/test_round544_daily_proof.py and tests/test_round545_review_export.py.
 """
 from __future__ import annotations
 
@@ -91,6 +99,9 @@ SYSTEM_PROMPT = (
     "You review the automatic calibration of an Indian equity trading system. You are given, for each tunable switch, its current value, the verdict of the test that "
     "decides it and how old that test is. Pick at most {n} switches whose current setting looks weak or stale given the verdicts, and say which way each should move. "
     "You only suggest; a separate test and rule set decides every change. Use ONLY switch names that appear in the input. "
+    "The input may also hold book_evidence: what the real closed trades say (verdict NOT_ENOUGH_DATA, NOT_PROVEN, POSITIVE or NEGATIVE, mean net return per trade in percent, its 90 percent lower bound, "
+    "and the weakest groups). It is context only: never name a switch because of it alone, and treat NOT_ENOUGH_DATA or NOT_PROVEN as no information. "
+    "It may also hold strategy_status: how many strategies are testing, proven, watch or demoted, and which need a look (status watch or demoted, or drift WARNING or DECAY). Same rule: context only. "
     "Answer with JSON only, no prose, exactly: "
     '{{"weaknesses": ["short sentence", ...], "ideas": [{{"switch": "NAME", "direction": "up" or "down", "why": "one short sentence"}}]}}'
 )
@@ -144,6 +155,14 @@ def whitelist(inp: Dict[str, Any]) -> Dict[str, Any]:
     out = {"date": inp.get("date"), "switches": rows}
     ac = inp.get("auto_calibration") or {}
     out["auto_calibration"] = {k: ac.get(k) for k in ("enabled", "step_pct", "cooldown_h") if k in ac}
+    be = inp.get("book_evidence")
+    if isinstance(be, dict) and be.get("status") == "ok":          # only a fresh, readable report is shown to the model
+        out["book_evidence"] = {k: be[k] for k in BOOK_FIELDS if k in be}
+    ss = inp.get("strategy_status")
+    if isinstance(ss, dict) and ss.get("status") == "ok":           # same rule: only a fresh, readable registry is shown to the model
+        row = {k: ss[k] for k in REG_FIELDS if k in ss}
+        row["attention"] = [{k: r.get(k) for k in ("strategy", "status", "drift", "verdict", "n")} for r in (ss.get("attention") or [])[:REG_MAX_ROWS] if isinstance(r, dict)]
+        out["strategy_status"] = row
     return out
 
 
@@ -183,7 +202,7 @@ def queueable(job: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
 
 
 # ------------------------------------------------------------------------------------------------------------------ input
-def build_input(auto: Any, rules: Dict[str, AC.Rule], now: float, ctx_out: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+def build_input(auto: Any, rules: Dict[str, AC.Rule], now: float, ctx_out: Optional[Dict[str, Dict[str, Any]]] = None, data_dir: str = "") -> Dict[str, Any]:
     """Aggregates only, from what auto-calibration reads anyway. Read-only: nothing is evaluated for real and no vote is counted."""
     pinned = set(auto.settings().get("pinned") or [])
     flags: Dict[str, Any] = {}
@@ -231,7 +250,135 @@ def build_input(auto: Any, rules: Dict[str, AC.Rule], now: float, ctx_out: Optio
             row.update(status="unreadable", verdict=scrub(type(e).__name__, 40))
         rows.append(row)
     return {"date": datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d"), "switches": rows,
-            "auto_calibration": {"enabled": bool(auto.settings().get("enabled")), "step_pct": step, "cooldown_h": auto.settings().get("cooldown_h")}}
+            "auto_calibration": {"enabled": bool(auto.settings().get("enabled")), "step_pct": step, "cooldown_h": auto.settings().get("cooldown_h")},
+            "book_evidence": book_evidence(auto, now), "strategy_status": strategy_status(data_dir, now) if data_dir else {"status": "none"}}
+
+
+# ------------------------------------------------------------------------------------------------------------------ book evidence (round 551)
+BOOK_JOB = "evidence_report"
+BOOK_MAX_AGE_D = 14.0                                 # an evidence report older than this is shown as "stale" and never sent to the model
+BOOK_VERDICTS = ("NOT_ENOUGH_DATA", "NOT_PROVEN", "POSITIVE", "NEGATIVE")
+BOOK_FIELDS = ("status", "age_days", "trades", "verdict", "mean_net_ret_pct", "lower90_pct", "dsr_prob", "charges_pct_of_gross", "weakest", "verdict_counts")
+
+
+def _num(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+        return round(f, 3) if f == f and abs(f) != float("inf") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def book_evidence(auto: Any, now: float) -> Dict[str, Any]:
+    """Round 551: what the REAL closed trades say, from the nightly evidence_report job (scripts/evidence_report.py). Read only, aggregates only: a verdict word,
+    trade counts and percentages. No rupee amount, no trade or order field and no free text from the file reaches the model: every group name is scrubbed and a
+    name that would trip the privacy guard is replaced. Never raises: a missing, stale or unreadable report is just a status."""
+    try:
+        ev = auto.evidence.get(BOOK_JOB)
+    except Exception:  # noqa: BLE001
+        ev = None
+    if ev is None:
+        return {"status": "none"}
+    age = round(max(0.0, (now - ev.finished_at) / 86400.0), 1)
+    if age > BOOK_MAX_AGE_D:
+        return {"status": "stale", "age_days": age}
+    rep = ev.json("evidence_report.json")
+    book = rep.get("book") if isinstance(rep, dict) else None
+    if not isinstance(book, dict):
+        return {"status": "unreadable", "age_days": age}
+    verdict = str(book.get("verdict") or "")
+    out: Dict[str, Any] = {"status": "ok", "age_days": age, "trades": int(_num(book.get("n")) or 0), "verdict": verdict if verdict in BOOK_VERDICTS else "UNKNOWN",
+                           "mean_net_ret_pct": _num(book.get("mean_net_ret_pct")), "lower90_pct": _num(book.get("lower90_pct")), "dsr_prob": _num(book.get("dsr_prob")),
+                           "charges_pct_of_gross": _num(book.get("charges_pct_of_gross"))}
+    weak = []
+    for w in (rep.get("weakest") or [])[:3]:
+        if not isinstance(w, dict):
+            continue
+        key = _safe_key(w.get("key"))
+        v = str(w.get("verdict") or "")
+        weak.append({"group": scrub(w.get("group"), 30), "key": key, "n": int(_num(w.get("n")) or 0), "mean_net_ret_pct": _num(w.get("mean_net_ret_pct")),
+                     "lower90_pct": _num(w.get("lower90_pct")), "verdict": v if v in BOOK_VERDICTS else "UNKNOWN"})
+    out["weakest"] = weak
+    vc = rep.get("verdict_counts") if isinstance(rep.get("verdict_counts"), dict) else {}
+    out["verdict_counts"] = {k: int(_num(vc.get(k)) or 0) for k in BOOK_VERDICTS if k in vc}
+    return out
+
+
+def _safe_key(v: Any, limit: int = 40) -> str:
+    """A group / strategy name that may reach the model: scrubbed, and replaced when it would trip the privacy guard."""
+    key = scrub(v, limit)
+    return "(hidden)" if _BANNED_IN_PROMPT.search(key) or any(rx.search(key) for rx in _KEY_SHAPES) else key
+
+
+REG_FILE = ("state", "strategy_registry.json")
+REG_MAX_AGE_D = 7.0                                   # a registry not updated for this long is "stale" and never sent
+REG_STATUSES = ("testing", "proven", "watch", "demoted", "retired")
+REG_DRIFT = ("DECAY", "WARNING", "IMPROVING", "STABLE", "NOT_ENOUGH_DATA")
+REG_FIELDS = ("status", "age_days", "counts", "attention")
+REG_MAX_ROWS = 6
+
+
+def strategy_status(data_dir: str, now: float) -> Dict[str, Any]:
+    """Round 555: the strategy registry (scripts/strategy_registry.py) and its drift reading, from its own state file. Aggregates only: how many strategies are in each lifecycle
+    status, and up to 6 that need a look (status watch / demoted, or drift WARNING / DECAY) with name, status, drift state, last evidence verdict and trade count. No rupee amount;
+    names go through _safe_key. Read only; never raises: a missing, stale or unreadable file is a status."""
+    doc = _read_json(os.path.join(data_dir, *REG_FILE), None)
+    if not isinstance(doc, dict) or not isinstance(doc.get("strategies"), dict):
+        return {"status": "none"}
+    try:
+        upd = datetime.fromisoformat(str(doc.get("updated"))).timestamp()
+    except Exception:  # noqa: BLE001
+        return {"status": "unreadable"}
+    age = round(max(0.0, (now - upd) / 86400.0), 1)
+    if age > REG_MAX_AGE_D:
+        return {"status": "stale", "age_days": age}
+    counts = {k: 0 for k in REG_STATUSES}
+    look: List[Dict[str, Any]] = []
+    for key, s in doc["strategies"].items():
+        if not isinstance(s, dict):
+            continue
+        st = s.get("status") if s.get("status") in REG_STATUSES else "testing"
+        counts[st] += 1
+        dr = s.get("drift") if isinstance(s.get("drift"), dict) else {}
+        ds = dr.get("state") if dr.get("state") in REG_DRIFT else None
+        if st in ("watch", "demoted") or ds in ("DECAY", "WARNING"):
+            la = s.get("last") if isinstance(s.get("last"), dict) else {}
+            v = la.get("verdict")
+            look.append({"strategy": _safe_key(key), "status": st, "drift": ds, "verdict": v if v in BOOK_VERDICTS else None, "n": int(_num(la.get("n")) or 0)})
+    rank = {"demoted": 0, "watch": 1}
+    look.sort(key=lambda r: (rank.get(r["status"], 2), 0 if r["drift"] == "DECAY" else 1, r["strategy"]))
+    return {"status": "ok", "age_days": age, "counts": counts, "attention": look[:REG_MAX_ROWS]}
+
+
+def strategy_line(r: Optional[Dict[str, Any]]) -> str:
+    """One plain sentence for the report and the Telegram message."""
+    r = r or {}
+    st = r.get("status")
+    if st == "ok":
+        c = r.get("counts") or {}
+        txt = ", ".join(f"{c[k]} {k}" for k in REG_STATUSES if c.get(k))
+        n = len(r.get("attention") or [])
+        return (f"Strategy registry: {txt or 'no strategies yet'}" + (f"; {n} need(s) a look" if n else "") + f" - from a registry {r.get('age_days')} day(s) old. Context only; it moves no switch.")
+    if st == "stale":
+        return f"Strategy registry is {r.get('age_days')} days old, so it was not used."
+    if st == "unreadable":
+        return "Strategy registry could not be read, so it was not used."
+    return "No strategy registry yet (the daily strategy_registry job creates it)."
+
+
+def book_line(b: Optional[Dict[str, Any]]) -> str:
+    """One plain sentence for the report and the Telegram message."""
+    b = b or {}
+    st = b.get("status")
+    if st == "ok":
+        mean, lo = b.get("mean_net_ret_pct"), b.get("lower90_pct")
+        return (f"Real trades: {b.get('trades', 0)} closed, verdict {b.get('verdict')}" + (f", mean net {mean}% per trade (90% lower bound {lo}%)" if mean is not None and lo is not None else "")
+                + f" - from a report {b.get('age_days')} day(s) old. Context only; it moves no switch.")
+    if st == "stale":
+        return f"Real-trade evidence report is {b.get('age_days')} days old, so it was not used."
+    if st == "unreadable":
+        return "Real-trade evidence report could not be read, so it was not used."
+    return "No real-trade evidence report yet (run export_records, then evidence_report), so the agent reads test verdicts only."
 
 
 # ------------------------------------------------------------------------------------------------------------------ LLM
@@ -974,9 +1121,19 @@ class Agent:
         except Exception:  # noqa: BLE001 - judging old ideas must never stop tonight's run
             pass
         ctx: Dict[str, Dict[str, Any]] = {}
-        inp = whitelist(build_input(self.auto, self.rules, ts, ctx))
+        inp = whitelist(build_input(self.auto, self.rules, ts, ctx, self.dir))
         usable = [r for r in inp["switches"] if r.get("status") in ("hold", "would_change")]
         rep["switches_seen"], rep["switches_with_evidence"] = len(inp["switches"]), len(usable)
+        try:                                                     # round 551: the real-trade evidence behind this run, shown in the report; it is never an instruction
+            rep["book_evidence"] = book_evidence(self.auto, ts)
+            rep["book_evidence"]["text"] = book_line(rep["book_evidence"])
+        except Exception:  # noqa: BLE001 - never stops the run
+            rep["book_evidence"] = {"status": "unreadable", "text": book_line({"status": "unreadable"})}
+        try:                                                     # round 555: the strategy registry and drift, same rules
+            rep["strategy_status"] = strategy_status(self.dir, ts)
+            rep["strategy_status"]["text"] = strategy_line(rep["strategy_status"])
+        except Exception:  # noqa: BLE001
+            rep["strategy_status"] = {"status": "unreadable", "text": strategy_line({"status": "unreadable"})}
         bd = breakdown(inp["switches"], list(self.rules), acs.get("pinned") or [])
         rep["breakdown"] = bd           # same dict object: filled in below, but its place near the top of the report is fixed here
         usage = self._usage(ts)
@@ -1104,7 +1261,7 @@ class Agent:
                 st = self._state()
                 st["last"] = {k: rep.get(k) for k in ("date", "at", "mode", "trigger", "source", "note")}
                 st["last"].update(ideas=len(rep["ideas"]), dropped=len(rep["dropped"]), queued=len(rep["queued"]))
-                st["last_report"] = {k: rep.get(k) for k in ("date", "at", "mode", "trigger", "source", "note", "auto_calibration", "breakdown", "weaknesses", "ideas", "queued", "skipped", "health")}
+                st["last_report"] = {k: rep.get(k) for k in ("date", "at", "mode", "trigger", "source", "note", "auto_calibration", "breakdown", "weaknesses", "ideas", "queued", "skipped", "health", "book_evidence", "strategy_status")}
                 st["last_report"]["dropped"] = len(rep["dropped"])
                 self._put_state(st)
         except Exception:  # noqa: BLE001 - files are best effort
@@ -1239,6 +1396,13 @@ class Agent:
                 lines.append(f"Dropped {len(rep['dropped'])} answer(s) outside the rules")
             if rep.get("auto_calibration"):
                 lines.append(scrub(rep["auto_calibration"], 120))
+            if (rep.get("book_evidence") or {}).get("status") == "ok":
+                lines.append(scrub(rep["book_evidence"].get("text"), 220))
+            ss = rep.get("strategy_status") or {}
+            if ss.get("status") == "ok" and ss.get("attention"):
+                lines.append(scrub(ss.get("text"), 220))
+                for r in ss["attention"][:3]:
+                    lines.append(scrub(f"  - {r['strategy']}: {r['status']}" + (f", drift {r['drift']}" if r.get("drift") else ""), 120))
             for h in health[:4]:
                 lines.append("⚠ " + scrub(h, 160))
             self.notify("Stockky AI agent", "\n".join(lines)[:1500], "normal")
@@ -1274,6 +1438,20 @@ class Agent:
             for i in ideas:
                 w.writerow([self._csv_cell(x) for x in head + [i.get("switch"), i.get("direction"), i.get("support"), i.get("outcome"), i.get("queued_test"), i.get("why"), ""]])
         return out.getvalue()
+
+    def evidence_view(self, now: Optional[float] = None) -> Dict[str, Any]:
+        """Round 556: what the Self Improve > Evidence panel shows - the same two aggregate blocks the model gets (book_evidence, strategy_status), read fresh, each with its
+        plain sentence. Read only; never raises (a part that cannot be read is a status); names already go through _safe_key."""
+        ts = now if now is not None else self.now()
+        out: Dict[str, Any] = {"now": ts}
+        for key, fn, line in (("book_evidence", lambda: book_evidence(self.auto, ts), book_line), ("strategy_status", lambda: strategy_status(self.dir, ts), strategy_line)):
+            try:
+                part = fn()
+            except Exception:  # noqa: BLE001
+                part = {"status": "unreadable"}
+            part["text"] = line(part)
+            out[key] = part
+        return out
 
     def weekly(self, now: Optional[float] = None) -> Dict[str, Any]:
         """The last 7 days (today included, IST): per day ran / missed / pending / weekend / off / not_started (before the agent's first saved run, round 549), the ideas and their outcomes, the switches named most. Never guesses a day it cannot tell."""

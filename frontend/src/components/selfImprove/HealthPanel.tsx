@@ -3,14 +3,16 @@
 import { useState } from "react";
 import { runnerApi } from "../../calibrationApi";
 import { keyLine, scoreLine, scoreTone, usageLine, whenIst } from "../../agentView";
+import { evidenceWarning, type EvidenceView } from "../../selfImproveEvidence";
 import { auditText, healthWarnings, settingLines, type LoopView } from "../../selfImproveView";
 import { Btn, Card, Chip, Msg } from "../calibration/ui";
 
-export default function HealthPanel({ loop, reload }: { loop: LoopView; reload: () => Promise<void> }) {
+export default function HealthPanel({ loop, evidence, reload }: { loop: LoopView; evidence?: EvidenceView | null; reload: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const a = loop.agent;
-  const warns = healthWarnings(loop);
+  const ew = evidenceWarning(evidence);
+  const warns = ew ? [...healthWarnings(loop), ew] : healthWarnings(loop);   // round 556: a NEGATIVE book or a demoted / decaying strategy is shown here too (context only)
   const resume = async () => {
     setBusy(true);
     try { await runnerApi.agentResume(); setErr(null); await reload(); } catch (e: any) { setErr(e?.message || String(e)); } finally { setBusy(false); }

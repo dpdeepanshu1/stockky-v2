@@ -1,6 +1,7 @@
 // group306/324: sector list with a diverging bar for the average change; click a sector to filter the board to it. Rows share one height
 // (`rowH`) with the flow curves' origins, so each curve visibly leaves from its own row.
 import type { BoardSector } from "./boardTypes";
+import { sectorTradedView } from "./sectorTraded";
 
 export default function SectorRail({ sectors, selected, onSelect, rowH = 26, height, horizontal = false }:
   { sectors: BoardSector[]; selected: string | null; onSelect: (s: string | null) => void; rowH?: number; height?: number; horizontal?: boolean }) {
@@ -13,9 +14,11 @@ export default function SectorRail({ sectors, selected, onSelect, rowH = 26, hei
       </button>
       {sectors.map(s => {
         const up = s.avg_change_pct >= 0, wpc = Math.min(50, (Math.abs(s.avg_change_pct) / maxAbs) * 50);
+        const tv = sectorTradedView(s);                 // round 551 (P2): traded-value share + up / down count (a dash when the service does not send them)
         return (
-          <button key={s.name} role="option" aria-selected={selected === s.name} onClick={() => onSelect(selected === s.name ? null : s.name)} style={style}>
+          <button key={s.name} role="option" aria-selected={selected === s.name} onClick={() => onSelect(selected === s.name ? null : s.name)} style={style} title={tv.title}>
             <span className="nm">{s.name}</span>
+            <span className="tv" aria-label={`traded value share ${tv.share}, ${tv.updown}`}>{horizontal ? `${tv.share} · ${tv.updown}` : tv.share}</span>
             {!horizontal && <span className="bar" aria-hidden="true"><i style={{ left: up ? "50%" : `${50 - wpc}%`, width: `${wpc}%`, background: up ? "var(--ob-g)" : "var(--ob-r)" }} /></span>}
             <span className={up ? "ob-up" : "ob-dn"}>{up ? "+" : ""}{s.avg_change_pct.toFixed(2)}%</span>
           </button>

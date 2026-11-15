@@ -287,7 +287,7 @@ def _market_stamp(pos, entry_order) -> dict:
     entry order at fill), then the entry order itself (a position created by the broker-import path has it NULL). Pure, never raises;
     nothing recorded stays None (never invented, never a default state)."""
     out = {}
-    for key in ("market_state", "profile_version"):
+    for key in ("market_state", "profile_version", "strategy_version"):
         val = None
         try:
             for src in (pos, entry_order):
@@ -451,7 +451,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "conviction": attr["conviction"],
                 "attribution_source": attr["attribution_source"],
                 "regime_override": bool(getattr(p, "is_regime_override", False)),
-                "market_state": ms["market_state"], "profile_version": ms["profile_version"],   # P5: Market Weather stamp, position -> entry order; None = none was active (never 0)
+                "market_state": ms["market_state"], "profile_version": ms["profile_version"], "strategy_version": ms["strategy_version"],   # P5: Market Weather stamp, position -> entry order; None = none was active (never 0)
                 "tier": tier, "tier_name": _TIER_NAMES.get(tier) if tier is not None else None,
                 "catalyst_type": getattr(w, "catalyst_type", None),
                 "catalyst_price": catalyst,

@@ -69,7 +69,7 @@ export interface FnoStrategies {
 export interface FnoSide { security_id?: number; ltp?: number; iv?: number; delta?: number; theta?: number; oi?: number; prev_oi?: number; volume?: number; bid?: number; ask?: number }
 export interface FnoChainDoc {
   chain: { underlying: string; expiry: string; spot: number; strikes: { strike: number; ce: FnoSide | null; pe: FnoSide | null }[] };
-  summary: Record<string, any>; bias: { direction: string; score: number; reasons?: string[]; parts?: Record<string, number> }; expiries: string[]; age_s: number;
+  summary: Record<string, any>; vix_rank?: { vix: number | null; rank: number | null; percentile: number | null; days: number; need: number; pending: number; ready: boolean; low: number | null; high: number | null; note: string } | null; bias: { direction: string; score: number; reasons?: string[]; parts?: Record<string, number> }; expiries: string[]; age_s: number;
 }
 export interface FnoEvent { id: number; ts: number; kind: string; underlying: string; [k: string]: any }
 export interface FnoBacktestRow { name: string; kind: string; underlying: string; from?: string; to?: string; days?: number; trades?: number; net?: number; win_rate_pct?: number; max_drawdown?: number; verdict?: string }

@@ -491,6 +491,12 @@ def agent_weekly(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     return _ag().weekly()
 
 
+@app.get("/agent/evidence")
+def agent_evidence(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Round 556: the real-trade evidence verdict and the strategy registry / drift, as the AI agent sees them (aggregates only, no rupee amounts). Read only."""
+    return _ag().evidence_view()
+
+
 @app.get("/agent/loop")
 def agent_loop(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     """Round 541: the whole nightly loop in one read (LIVE / DRY-RUN banner, timetable with next times, agent, auto-calibration, today's chain, latest runs). Read only."""

@@ -27,6 +27,22 @@
 .oc-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .oc-sw { display: inline-block; width: 14px; height: 10px; border-radius: 3px; border: 1px solid rgb(var(--border-strong-rgb)); }
 .oc-sw.atm { background: rgb(var(--accent-rgb) / 0.2); border-color: rgb(var(--accent-rgb)); }
+.oc-charts { display: grid; gap: var(--k-gap-4); margin-top: var(--k-gap-4); grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); }
+.oc-charts .oc-legend { grid-column: 1 / -1; margin-top: 0; }
+.oc-chart { margin: 0; padding: 8px 10px; border: 1px solid rgb(var(--border-rgb)); border-radius: var(--k-r-ctl); background: rgb(var(--panel-2-rgb)); }
+.oc-chart figcaption { font-size: 0.8125rem; color: rgb(var(--muted-rgb)); margin-bottom: 4px; }
+.oc-chart figcaption b { color: rgb(var(--fg-rgb)); }
+.oc-chart svg { display: block; width: 100%; height: auto; }
+.oc-zero { stroke: rgb(var(--border-strong-rgb)); stroke-width: 1; }
+.oc-zero.atm { stroke: rgb(var(--accent-rgb)); stroke-dasharray: 3 3; }
+.oc-bar.ce { fill: rgb(var(--info-rgb) / 0.8); }
+.oc-bar.pe { fill: rgb(var(--muted-2-rgb) / 0.9); }
+.oc-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.oc-line.ce { stroke: rgb(var(--info-rgb)); }
+.oc-line.pe { stroke: rgb(var(--muted-2-rgb)); }
+.oc-ax { font-size: 10px; fill: rgb(var(--muted-rgb)); }
+.oc-sw.ce { background: rgb(var(--info-rgb) / 0.8); }
+.oc-sw.pe { background: rgb(var(--muted-2-rgb) / 0.9); }
 .oc-sw.itm { background: rgb(var(--info-rgb) / 0.12); }
 .oc-sw.bar { background: rgb(var(--info-rgb) / 0.35); border-color: transparent; }
 

@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fnoApi } from "../../fnoApi";
 import { pcrReading } from "../../fnoView";
-import { atmIndex, chainN0, chainN2, chainRows, type ChainRow } from "../../fnoChainView";
+import { atmIndex, chainN0, chainN2, chainRows, expectedMoveView, oiChangeTotals, signedN0, vixRankView, type ChainRow } from "../../fnoChainView";
+import ChainCharts from "./ChainCharts";
 import { Msg } from "../calibration/ui";
 import { Card, CardHeader, DataTable, Stat, Stats, StatusPill, Tabs, type Column } from "../kit";
 import { useFno } from "./useFno";
@@ -37,6 +38,9 @@ export default function FnoChain() {
   const spot = d?.chain.spot ?? 0;
   const rows = useMemo(() => (d ? chainRows(d.chain.strikes, spot, und) : []), [d, spot, und]);
   const s = d?.summary || {};
+  const vr = vixRankView(d?.vix_rank);
+  const em = expectedMoveView(s, d?.chain.spot);                  // round 552 (P3): ATM IV, straddle and the move / range it implies
+  const oiT = useMemo(() => oiChangeTotals(rows), [rows]);        // change in OI, summed over the strikes shown
   const wrap = useRef<HTMLDivElement>(null);
   const placed = useRef("");
   // pin the ATM row: scroll the table's own box (not the page) so the ATM row is in the middle, once per index / expiry (not on every 8 s refresh, which would undo your scrolling)
@@ -71,11 +75,17 @@ export default function FnoChain() {
               <Stat size="sm" label="Max pain" value={chainN0(s.max_pain)} />
               <Stat size="sm" label="Call wall" value={chainN0(s.call_wall)} sub="most call OI" />
               <Stat size="sm" label="Put wall" value={chainN0(s.put_wall)} sub="most put OI" />
+              <Stat size="sm" label="VIX rank" value={vr.value} sub={vr.sub} />
+              <Stat size="sm" label="ATM IV" value={em.iv.value} sub={em.iv.sub} />
+              <Stat size="sm" label="ATM straddle" value={em.straddle.value} sub={em.straddle.sub} />
+              <Stat size="sm" label="Call OI change" value={signedN0(oiT.ce)} sub="strikes shown, vs previous close" />
+              <Stat size="sm" label="Put OI change" value={signedN0(oiT.pe)} sub="strikes shown, vs previous close" />
             </Stats>
             <div className="oc-table" style={{ ["--k-table-max" as string]: "30rem" }}>
               <DataTable dense columns={COLS} rows={rows} rowKey={(r) => String(r.strike)} rowClass={(r) => (r.atm ? "oc-row-atm" : "")} wrapRef={wrap}
                 caption="Option chain around the spot price" empty={<p className="text-mist">No strikes near the money.</p>} />
             </div>
+            <ChainCharts rows={rows} />
             <p className="oc-legend">
               <span><i className="oc-sw atm" aria-hidden="true" /> ATM = the strike nearest the spot price</span>
               <span><i className="oc-sw itm" aria-hidden="true" /> shaded cells = in the money (calls below the spot, puts above it)</span>

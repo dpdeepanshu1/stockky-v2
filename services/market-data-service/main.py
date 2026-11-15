@@ -3277,6 +3277,70 @@ def get_global_cues(symbols: str = ""):
     return {"rows": rows, "missing": missing, "ttl_s": ttl}
 
 
+# round 553 (E578, Tredye plan P4): the DISPLAY-ONLY global cues strip (S&P 500, Nasdaq, Brent crude, dollar index, USD/INR, gold). Its own fixed symbol list, its own
+# cache and lock, its own bar-age limit: /global-cues (the real-trade carry decision) and its allow-list are not touched. Reads the same Yahoo daily bars through
+# _global_cue_fetch_one, so a row carries its bar_date and a failed or too-old read is "missing", never an old number dressed up as current.
+_GLOBAL_STRIP_SYMBOLS = ("^GSPC", "^IXIC", "BZ=F", "DX-Y.NYB", "INR=X", "GC=F")
+_GLOBAL_STRIP_STATE: dict = {"lock": threading.Lock(), "rows": {}}
+
+
+def _global_strip_cfg():
+    """(ttl_s, max_bar_age_days): GLOBAL_STRIP_TTL_S (default 300), GLOBAL_STRIP_MAX_BAR_AGE_DAYS (default 5: a long US holiday weekend still shows its last close)."""
+    def _f(name, dflt):
+        try:
+            v = float((os.getenv(name) or "").strip() or dflt)
+        except ValueError:
+            return float(dflt)
+        return v if math.isfinite(v) and v >= 0 else float(dflt)
+    return _f("GLOBAL_STRIP_TTL_S", 300.0), _f("GLOBAL_STRIP_MAX_BAR_AGE_DAYS", 5.0)
+
+
+def _global_strip_enabled() -> bool:
+    return (os.getenv("GLOBAL_STRIP_ENABLED") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+@app.get("/global-strip")
+def get_global_strip():
+    """Day % move of the six display symbols with each row's bar_date. Rows that cannot be read (or whose last bar is older than the limit) are listed under
+    "missing", never invented. GLOBAL_STRIP_ENABLED=0 answers nothing. Honours the yfinance cooldown; a failed fetch is remembered only GLOBAL_CUE_ERROR_TTL_S."""
+    syms = list(_GLOBAL_STRIP_SYMBOLS)
+    if not _global_strip_enabled():
+        return {"rows": {}, "missing": syms, "ttl_s": 0, "enabled": False}
+    ttl, max_bar_age = _global_strip_cfg()
+    rows: dict = {}
+    missing: list = []
+    now = time.monotonic()
+    with _GLOBAL_STRIP_STATE["lock"]:
+        for sym in syms:
+            hit = _GLOBAL_STRIP_STATE["rows"].get(sym)
+            if hit and now - hit[0] < (hit[2] if hit[2] is not None else ttl):
+                row = hit[1]
+            else:
+                row = None
+                errored = False
+                if not _in_cooldown("yfinance"):
+                    try:
+                        row = _global_cue_fetch_one(sym, max_bar_age)
+                    except Exception as e:  # noqa: BLE001
+                        errored = True
+                        logger.info("global-strip %s failed (%s: %s)", sym, type(e).__name__, e)
+                _GLOBAL_STRIP_STATE["rows"][sym] = (time.monotonic(), row, _global_cue_error_ttl() if errored else None)
+            if row:
+                rows[sym] = dict(row)
+            else:
+                missing.append(sym)
+    return {"rows": rows, "missing": missing, "ttl_s": ttl, "enabled": True}
+
+
+@app.get("/fo-eod")
+def get_fo_eod():
+    """Round 554 (E579, Tredye plan P5): the end-of-day F&O pack (OI Flow + futures basis) from the F&O bhavcopy. DISPLAY ONLY. Every row carries the file's own
+    trade date (`trade_date`); `stale` says it is older than the session whose file should be out. A day with no file keeps the last good one. FO_EOD_ENABLED=0 answers nothing.
+    The slow download runs in a worker thread so this route never blocks the event loop's other work."""
+    import fo_eod
+    return fo_eod.get_pack()
+
+
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
     """Quote route. The waterfall lives in _get_quote_inner; this wrapper keeps the group161

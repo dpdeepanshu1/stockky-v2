@@ -1364,6 +1364,7 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
             source_tab=getattr(order, "source_tab", None),
             market_state=getattr(order, "market_state", None),          # Market Weather stamp, copied from the order
             profile_version=getattr(order, "profile_version", None),
+            strategy_version=getattr(order, "strategy_version", None),   # round 557: copied from the order
             # 2026-09-18 fix (selective overnight hold): thread the
             # candidate's decision_label/conviction_score through too, so
             # auto_pilot._select_overnight_holds can decide eligibility
@@ -1532,6 +1533,7 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
             source_tab=getattr(order, "source_tab", None),
             market_state=getattr(order, "market_state", None),          # Market Weather stamp, copied from the order
             profile_version=getattr(order, "profile_version", None),
+            strategy_version=getattr(order, "strategy_version", None),   # round 557: copied from the order
             # 2026-09-18 fix (selective overnight hold): thread the
             # candidate's decision_label/conviction_score through too, so
             # auto_pilot._select_overnight_holds can decide eligibility

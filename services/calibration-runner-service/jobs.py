@@ -119,6 +119,38 @@ def b_records_report(ctx, p):
                 os.path.join(ctx["exp"], "rt_latest.json"), title="Closed-trade report", attention=())]
 
 
+def b_evidence_report(ctx, p):
+    """E575 (round 550): one evidence verdict per group of closed trades (NOT_ENOUGH_DATA / NOT_PROVEN / POSITIVE / NEGATIVE) with a 90 % lower bound and the
+    Deflated Sharpe probability, using the agent's trial count. Reads the saved records; changes nothing."""
+    since = ["--since", str(p["since"])] if p.get("since") else []
+    return [_py(ctx, "evidence_report.py", "--mode", p.get("mode", "REAL"), "--origin", p.get("origin", "system"), "--min-n", p.get("min_n", 30), *since,
+                "--trials-file", os.path.join(os.path.dirname(ctx["exp"]), "agent", "trials.json"),
+                "--json", os.path.join(ctx["run"], "evidence_report.json"), os.path.join(ctx["exp"], "rt_latest.json"), title="Evidence report", attention=(1,))]
+
+
+def b_drift_monitor(ctx, p):
+    """E579 (round 554): has a strategy's recent result drifted below its own history? Reads the saved records; exit 2 = at least one WARNING / DECAY (needs a look)."""
+    return [_py(ctx, "drift_monitor.py", "--mode", p.get("mode", "REAL"), "--origin", p.get("origin", "system"), "--recent", p.get("recent", 20), "--min-base", p.get("min_base", 30),
+                "--json", os.path.join(ctx["run"], "drift_monitor.json"), os.path.join(ctx["exp"], "rt_latest.json"), title="Drift monitor", attention=(1, 2))]
+
+
+def b_strategy_registry(ctx, p):
+    """E578 (round 553): the strategy registry. Step 1 makes a fresh evidence report for the registry (same script and trial count as evidence_report, own file so the job
+    also works on its own); step 2 runs the drift monitor (round 554); step 3 moves each strategy's lifecycle status only after 3 separate days in a row agree
+    (3 days of DECAY take a proven one to watch). Keeps its own state file; changes no switch."""
+    since = ["--since", str(p["since"])] if p.get("since") else []
+    ev = os.path.join(ctx["run"], "strategy_evidence.json")
+    dr = os.path.join(ctx["run"], "strategy_drift.json")
+    state = os.path.join(os.path.dirname(ctx["exp"]), "state", "strategy_registry.json")
+    return [_py(ctx, "evidence_report.py", "--mode", p.get("mode", "REAL"), "--origin", p.get("origin", "system"), "--min-n", p.get("min_n", 30), *since,
+                "--trials-file", os.path.join(os.path.dirname(ctx["exp"]), "agent", "trials.json"), "--json", ev, os.path.join(ctx["exp"], "rt_latest.json"),
+                title="Evidence for the registry", attention=(1,)),
+            _py(ctx, "drift_monitor.py", "--mode", p.get("mode", "REAL"), "--origin", p.get("origin", "system"), "--json", dr, os.path.join(ctx["exp"], "rt_latest.json"),
+                title="Drift (for the registry)", attention=(1, 2)),
+            _py(ctx, "strategy_registry.py", "--evidence", ev, "--drift", dr, "--store", state, "--json", os.path.join(ctx["run"], "strategy_registry.json"),
+                title="Strategy registry (lifecycle)", attention=(1,))]
+
+
 def b_entry_slippage(ctx, p):
     """group 469: is paying above the signal price a material cost? Reads the saved records; changes nothing."""
     return [_py(ctx, "entry_slippage_review.py", "--mode", p.get("mode", "REAL"), "--origin", p.get("origin", "system"), "--min-n", p.get("min_n", 30),
@@ -478,6 +510,24 @@ JOB_LIST = [
          [P("days", "Days", "int", 60, 1, 60), P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"])], timeout_s=240),
     _job("records_report", "Closed-trade report", "weekly", "Friday after close", "One-command report on the saved real-trade records: robust totals, outliers, groups.", b_records_report,
          [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"])], timeout_s=240, needs=["export_records"]),
+    _job("evidence_report", "Evidence report (is there proof after costs?)", "daily", "Every day after export_records (daily close pack) and in the Friday review",
+         "One verdict per group of closed trades: NOT_ENOUGH_DATA / NOT_PROVEN / POSITIVE / NEGATIVE, with the 90 % lower bound, the result if charges were twice as high and the Deflated Sharpe probability after the agent's trials. Evidence only.", b_evidence_report,
+         [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"]),
+          P("min_n", "Min trades for a verdict", "int", 30, 5, 500), P("since", "Judge only from date (YYYY-MM-DD)", "str", "", help="Leave empty for the whole saved window. Use the day you changed switches.")],
+         timeout_s=180, needs=["export_records"],
+         after="POSITIVE needs a 90 % lower bound above 0 AND a Deflated Sharpe probability of at least 0.95 AND net above 0. NOT_PROVEN is the normal state: change nothing because of it. It never moves a switch."),
+    _job("strategy_registry", "Strategy registry (lifecycle: testing / proven / watch / demoted)", "daily", "Every day after evidence_report (daily close pack)",
+         "One lifecycle status per strategy (source tab + decision label), moved only after 3 separate days in a row of the same evidence verdict: POSITIVE makes it proven, NEGATIVE makes it demoted, NOT_PROVEN takes a proven one to watch. Keeps its own state file (state/strategy_registry.json).", b_strategy_registry,
+         [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"]),
+          P("min_n", "Min trades for a verdict", "int", 30, 5, 500), P("since", "Judge only from date (YYYY-MM-DD)", "str", "", help="Leave empty for the whole saved window.")],
+         timeout_s=240, needs=["export_records"],
+         after="Evidence bookkeeping only: demoted means the evidence is clearly negative after costs, and YOU decide whether to switch it off. It never moves a switch. Retire a strategy by hand: python3 scripts/strategy_registry.py --store /data/runner/state/strategy_registry.json --set \"swing | BUY NOW=retired\""),
+    _job("drift_monitor", "Drift monitor (is a strategy decaying?)", "weekly", "Friday after close (the daily registry job runs the same check every day)",
+         "Compares the last N closed trades of each strategy (source tab + decision label) with its own earlier trades: STABLE / IMPROVING / WARNING / DECAY / NOT_ENOUGH_DATA. A smoke alarm, not a verdict.", b_drift_monitor,
+         [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"]),
+          P("recent", "Recent trades", "int", 20, 5, 200), P("min_base", "Earlier trades needed", "int", 30, 10, 500)],
+         timeout_s=180, needs=["export_records"],
+         after="WARNING / DECAY means the recent trades are worse than the strategy's own history. Trades of one day share the market, so it is optimistic and a few strategies will cross by luck: look, do not react. It never moves a switch."),
     _job("hold_bucket", "Hold-length buckets", "weekly", "Friday after close", "Which hold lengths make or lose money.", b_hold_bucket,
          [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO", "ALL"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"])], timeout_s=240, needs=["export_records"]),
     _job("entry_slippage", "Entry slippage review", "weekly", "Friday after close, once there are 30+ real trades",
@@ -644,11 +694,11 @@ PACKS: List[Dict[str, Any]] = [
     {"id": "overlay_clear_close", "title": "Overlay cleared check", "when": "Every trading day 15:35 IST (scheduled), after the 15:30 end of the Market Weather overlay",
      "what": "The Market Weather overlay must be gone in both services.", "jobs": [["overlay_clear_check", {}]], "stop_on_failure": False},
     {"id": "daily_close", "title": "Daily close pack", "when": "Every trading day after 15:45 IST",
-     "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
-     "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
+     "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, evidence report, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
+     "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["evidence_report", {}], ["strategy_registry", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
     {"id": "friday_review", "title": "Friday review pack", "when": "Friday after close",
-     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, swing shadow report (E138: a weekly job that no pack ran), switch snapshot of changes.",
-     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["swing_shadow_report", {}], ["fno_backtests", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
+     "what": "Closed-trade report, evidence report (verdict per group), entry slippage review, hold buckets, opening-window verdict, board parity, swing shadow report (E138: a weekly job that no pack ran), switch snapshot of changes.",
+     "jobs": [["export_records", {}], ["records_report", {}], ["evidence_report", {}], ["drift_monitor", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["swing_shadow_report", {}], ["fno_backtests", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
     {"id": "weekly_calibration", "title": "Weekly calibration pack", "when": "Saturday 08:00 IST (market closed, 1-3 hours)",
      "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
      "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},

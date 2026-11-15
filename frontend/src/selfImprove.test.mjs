@@ -8,9 +8,9 @@ const nav = await import("./components/app/navModel.ts");
 let n = 0; const ok = (name) => { n++; console.log("ok -", name); };
 
 /* ---------- side list ---------- */
-assert.deepEqual(v.siIds(), ["today", "ideas", "changes", "controls", "health"]);
+assert.deepEqual(v.siIds(), ["today", "ideas", "changes", "controls", "evidence", "health"]);
 assert.equal(new Set(v.siIds()).size, v.siIds().length);
-ok("side list: five sections in plan order, each exactly once (Changes and Controls added in round 543)");
+ok("side list: six sections in plan order, each exactly once (Changes and Controls added in round 543, Evidence in round 556)");
 
 /* ---------- chain steps ---------- */
 for (const s of ["done", "waiting", "skipped", "failed", "not_due", "unknown"]) { assert.ok(v.stepLabel(s) && v.stepMark(s), s); }

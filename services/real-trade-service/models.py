@@ -424,6 +424,10 @@ class TradeOrder(Base):
     market_state = Column(String(16), nullable=True)
     profile_version = Column(String(24), nullable=True)
 
+    # Round 557: a short stamp ("sv-" + 8 hex) of the calibrated strategy switches in force when the entry order was placed (strategy_version.py). NULL = none / old row / manual.
+    # Descriptive only: no gate, size or score reads it.
+    strategy_version = Column(String(24), nullable=True)
+
     # 2026-09-18 fix (selective overnight hold — see execution/auto_pilot.py's
     # _select_overnight_holds and config.py's OVERNIGHT_HOLD_* block): copied
     # from the originating TradeCandidate.decision_label / conviction_score at
@@ -565,6 +569,10 @@ class TradePosition(Base):
     # NULL = no state was active (layer off / old row / manual). Descriptive only: no gate, size or score reads it.
     market_state = Column(String(16), nullable=True)
     profile_version = Column(String(24), nullable=True)
+
+    # Round 557: a short stamp ("sv-" + 8 hex) of the calibrated strategy switches in force when the entry order was placed (strategy_version.py). NULL = none / old row / manual.
+    # Descriptive only: no gate, size or score reads it.
+    strategy_version = Column(String(24), nullable=True)
 
     # 2026-09-18 fix (selective overnight hold — see execution/auto_pilot.py's
     # _select_overnight_holds and config.py's OVERNIGHT_HOLD_* block): copied

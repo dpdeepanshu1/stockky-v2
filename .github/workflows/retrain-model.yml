@@ -50,14 +50,42 @@ jobs:
         working-directory: services/decision-prediction-service/prediction
         run: |
           python pred_train.py
-          mkdir -p ../../../data/prediction-model
-          cp model.pkl ../../../data/prediction-model/model.pkl
+
+      # E575 (round 550): champion / challenger. The challenger's model_meta.json is compared with the meta saved next to the model in production
+      # (data/prediction-model/model_meta.json). Promoted unless it is clearly worse (F1 or top-slice precision down by more than GATE_MAX_DROP).
+      # An unreadable challenger meta is NOT promoted. No champion meta yet = promote. The decision is printed in this step's log.
+      - name: Gate (champion / challenger)
+        id: gate
+        env:
+          GATE_MAX_DROP: "0.03"
+        run: |
+          set +e
+          python scripts/model_gate.py \
+            --old data/prediction-model/model_meta.json \
+            --new services/decision-prediction-service/prediction/model_meta.json \
+            --max-drop "$GATE_MAX_DROP" --json /tmp/model_gate.json
+          rc=$?
+          if [ "$rc" = "0" ]; then
+            echo "promote=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "promote=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::Model gate kept the old model (exit $rc). See the log lines above."
+          fi
+          exit 0
+
+      - name: Copy the promoted model and its meta
+        if: steps.gate.outputs.promote == 'yes'
+        run: |
+          mkdir -p data/prediction-model
+          cp services/decision-prediction-service/prediction/model.pkl data/prediction-model/model.pkl
+          cp services/decision-prediction-service/prediction/model_meta.json data/prediction-model/model_meta.json
 
       - name: Commit and push updated model
+        if: steps.gate.outputs.promote == 'yes'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add data/prediction-model/model.pkl || true
+          git add data/prediction-model/model.pkl data/prediction-model/model_meta.json || true
           if git diff --staged --quiet; then
             echo "No changes to model"
           else

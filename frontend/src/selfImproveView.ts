@@ -52,15 +52,16 @@ export interface WeekDay { date: string; weekday: string; state: WeekState; idea
 export interface WeeklyView { from: string; to: string; days: WeekDay[]; weekdays: number; weekdays_ran: number; missed: string[]; first_day?: string; not_started?: number; ideas: number; outcomes: Record<string, number>; top_switches: { switch: string; n: number }[]; scoreboard: AgentScoreboard; summary: string }
 
 /* ---------- the side list ---------- */
-export type SiSection = "today" | "ideas" | "changes" | "controls" | "health";
+export type SiSection = "today" | "ideas" | "changes" | "controls" | "evidence" | "health";
 export interface SiItem { id: SiSection; label: string }
 export interface SiGroup { id: string; label: string; items: SiItem[] }
-/** The left list, in the order of plan v6: Today / Loop, Ideas, Changes, Controls, Scoreboard & health (Changes and Controls: round 543, S3). */
+/** The left list, in the order of plan v6: Today / Loop, Ideas, Changes, Controls, Evidence (round 556), Scoreboard & health (Changes and Controls: round 543, S3). */
 export const SI_GROUPS: SiGroup[] = [
   { id: "loop", label: "Loop", items: [{ id: "today", label: "Today / Loop" }] },
   { id: "ideas", label: "Ideas", items: [{ id: "ideas", label: "Ideas" }] },
   { id: "changes", label: "Changes", items: [{ id: "changes", label: "What changed" }] },
   { id: "controls", label: "Controls", items: [{ id: "controls", label: "Controls" }] },
+  { id: "evidence", label: "Evidence", items: [{ id: "evidence", label: "Real trades & strategies" }] },
   { id: "health", label: "Health", items: [{ id: "health", label: "Scoreboard & health" }] },
 ];
 export const siIds = (groups: SiGroup[] = SI_GROUPS): SiSection[] => groups.flatMap((g) => g.items.map((i) => i.id));

@@ -1,5 +1,7 @@
 import type { DecisionStructure } from "./structureView";
 import type { AlertHistory } from "./components/alertsFeed";
+import type { GlobalCuesBody } from "./globalCuesView";
+import type { FoEodBody } from "./foEodView";
 export type { AlertHistory, AlertItem } from "./components/alertsFeed";
 // frontend/src/api/api.ts
 
@@ -1245,6 +1247,12 @@ export const api = {
   marketSparklines: (symbols: string[]) =>
     request<{ days: number; series: Record<string, number[]>; missing: string[]; enabled: boolean }>(
       `/market/sparklines?symbols=${encodeURIComponent(symbols.slice(0, 40).join(","))}&days=30`, undefined, 1, 15000),
+  // E578 (round 553, P4): the global cues strip (public read, display only). Rows carry their bar_date; a missing row is listed, never invented.
+  globalCues: () =>
+    request<GlobalCuesBody>("/market/global-cues", undefined, 1, 30000),
+  // E579 (round 554, P5): the end-of-day F&O pack - OI Flow and futures basis from the exchange's F&O file (public read, display only). Every pack carries its trade date.
+  foEod: () =>
+    request<FoEodBody>("/market/fo-eod", undefined, 1, 70000),
   // E556 (B1): the Alerts feed. Admin login (the gateway answers 401 "admin session" otherwise; request() adds the log-in hint).
   getNotificationHistory: (limit = 100) =>
     request<AlertHistory>(`/notifications/history?limit=${Math.max(1, Math.min(200, Math.trunc(limit) || 100))}`, undefined, 1, 20000),

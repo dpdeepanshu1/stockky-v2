@@ -37,3 +37,9 @@ run_output*/
 
 # E285 round 122: local snapshot output written by the VM tooling
 snap.jsonl
+
+# local-only files (never part of the release)
+frontend/ui-baseline/
+*.backup-*
+*.bak.*
+services/analysis-intelligence-service/headlines.txt

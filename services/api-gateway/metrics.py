@@ -53,7 +53,7 @@ class MetricsRegistry:
                 timings[k] = {
                     "count": len(s),
                     "avg_ms": round(sum(s) / len(s), 1),
-                    "p50_ms": s[len(s) // 2],
+                    "p50_ms": s[len(s) // 2] if len(s) % 2 else (s[len(s) // 2 - 1] + s[len(s) // 2]) / 2.0,   # round 584: true median (was the upper middle; the buffer holds 50, an even count)
                     "p95_ms": s[min(len(s) - 1, int(len(s) * 0.95))],
                     "max_ms": s[-1],
                 }

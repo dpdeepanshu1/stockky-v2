@@ -37,12 +37,14 @@ def _fail_log_for(monkeypatch, decision):
 def _fail_manual_row_for(monkeypatch, decision):
     real = entry.ScalpCandidateLog
 
-    class _Row(real):
-        def __init__(self, *a, **k):
-            if k.get("decision") == decision:
-                raise RuntimeError("db commit failed")
-            super().__init__(*a, **k)
-    monkeypatch.setattr(entry, "ScalpCandidateLog", _Row)
+    # round 581: a plain function, not `class _Row(real)`. Every call of this helper made a new subclass of the declarative model with the same class
+    # name and module, and SQLAlchemy's registry warned (SAWarning: "This declarative base already contains a class with the same class name"). entry.py
+    # only ever calls ScalpCandidateLog(...) to build a row, so a function that raises or builds the real row is enough.
+    def _row(*a, **k):
+        if k.get("decision") == decision:
+            raise RuntimeError("db commit failed")
+        return real(*a, **k)
+    monkeypatch.setattr(entry, "ScalpCandidateLog", _row)
 
 
 class TestAutoEntry:

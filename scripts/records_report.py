@@ -169,12 +169,12 @@ def exit_slippage_stored(records: List[Dict[str, Any]]) -> Optional[Dict[str, An
 
 
 def exit_slippage_pct(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Exit fill vs the trigger price. The records carry no per-exit trigger, so only stop_hit exits can be measured, against
+    """Exit fill vs the trigger price. The records carry no per-exit trigger, so only stop exits (every spelling in STOP_HIT_REASONS) can be measured, against
     the INITIAL stop entry*(1-stop_pct/100) (the stop may have trailed, so this is a proxy). + = filled above the trigger
     (better for a long exit), - = worse. None when no stop_hit has all the numbers. Pure."""
     vals = []
     for r in records:
-        if r.get("exit_reason") != "stop_hit":
+        if not is_stop_hit(r.get("exit_reason")):      # round 582: was `!= "stop_hit"`, the blind spot round 574 closed for the overshoot line but missed here
             continue
         entry, stop_pct, xp = num(r.get("entry_price")), num(r.get("stop_pct")), num(r.get("exit_price"))
         if entry and entry > 0 and stop_pct and stop_pct > 0 and xp and xp > 0:

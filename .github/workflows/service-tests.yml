@@ -258,8 +258,10 @@ jobs:
           c=""; [ -f constraints.txt ] && c="-c constraints.txt"
           pip install -r requirements.txt $c pytest pytest-cov pytest-asyncio pytest-timeout
       - name: Unit tests
+        # round 581: -o asyncio_default_fixture_loop_scope=function sets pytest-asyncio's option to its own current default (one loop per test), so no fixture changes scope and the
+        # "option is unset" deprecation warning goes away. It is on the command line, not in a pytest.ini, so the VM test script (no pytest-asyncio) never sees an unknown option.
         # decision-prediction keeps its tests in three sub-folders, each with its own conftest / rootdir
         run: |
           for d in ${{ matrix.tests }}; do
-            if [ "$d" = "tests" ]; then python -m pytest tests -q --timeout=120; else (cd "$(dirname "$d")" && python -m pytest tests -q --timeout=120); fi
+            if [ "$d" = "tests" ]; then python -m pytest tests -q --timeout=120 -o asyncio_default_fixture_loop_scope=function; else (cd "$(dirname "$d")" && python -m pytest tests -q --timeout=120 -o asyncio_default_fixture_loop_scope=function); fi
           done

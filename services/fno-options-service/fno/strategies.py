@@ -38,8 +38,20 @@ def _d(t: float) -> date:
 
 
 def _median(xs: Sequence[float]) -> float:
+    """The upper-middle value. Kept ONLY for the bar interval (`interval`): there it must return a gap that really occurs (a mean of two different gaps,
+    say 300 s and an overnight gap, would be an interval no bar has). Do not use it for a statistic; use `_true_median`."""
     ys = sorted(xs)
     return ys[len(ys) // 2] if ys else 0.0
+
+
+def _true_median(xs: Sequence[float]) -> float:
+    """round 585: the real median (the middle pair's mean for an even count) for the candle-range yardstick of the surge and expiry-expansion strategies.
+    `_median` read the upper middle, so the 'median' bar range was biased high for an even bar count and the range test was a little stricter than its name."""
+    ys = sorted(xs)
+    n = len(ys)
+    if not n:
+        return 0.0
+    return ys[n // 2] if n % 2 else (ys[n // 2 - 1] + ys[n // 2]) / 2.0
 
 
 def _vwap_series(bars: Sequence[Sequence[float]]) -> List[float]:
@@ -222,7 +234,7 @@ def momentum_surge(x: Ctx) -> Optional[Dict[str, Any]]:
         return None
     orh, orl = max(r[2] for r in b[:n_or]), min(r[3] for r in b[:n_or])
     last, prev = b[-1], b[:-1]
-    med = _median([r[2] - r[3] for r in prev])
+    med = _true_median([r[2] - r[3] for r in prev])
     rng = last[2] - last[3]
     if med <= 0 or rng < x.p.strat_surge_range_mult * med or abs(last[4] - last[1]) < x.p.strat_surge_body * rng:
         return None
@@ -331,7 +343,7 @@ def expiry_momentum(x: Ctx) -> Optional[Dict[str, Any]]:
         return None
     hi, lo = max(r[2] for r in b[:k30]), min(r[3] for r in b[:k30])
     last, prev = b[-1], b[-2]
-    med = _median([r[2] - r[3] for r in b[:-1]])
+    med = _true_median([r[2] - r[3] for r in b[:-1]])
     rng = last[2] - last[3]
     if med <= 0 or rng < x.p.strat_expiry_range_mult * med or abs(last[4] - last[1]) < x.p.strat_expiry_body * rng:
         return None

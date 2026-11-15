@@ -2,7 +2,7 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 sqlalchemy>=2.0.0
 httpx>=0.27.0
-pyotp>=2.9.0
+pyotp==2.9.0  # round 581: pinned like real-trade and market-data (was >=, so a rebuild could pick up a stricter release)
 websockets>=12.0
 cryptography>=42.0.0
 oracledb==2.5.1

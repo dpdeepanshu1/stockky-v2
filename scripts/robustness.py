@@ -86,6 +86,13 @@ def random_entry(base: Sequence[Dict[str, Any]], cand: Sequence[Dict[str, Any]],
     return out
 
 
+def _median_sorted(s: List[float]) -> float:
+    """round 583: true median of an already sorted, non-empty list (the middle pair's mean for an even count). The report used s[len(s)//2], the upper
+    middle, which is biased high for an even count (the default is 1000 shuffles)."""
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
 def _max_dd(rets: Sequence[float], frac: float) -> float:
     eq = peak = 1.0
     dd = 0.0
@@ -121,7 +128,7 @@ def trade_shuffle(cand: Sequence[Dict[str, Any]], h: int, perms: int, position_p
         dds.append(_max_dd(buf, frac))
     dds.sort()
     out.update(n_trades=len(rets), final_return_pct=round((eq - 1.0) * 100.0, 2), real_max_dd_pct=round(real, 2),
-               shuffle_dd_median_pct=round(dds[len(dds) // 2], 2), shuffle_dd_p95_pct=round(dds[int(0.95 * (len(dds) - 1))], 2),
+               shuffle_dd_median_pct=round(_median_sorted(dds), 2), shuffle_dd_p95_pct=round(dds[int(0.95 * (len(dds) - 1))], 2),
                p_dd_over_limit=round(sum(1 for d in dds if d > DD_LIMIT_PCT) / len(dds), 3),
                real_dd_percentile=round(100.0 * sum(1 for d in dds if d <= real) / len(dds), 1))
     return out

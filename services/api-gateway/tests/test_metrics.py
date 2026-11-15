@@ -69,6 +69,11 @@ class TestTimings:
         t = reg.snapshot()["timings"]["t"]
         assert t == {"count": 5, "avg_ms": 30.0, "p50_ms": 30.0, "p95_ms": 50.0, "max_ms": 50.0}
 
+    def test_p50_is_the_true_median_for_an_even_count(self, reg):      # round 584: 50 samples (the cap) used to give the upper middle
+        for v in (10, 20, 30, 40):
+            reg.observe_ms("t", v)
+        assert reg.snapshot()["timings"]["t"]["p50_ms"] == 25.0
+
     def test_single_sample(self, reg):
         reg.observe_ms("t", 12.34)
         t = reg.snapshot()["timings"]["t"]

@@ -144,6 +144,13 @@ def entry_report(recs: List[dict], min_n: int, min_days: int, min_against: int =
             "one_vs_zero": {"note": "would MIN_AGAINST=1 help? (0-adverse trades compared with 1-adverse trades)", **one_vs_zero}}
 
 
+# round 581: the statuses position-stocks writes when a position closes ON its stop. This list knew STOP_HIT only (plus three spellings nothing writes), so
+# a stop-breach exit (STOP_BREACH_EXIT: the stop was already through, or the broker stop died, and the bot covered by hand; orders/opening_protect.py counts it
+# as a stop-out too) was never measured and the "avoided loss" total was short. The 1 %-of-entry check in saved_pct still rejects an exit that did not close
+# near the tape's stop.
+STOP_STATUSES = ("STOP_HIT", "STOP_BREACH_EXIT", "STOP_LOSS", "STOP", "STOPPED", "STOP_LOSS_HIT", "SL_HIT")
+
+
 def saved_pct(rec: dict) -> Optional[float]:
     """Position-stocks trade closed on a stop the tape had tightened: the loss avoided against the ORIGINAL stop, in percent of entry (an upper bound:
     the price might not have gone on to the old stop). None when it does not apply."""
@@ -152,7 +159,7 @@ def saved_pct(rec: dict) -> Optional[float]:
         return None
     first = next((m for m in tx if isinstance(m, dict) and _f(m.get("old_stop")) is not None and m.get("new_stop") is not None
                   and _f(m.get("new_stop")) != _f(m.get("old_stop"))), None)
-    if first is None or rec["status"] not in ("STOP_HIT", "STOPPED", "STOP_LOSS_HIT", "SL_HIT"):
+    if first is None or rec["status"] not in STOP_STATUSES:
         return None
     last_stop = _f(tx[-1].get("new_stop"))
     if last_stop is None or abs(rec["exit"] - last_stop) > 0.01 * rec["entry"]:

@@ -3,6 +3,8 @@ Plain asserts or pytest (python tests/test_round543_autocalib_audit.py)."""
 from __future__ import annotations
 
 import sys
+
+import pytest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
@@ -86,3 +88,26 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print("ok -", name)
+
+
+def test_round547_configure_refuses_a_widening_move_without_confirm_and_changes_nothing():
+    from autocalib import NeedsConfirm
+    ac, _, _ = _ac(enabled=True, dry_run=True)
+    ac.configure(pinned=[TEST_RULE_KEY], by="a", confirm=False)                    # pinning narrows: fine
+    ac.configure(dry_run=True, by="a", confirm=False)                              # no change: fine
+    n = len(ac.status(with_coverage=False)["audit"])
+    for kw in ({"dry_run": False}, {"pinned": []}, {"dry_run": False, "pinned": []}):
+        with pytest.raises(NeedsConfirm):
+            ac.configure(by="a", confirm=False, **kw)
+    s = ac.settings()
+    assert s["dry_run"] is True and TEST_RULE_KEY in s["pinned"] and len(ac.status(with_coverage=False)["audit"]) == n, "all or none"
+    ac.configure(dry_run=False, pinned=[], by="a", confirm=True)
+    assert ac.settings()["dry_run"] is False
+    ac.configure(enabled=False, by="a", confirm=False)                             # switching OFF narrows
+    with pytest.raises(NeedsConfirm):
+        ac.configure(enabled=True, by="a", confirm=False)                          # ON while dry-run is off
+    ac.configure(dry_run=True, by="a", confirm=False)
+    ac.configure(enabled=True, by="a", confirm=False)                              # ON while dry-run is on: one click
+    with pytest.raises(ValueError) as e:
+        ac.configure(pinned=["NOT_A_RULE"], by="a", confirm=False)
+    assert not isinstance(e.value, NeedsConfirm)

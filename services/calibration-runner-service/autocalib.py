@@ -286,6 +286,28 @@ class RunnerEvidence:
 
 
 # ----------------------------------------------------------------------------------------------------- decisions
+# Round 548 (S6, decided 15 Nov 2026): whole families of switches that no report may ever get a rule for. A prefix, so a switch added later to one of these
+# families is protected from its first day; the explicit PROTECTED entries above stay (they carry the page text). Short selling and Market Weather already had
+# every key listed; F&O is a different service (the runner's control client only reaches real-trade and position-stocks) and its reports can say only NOT_PROVEN
+# or PASSED_THIS_TEST_ONLY, which cannot tell "too few trades" from "loses money", so no F&O switch may be moved by a verdict.
+PROTECTED_PREFIXES: Tuple[Tuple[str, str], ...] = (
+    ("SHORT_", "money safety (short selling): never a report's decision, whatever the key"),
+    ("MARKET_STATE_", "Market Weather: its dials are set only by today's overlay and its mode by you, never by a report"),
+    ("WEATHER_", "Market Weather: its gate and settings have their own evidence check, never a calibration rule"),
+    ("FNO_", "F&O (real-money options, another service): its reports cannot tell too few trades from a loss, so a verdict never moves an F&O switch"),
+)
+
+
+def protected_reason(key: str) -> Optional[str]:
+    """Why a switch may never get an auto-calibration rule, or None. The explicit PROTECTED text wins; otherwise a protected family prefix."""
+    if key in PROTECTED:
+        return PROTECTED[key]
+    for pre, why in PROTECTED_PREFIXES:
+        if key.startswith(pre):
+            return why
+    return None
+
+
 @dataclass
 class Decision:
     value: Optional[str]            # canonical string to set; None = hold (no change)
@@ -525,12 +547,16 @@ def local_change(row: Dict[str, Any], old: Optional[str], new: str) -> str:
     return ("LOOSENS" if up else "TIGHTENS") if looser == "higher" else ("TIGHTENS" if up else "LOOSENS")
 
 
+class NeedsConfirm(ValueError):
+    """Round 547: a move that WIDENS what auto-calibration may do (dry-run OFF, unpin, switching ON while dry-run is off) was asked for without `confirm`."""
+
+
 class AutoCalibrator:
     def __init__(self, state_path: str, control: Any, evidence: Any, notify: Optional[Callable[[str, str, str], Optional[str]]] = None,
                  rules: Sequence[Rule] = tuple(RULES), enabled: bool = True, dry_run: bool = False, cooldown_s: float = 24 * 3600, step_pct: float = 0.25,
                  now_fn: Callable[[], float] = time.time):
         for r in rules:
-            if r.key in PROTECTED:
+            if protected_reason(r.key):
                 raise ValueError(f"{r.key} is protected and cannot have an auto-calibration rule")
         self.path, self.control, self.evidence, self.notify = state_path, control, evidence, notify
         self.rules = list(rules)
@@ -569,10 +595,30 @@ class AutoCalibrator:
             return {"enabled": self.state["enabled"], "dry_run": self.state["dry_run"], "pinned": list(self.state["pinned"]),
                     "cooldown_h": round(self.cooldown_s / 3600, 2), "step_pct": self.step_pct}
 
-    def configure(self, enabled: Optional[bool] = None, dry_run: Optional[bool] = None, pinned: Optional[Sequence[str]] = None, by: str = "-") -> Dict[str, Any]:
+    def configure(self, enabled: Optional[bool] = None, dry_run: Optional[bool] = None, pinned: Optional[Sequence[str]] = None, by: str = "-", confirm: bool = True) -> Dict[str, Any]:
         """Change the master switch / dry-run / pinned list. Round 543 (S3): every real change is also ONE audit line (who, when, from -> to);
-        a call that changes nothing writes none. The pinned list is audited per switch (\"pin KEY\": unpinned -> pinned)."""
+        a call that changes nothing writes none. The pinned list is audited per switch (\"pin KEY\": unpinned -> pinned).
+        Round 547 (decision g): with confirm=False a move that WIDENS what can happen raises NeedsConfirm and changes nothing (all or none): dry-run OFF,
+        UNPINNING a switch, or master switch ON while dry-run is (or becomes) off. Narrowing moves never need it. The default is True so code that calls this
+        directly keeps working; the HTTP route passes the request's own flag (default False)."""
         with self.lock:
+            if pinned is not None:                       # an unknown name is a 400 first, whatever else the call asks
+                bad0 = [k for k in pinned if k not in {r.key for r in self.rules}]
+                if bad0:
+                    raise ValueError("not an auto-calibrated switch: " + ", ".join(bad0))
+            if not confirm:
+                wide: List[str] = []
+                dry_after = bool(self.state["dry_run"]) if dry_run is None else bool(dry_run)
+                if dry_run is not None and not bool(dry_run) and bool(self.state["dry_run"]):
+                    wide.append("dry-run OFF")
+                if enabled is not None and bool(enabled) and not bool(self.state["enabled"]) and not dry_after:
+                    wide.append("switching ON while dry-run is off")
+                if pinned is not None:
+                    gone = sorted(set(self.state["pinned"]) - set(pinned))
+                    if gone:
+                        wide.append("unpinning " + ", ".join(gone))
+                if wide:
+                    raise NeedsConfirm("this widens what auto-calibration may change by itself (" + "; ".join(wide) + "): send confirm=true to do it; nothing was changed")
             diff: Dict[str, Dict[str, Any]] = {}
             if enabled is not None:
                 if bool(enabled) != bool(self.state["enabled"]):
@@ -759,7 +805,7 @@ class AutoCalibrator:
             out = {"settings": self.settings(), "pending": dict(self.state["pending"]), "last": self.state.get("last"),
                    "history": list(reversed(self.state["history"][-50:])), "rules": [
                        {"key": r.key, "service": r.service, "title": r.title, "tests": list(r.tests), "explain": r.explain, "pinned": r.key in self.state["pinned"]}
-                       for r in self.rules], "evidence_jobs": EVIDENCE_JOBS, "protected": PROTECTED, "audit": list(reversed(list(self.state.get("audit") or [])[-15:]))}
+                       for r in self.rules], "evidence_jobs": EVIDENCE_JOBS, "protected": PROTECTED, "protected_families": [{"prefix": a, "why": b} for a, b in PROTECTED_PREFIXES], "audit": list(reversed(list(self.state.get("audit") or [])[-15:]))}
         if with_coverage:
             out["coverage"] = self.coverage()
         return out
@@ -778,8 +824,8 @@ class AutoCalibrator:
                 r = by_key.get((svc, k))
                 if r:
                     st, why = "automated", f"decided by {', '.join(r.tests)}: {r.explain}"
-                elif k in PROTECTED:
-                    st, why = "protected", PROTECTED[k]
+                elif protected_reason(k):
+                    st, why = "protected", protected_reason(k)
                 else:
                     st, why = "manual", "no test result decides this one yet: change it on the page"
                 res["switches"].append({"service": svc, "key": k, "title": row.get("title"), "status": st, "why": why, "effective": row.get("effective")})

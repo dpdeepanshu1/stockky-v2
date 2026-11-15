@@ -33,8 +33,9 @@ export default function AutoCalibPanel() {
   const s = st.settings;
   // round 543: the same second-click rule as the Self Improve System tab (a move that widens what can happen asks first; a narrowing move is one click)
   const change = (a: AcAction) => {
-    if (acNeedsTwoClicks(a, s) && !window.confirm(acConfirmText(a) + "\n\nContinue?")) return;
-    void act(() => runnerApi.autoSettings(acBody(a, s.pinned)));
+    const two = acNeedsTwoClicks(a, s);
+    if (two && !window.confirm(acConfirmText(a) + "\n\nContinue?")) return;
+    void act(() => runnerApi.autoSettings(acBody(a, s.pinned, two)));
   };
   const togglePin = (key: string, pinned: boolean) => change({ kind: "pin", key, to: !pinned });
   const cov = st.coverage;

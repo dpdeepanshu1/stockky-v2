@@ -25,7 +25,40 @@ from auth import mint_service_token, require_admin
 from runner import Runner, market_open_now
 from scheduler import Scheduler
 
-app = FastAPI(title="calibration-runner-service", version="1.0.0")
+# round 546: FastAPI deprecated @app.on_event (same change as group318 in the scheduler service). These two decorators keep what on_event did (handlers run in the order
+# they are declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run them from a lifespan. The decorated function
+# is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
+
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="calibration-runner-service", version="1.0.0", lifespan=_lifespan)
 _origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
@@ -66,7 +99,7 @@ def _safe_token() -> str:
         return ""
 
 
-@app.on_event("startup")
+@_on_startup
 def _startup() -> None:
     global runner, sched, auto, agent, weather, weather_control
     import notify as N
@@ -133,7 +166,7 @@ def _startup() -> None:
                                                  WA.ensure_replay(lambda job, age: AC.RunnerEvidence(runner, J.PACK_MAP, age).get(job), runner.submit, config.WEATHER_GATE_MODE))
 
 
-@app.on_event("shutdown")
+@_on_shutdown
 def _shutdown() -> None:
     if runner:
         runner.shutdown()
@@ -354,15 +387,19 @@ class AutoSettings(BaseModel):
     enabled: Optional[bool] = None
     dry_run: Optional[bool] = None
     pinned: Optional[Any] = None
+    confirm: bool = False            # round 547: the second click, required for dry-run OFF, unpin, and switching ON while dry-run is off
 
 
 @app.put("/autocalib/settings")
 def autocalib_settings(req: AutoSettings, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    from autocalib import NeedsConfirm
     pinned = req.pinned
     if pinned is not None and (not isinstance(pinned, list) or not all(isinstance(x, str) for x in pinned)):
         raise HTTPException(400, "pinned must be a list of switch names")
     try:
-        return _a().configure(req.enabled, req.dry_run, pinned, by=str(claims.get("sub") or "-"))
+        return _a().configure(req.enabled, req.dry_run, pinned, by=str(claims.get("sub") or "-"), confirm=req.confirm)
+    except NeedsConfirm as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
 

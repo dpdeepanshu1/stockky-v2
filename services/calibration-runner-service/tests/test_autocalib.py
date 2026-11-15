@@ -358,6 +358,32 @@ def test_coverage_lists_automated_protected_and_manual():
     assert ac.coverage()["unreachable"][0]["service"] == PS
 
 
+def test_round548_protected_families_can_never_get_a_rule():
+    """S6 decision (15 Nov 2026): short selling, Market Weather and the whole F&O family are out of reach of every test result, by prefix, so a key added later is protected from day one."""
+    assert [p for p, _ in A.PROTECTED_PREFIXES] == ["SHORT_", "MARKET_STATE_", "WEATHER_", "FNO_"]
+    for k in ("SHORT_MODE", "SHORT_SOME_FUTURE_DIAL", "MARKET_STATE_MODE", "WEATHER_GATE_MODE", "FNO_STRAT_CORE", "FNO_MODE", "FNO_REAL_ENABLED", "FNO_SL_PCT", "FNO_BRAND_NEW_SWITCH"):
+        assert A.protected_reason(k), k
+    assert A.protected_reason("SHORT_MODE") == A.PROTECTED["SHORT_MODE"], "the explicit page text wins over the family text"
+    for k in ("KRONOS_GATE_MODE", "SETUP_S2_ENABLED", "OVERNIGHT_HOLD_ENABLED", "STRUCTURE_EXIT_MODE", "SHORTLIST_X", "XFNO_Y"):
+        assert A.protected_reason(k) is None, k
+    assert not any(A.protected_reason(r.key) for r in A.RULES), "no shipped rule sits in a protected family"
+
+
+def test_round548_a_rule_on_an_fno_or_weather_switch_is_refused_and_never_reaches_the_agent():
+    rule = lambda k: A.Rule(k, A.RT, "x", ("gate_check",), "x", lambda evs, cur, ctx: A.Decision(None, "x"))
+    for k in ("FNO_STRAT_CORE", "WEATHER_GATE_MODE", "SHORT_FUTURE_DIAL"):
+        try:
+            make({A.RT: [], A.PS: []}, FakeEvidence(), rules=[rule(k)])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"a rule on {k} was accepted")
+    import agent as G2
+    assert set(G2.allowed_rules([rule("FNO_STRAT_CORE"), rule("SETUP_S2_ENABLED")])) == {"SETUP_S2_ENABLED"}
+    st = make({A.RT: [], A.PS: []}, FakeEvidence())[0].status(with_coverage=False)
+    assert [x["prefix"] for x in st["protected_families"]] == ["SHORT_", "MARKET_STATE_", "WEATHER_", "FNO_"]
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

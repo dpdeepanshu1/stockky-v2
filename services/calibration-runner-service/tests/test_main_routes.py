@@ -135,9 +135,40 @@ def test_autocalib_settings_route_audits_who_changed_what(client):
     assert client.put(url, headers=H(), json={"pinned": ["BROKER_STOP_ENABLED"]}).status_code == 400
     before = len(client.get("/autocalib/status?coverage=false", headers=H()).json()["audit"])
     cur = client.get("/autocalib/status?coverage=false", headers=H()).json()["settings"]["dry_run"]
-    ok = client.put(url, headers=H(), json={"dry_run": not cur})
+    ok = client.put(url, headers=H(), json={"dry_run": not cur, "confirm": True})
     assert ok.status_code == 200 and ok.json()["dry_run"] is (not cur)
     st = client.get("/autocalib/status?coverage=false", headers=H()).json()
     assert len(st["audit"]) == before + 1 and st["audit"][0]["by"] == "tester" and st["audit"][0]["changes"]["dry_run"] == {"from": cur, "to": not cur}
     client.put(url, headers=H(), json={"dry_run": cur})                  # put it back
     assert "coverage" not in st and "protected" in st
+
+
+def test_startup_and_shutdown_run_from_the_lifespan_not_on_event(client):
+    """Round 546: the two hooks are registered for the lifespan (in declared order), stay plain callables, and the startup really ran when the client opened."""
+    assert main._startup in main._STARTUP_HOOKS and main._shutdown in main._SHUTDOWN_HOOKS and callable(main._startup) and callable(main._shutdown)
+    assert not main.app.router.on_startup and not main.app.router.on_shutdown          # nothing left on the deprecated on_event lists
+    assert main.runner is not None and main.sched is not None                          # startup ran through the lifespan
+    assert client.get("/health").status_code == 200
+
+
+def test_autocalib_settings_route_demands_confirm_only_for_moves_that_widen(client):
+    """Round 547 (decision g): dry-run OFF and unpin without `confirm` are 409 and change nothing; the narrowing moves and the confirmed ones go through."""
+    url = "/autocalib/settings"
+    st = client.get("/autocalib/status?coverage=false", headers=H()).json()
+    cur_dry, cur_pins = st["settings"]["dry_run"], list(st["settings"]["pinned"])
+    try:
+        assert client.put(url, headers=H(), json={"dry_run": True}).status_code == 200                      # narrowing: one click
+        r = client.put(url, headers=H(), json={"dry_run": False})
+        assert r.status_code == 409 and "confirm" in r.json()["detail"]
+        assert client.get("/autocalib/status?coverage=false", headers=H()).json()["settings"]["dry_run"] is True     # nothing changed
+        assert client.put(url, headers=H(), json={"dry_run": False, "confirm": True}).status_code == 200
+        assert client.put(url, headers=H(), json={"dry_run": True}).status_code == 200
+        keys = [r_["key"] for r_ in st.get("rules", [])] or cur_pins
+        if keys:
+            assert client.put(url, headers=H(), json={"pinned": keys}).status_code == 200                        # pin everything: narrowing
+            assert client.put(url, headers=H(), json={"pinned": keys[1:]}).status_code == 409                    # unpin one: needs confirm
+            assert client.put(url, headers=H(), json={"pinned": keys[1:], "confirm": True}).status_code == 200
+        assert client.put(url, headers=H(), json={"pinned": ["BROKER_STOP_ENABLED"]}).status_code == 400        # unknown name stays a 400, not a 409
+    finally:
+        client.put(url, headers=H(), json={"dry_run": True, "pinned": cur_pins, "confirm": True})
+        client.put(url, headers=H(), json={"dry_run": cur_dry, "confirm": True})

@@ -38,7 +38,7 @@ export default function ControlsPanel({ loop, ac, acError, reload }: { loop: Loo
 
   const acs = ac?.settings ?? loop.autocalib.settings;
   const rows = useMemo(() => (ac ? pinRows(ac.rules, acs.pinned) : []), [ac, acs.pinned]);
-  const run = (a: AcAction) => press(acArmId(a), acNeedsTwoClicks(a, acs), () => void act(() => runnerApi.autoSettings(acBody(a, acs.pinned)), "Auto-calibration setting saved."));
+  const run = (a: AcAction) => press(acArmId(a), acNeedsTwoClicks(a, acs), () => void act(() => runnerApi.autoSettings(acBody(a, acs.pinned, acNeedsTwoClicks(a, acs))), "Auto-calibration setting saved."));
   const btn = (a: AcAction, small = true) => {
     const id = acArmId(a);
     const isArmed = armed === id;

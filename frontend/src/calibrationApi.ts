@@ -242,7 +242,7 @@ export const runnerApi = {
   putSchedule: (body: { enabled?: boolean; entries?: ScheduleSlot[] }) => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule", { method: "PUT", body: JSON.stringify(body) }),
   // group 476: auto-calibration (switches set from the test results)
   autoStatus: (coverage = true) => R<AutoStatus>(coverage ? "/autocalib/status" : "/autocalib/status?coverage=false"),
-  autoSettings: (body: { enabled?: boolean; dry_run?: boolean; pinned?: string[] }) => R<AutoSettings>("/autocalib/settings", { method: "PUT", body: JSON.stringify(body) }),
+  autoSettings: (body: { enabled?: boolean; dry_run?: boolean; pinned?: string[]; confirm?: boolean }) => R<AutoSettings>("/autocalib/settings", { method: "PUT", body: JSON.stringify(body) }),
   autoRun: (dry_run?: boolean) => R<AutoReport>("/autocalib/run", { method: "POST", body: JSON.stringify(dry_run === undefined ? {} : { dry_run }) }),
   // round 536: the nightly AI idea source (agent.py). It only suggests; none of these calls sets a switch.
   agentStatus: () => R<AgentStatus>("/agent/status"),

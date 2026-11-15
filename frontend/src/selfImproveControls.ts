@@ -73,12 +73,13 @@ export function acNeedsTwoClicks(a: AcAction, s: Pick<AutoSettings, "enabled" | 
 }
 export const acArmId = (a: AcAction): string => (a.kind === "pin" ? `pin:${a.key}:${a.to ? "pin" : "unpin"}` : `${a.kind}:${a.to ? "on" : "off"}`);
 /** The body of PUT /autocalib/settings. A pin change sends the WHOLE new list (the route replaces it), sorted and without duplicates. */
-export function acBody(a: AcAction, pinned: string[]): { enabled?: boolean; dry_run?: boolean; pinned?: string[] } {
-  if (a.kind === "enabled") return { enabled: a.to };
-  if (a.kind === "dry_run") return { dry_run: a.to };
+export function acBody(a: AcAction, pinned: string[], confirm = false): { enabled?: boolean; dry_run?: boolean; pinned?: string[]; confirm?: true } {
+  const c = confirm ? { confirm: true as const } : {};          // round 547: the runner itself refuses a widening move without confirm (409)
+  if (a.kind === "enabled") return { enabled: a.to, ...c };
+  if (a.kind === "dry_run") return { dry_run: a.to, ...c };
   const set = new Set(pinned);
   if (a.to) set.add(a.key); else set.delete(a.key);
-  return { pinned: [...set].sort() };
+  return { pinned: [...set].sort(), ...c };
 }
 /** What the second click will do, in plain words (shown on the armed button's note). */
 export function acConfirmText(a: AcAction): string {

@@ -101,7 +101,7 @@ const chg = rd("./components/selfImprove/ChangesPanel.tsx");
 const arm = rd("./components/selfImprove/useArm.ts");
 const tab = rd("./components/SelfImproveTab.tsx");
 assert.ok(/runnerApi\.autoStatus\(false\)/.test(tab) && /Promise\.allSettled/.test(tab) && /section === "controls"/.test(tab) && /section === "changes"/.test(tab));
-assert.ok(/runnerApi\.agentSetSettings\(/.test(ctl) && /runnerApi\.autoSettings\(acBody\(a, acs\.pinned\)\)/.test(ctl), "the two writes of the Controls panel");
+assert.ok(/runnerApi\.agentSetSettings\(/.test(ctl) && /runnerApi\.autoSettings\(acBody\(a, acs\.pinned, acNeedsTwoClicks\(a, acs\)\)\)/.test(ctl), "the two writes of the Controls panel");
 assert.ok(/acNeedsTwoClicks\(a, acs\)/.test(ctl) && /agentNeedsTwoClicks\(st\.values, body\)/.test(ctl) && /resetNeedsTwoClicks\(st\)/.test(ctl), "every write goes through the second-click rule");
 assert.ok(/confirm: true/.test(ctl) && /needs2 \? \{ confirm: true \}/.test(ctl), "propose is sent with the confirm the runner demands, only after the second click");
 assert.ok(/setTimeout\(\(\) => setArmed\(null\), ARM_MS\)/.test(arm) && /ARM_MS = 8000/.test(arm) && /nextArm\(armed, id\)/.test(arm), "an armed click disarms itself after 8 seconds");
@@ -116,10 +116,16 @@ assert.match(api, /agentSetSettings: \(body: \{[^}]*\}\) => R<AgentSettingsView>
 assert.match(api, /autoStatus: \(coverage = true\) => R<AutoStatus>\(coverage \? "\/autocalib\/status" : "\/autocalib\/status\?coverage=false"\)/);
 assert.ok(rd("./components/calibration/AutoCalibPanel.tsx").includes("runnerApi.autoStatus()") , "the old panel still asks for the coverage too");
 const old = rd("./components/calibration/AutoCalibPanel.tsx");
-assert.ok(/acNeedsTwoClicks\(a, s\) && !window\.confirm\(/.test(old) && /change\(\{ kind: "dry_run", to: !s\.dry_run \}\)/.test(old) && /change\(\{ kind: "pin", key, to: !pinned \}\)/.test(old), "the old Calibration page asks before turning dry-run off or unpinning");
+assert.ok(/const two = acNeedsTwoClicks\(a, s\);/.test(old) && /two && !window\.confirm\(/.test(old) && /acBody\(a, s\.pinned, two\)/.test(old) && /change\(\{ kind: "dry_run", to: !s\.dry_run \}\)/.test(old) && /change\(\{ kind: "pin", key, to: !pinned \}\)/.test(old), "the old Calibration page asks before turning dry-run off or unpinning");
 assert.ok(!/autoSettings\(\{ (dry_run|enabled)/.test(old) && !/autoSettings\(\{ pinned/.test(old), "no one-click write is left on the old page");
 const src = rd("./selfImproveControls.ts");
 assert.ok(!/^import (?!type )/m.test(src) && !/fetch\(/.test(src), "selfImproveControls.ts: only erased type imports, no network");
 ok("Controls and Changes: two writes behind the second-click rule, Changes read only, nothing applied on the spot, no key, no storage");
 
 console.log(`selfImproveControls.test.mjs: ${n} ok`);
+
+// round 547: the body carries confirm:true only when the caller says so (the second click), and never changes the rest of the body
+assert.deepEqual(c.acBody({ kind: "dry_run", to: false }, []), { dry_run: false }, "no confirm by default");
+assert.deepEqual(c.acBody({ kind: "dry_run", to: false }, [], true), { dry_run: false, confirm: true }, "dry-run OFF with the second click");
+assert.deepEqual(c.acBody({ kind: "pin", key: "B", to: false }, ["A", "B"], true), { pinned: ["A"], confirm: true }, "unpin with the second click");
+assert.deepEqual(c.acBody({ kind: "pin", key: "B", to: true }, ["A"]), { pinned: ["A", "B"] }, "pin: one click, no confirm");

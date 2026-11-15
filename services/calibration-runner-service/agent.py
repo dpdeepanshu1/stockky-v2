@@ -171,7 +171,7 @@ def privacy_problems(prompt: str, secrets: Sequence[str] = ()) -> List[str]:
 # ------------------------------------------------------------------------------------------------------------------ the allow-list
 def allowed_rules(rules: Sequence[AC.Rule]) -> Dict[str, AC.Rule]:
     """The only switches an idea may name: auto-calibrated and never protected."""
-    return {r.key: r for r in rules if r.key not in AC.PROTECTED}
+    return {r.key: r for r in rules if not AC.protected_reason(r.key)}
 
 
 def queueable(job: Optional[Dict[str, Any]]) -> Tuple[bool, str]:

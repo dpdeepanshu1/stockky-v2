@@ -6401,12 +6401,17 @@ def _one_extra_tile(symbol: str) -> Optional[dict]:
         frame = _IndexTicker(symbol).history(period="5d")
         if frame is None or frame.empty:
             return None
-        last = float(frame["Close"].dropna().iloc[-1])
-        prev = _prev_session_change(_FrameOnce(frame), last)
-        if not prev or not math.isfinite(last) or last <= 0:
+        # E563: the price IS the last row of this frame, so the previous session is the row before it. (_prev_session_change reads "the last row dated
+        # before today" as the previous close, which is right for a LIVE price but, for a price taken from the same frame, made the change 0.0 whenever the
+        # last row was a finished session: weekends and before the open.)
+        closes = frame["Close"].dropna()
+        if len(closes) < 2:
             return None
-        change = last - float(prev["prev_close"])
-        out = {"price": round(last, 2), "change": round(change, 2), "change_pct": prev["change_pct"]}
+        last, prev = float(closes.iloc[-1]), float(closes.iloc[-2])
+        if not (math.isfinite(last) and math.isfinite(prev)) or last <= 0 or prev <= 0:
+            return None
+        change = last - prev
+        out = {"price": round(last, 2), "change": round(change, 2), "change_pct": round(_safe_pct(change, prev), 2)}
         return out if _json_finite(out) else None
     except Exception as e:  # noqa: BLE001
         logger.debug("extra index %s unavailable: %s", symbol, e)

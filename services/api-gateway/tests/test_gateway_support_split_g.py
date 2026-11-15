@@ -18,6 +18,8 @@ EXPECTED = {
     "delete_notification_channel": [("delete", "/notifications/config/{channel}", True)],
     "notifications_call_me": [("api_route", "/notifications/call/me", True)],
     "test_notification_channels": [("post", "/notifications/test", True)],
+    "notifications_history": [("api_route", "/notifications/history", True)],   # E556 (B1)
+    "notifications_read_all": [("post", "/notifications/read-all", True)],   # E556 (B1)
     "trigger_training": [("post", "/training/train", True)],
     "ops_circuit_reset": [("post", "/ops/circuit-reset", True), ("get", "/ops/circuit-reset", False)],   # the GET stayed open on purpose
     "ops_overnight_set_config": [("post", "/ops/overnight/config", True)],

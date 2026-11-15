@@ -369,7 +369,10 @@ class TestStatuses:
 
     def test_frontend_mirrors_every_flat_sell_status(self):
         api = open(os.path.join(REPO, "frontend", "src", "positionStocksApi.ts"), encoding="utf-8").read()
-        tab = open(os.path.join(REPO, "frontend", "src", "components", "PositionStocksTab.tsx"), encoding="utf-8").read()
+        # E563: the status colours moved out of PositionStocksTab.tsx into components/positionStocks/ (the page split), so read the page and its files
+        comp = os.path.join(REPO, "frontend", "src", "components")
+        files = [os.path.join(comp, "PositionStocksTab.tsx")] + [os.path.join(comp, "positionStocks", f) for f in sorted(os.listdir(os.path.join(comp, "positionStocks"))) if f.endswith(".tsx")]
+        tab = "\n".join(open(f, encoding="utf-8").read() for f in files)
         for s in statuses.FLAT_SELL_STATUSES:
             assert f'"{s}"' in api, f"{s} missing from positionStocksApi.ts"
         assert '"STOP_BREACH_EXIT"' in tab

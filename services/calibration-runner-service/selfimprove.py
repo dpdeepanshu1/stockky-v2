@@ -4,6 +4,7 @@ It answers one question in plain data: what is the nightly chain (scheduled test
 does each part run next? It reads the timetable, the runner's recent runs, the agent's saved state and auto-calibration's last evaluation. It sets nothing, starts
 nothing and calls no other service. A step whose state cannot be told is `unknown`, never a guess.
 
+Round 544: the agent block also carries `proof` (did the agent run today, and the 17:30 IST warning state) and `recent_runs` stays the runner's job list.
 Step states: done | waiting | skipped | failed | not_due | unknown.
 Stdlib only. Offline tests: tests/test_round541_self_improve.py.
 """
@@ -168,7 +169,7 @@ def loop_view(agent: Any, auto: Any, sched_state: Dict[str, Any], runs: List[Dic
         "banner": AG.banner(acs, list(agent.rules)),
         "agent": {"mode": st["mode"], "mode_effective": st["mode_effective"], "stopped": st["stopped"], "run_after_ist": st["run_after_ist"], "next_run": st["next_run"],
                   "last": st.get("last"), "last_auto_date": st.get("last_auto_date"), "run_now_allowed": st["run_now_allowed"], "market_open": st["market_open"],
-                  "keys": st["keys"], "usage_today": st["usage_today"], "scoreboard": st["scoreboard"], "settings": st["settings"]},
+                  "keys": st["keys"], "usage_today": st["usage_today"], "scoreboard": st["scoreboard"], "settings": st["settings"], "proof": agent.proof(ts)},
         "schedule": {"enabled": bool(sched_state.get("enabled")), "slots": [slot_view(e, last_fired, now) for e in entries], "last_skipped": sched_state.get("last_skipped")},
         "autocalib": {"settings": acs, "last": ast.get("last"), "pending": ast.get("pending") or {}, "recent_changes": (ast.get("history") or [])[:5]},
         "chain": _chain(agent, ast, sched_state, runs, now, ts),

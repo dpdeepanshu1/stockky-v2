@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
@@ -439,6 +439,19 @@ def agent_settings_set(req: AgentSettings, claims: Dict[str, Any] = Depends(requ
 def agent_history(limit: int = Query(30, ge=1, le=120), _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     """Round 541: one line per saved day (newest first): ideas with their scoreboard outcome, what was dropped, the breakdown."""
     return _ag().history(limit)
+
+
+@app.get("/agent/history.csv")
+def agent_history_csv(limit: int = Query(120, ge=1, le=120), _: Dict[str, Any] = Depends(require_admin)) -> Response:
+    """Round 545 (S5): the idea history as a CSV file (one row per idea, oldest day first). Read only."""
+    a = _ag()
+    return Response(content=a.history_csv(limit), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{a.csv_name()}"'})
+
+
+@app.get("/agent/weekly")
+def agent_weekly(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Round 545 (S5): the last 7 days in one read (which weekdays had a run, ideas and outcomes, the switches named most, one sentence). Read only."""
+    return _ag().weekly()
 
 
 @app.get("/agent/loop")

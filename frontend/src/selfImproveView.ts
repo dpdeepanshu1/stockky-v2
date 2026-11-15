@@ -18,13 +18,16 @@ export interface AgentSettingsView {
   bounds: { modes: string[]; run_after: string[]; max_ideas: number[]; max_queue: number[] }; audit: AuditLine[];
 }
 export interface LoopChange { at: number; title: string; from: unknown; to: unknown; change: string; reason: string; restart_required?: boolean }
+/** Round 544 (S4): did the agent run today. `missed` is only set after the warn time (17:30 IST by default), the same moment the runner sends its one Telegram warning. */
+export interface Proof { state: "ok" | "waiting" | "missed" | "off" | "weekend"; detail: string; day: string; warn_after_ist: string; runs_today: number; scheduled_today: number; ran_today: boolean; warned_today: boolean }
+export interface RunLogLine { at: number; at_ist: string; day: string; ok: boolean; trigger?: string; mode?: string; by?: string; source?: string; ideas?: number; dropped?: number; queued?: number; errors?: number; note?: string; file?: string; error?: string }
 export interface LoopView {
   now_ist: string; weekday: string; banner: LoopBanner;
   agent: {
     mode: string; mode_effective: string; stopped: { at?: number; date?: string; reason?: string } | null; run_after_ist: string; next_run: NextRun;
     last: { date?: string; at?: number; mode?: string; trigger?: string; source?: string; note?: string | null; ideas?: number; dropped?: number; queued?: number } | null;
     last_auto_date?: string | null; run_now_allowed: boolean; market_open: boolean; keys: { gemini: boolean; groq: boolean };
-    usage_today: AgentUsage; scoreboard: AgentScoreboard; settings: AgentSettingsView;
+    usage_today: AgentUsage; scoreboard: AgentScoreboard; settings: AgentSettingsView; proof?: Proof;
   };
   schedule: { enabled: boolean; slots: SlotView[]; last_skipped?: unknown };
   autocalib: { settings: { enabled: boolean; dry_run: boolean; pinned: string[]; step_pct: number; cooldown_h: number }; last: { at?: number; changed?: number; waiting?: number; trigger?: string; dry_run?: boolean } | null; pending: Record<string, unknown>; recent_changes: LoopChange[] };
@@ -40,9 +43,13 @@ export interface Breakdown {
 }
 export interface HistoryDay {
   date: string; unreadable?: boolean; at?: number; mode?: string; trigger?: string; by?: string; source?: string; note?: string | null; auto_calibration?: string | null;
-  breakdown?: Breakdown | null; ideas?: HistoryIdea[]; dropped?: { switch: string; reason: string }[]; weaknesses?: string[]; queued_n?: number; skipped_n?: number; errors_n?: number; health?: string[];
+  breakdown?: Breakdown | null; ideas?: HistoryIdea[]; dropped?: { switch: string; reason: string }[]; weaknesses?: string[]; queued_n?: number; skipped_n?: number; errors_n?: number; health?: string[]; file?: string; runs_n?: number;
 }
-export interface HistoryView { days: HistoryDay[]; count: number; note?: string }
+export interface HistoryView { days: HistoryDay[]; count: number; note?: string; runs?: RunLogLine[] }
+/** Round 545 (S5): GET /agent/weekly. */
+export type WeekState = "ran" | "missed" | "pending" | "weekend" | "off";
+export interface WeekDay { date: string; weekday: string; state: WeekState; ideas: number; dropped: number; queued_n: number; file?: string | null }
+export interface WeeklyView { from: string; to: string; days: WeekDay[]; weekdays: number; weekdays_ran: number; missed: string[]; ideas: number; outcomes: Record<string, number>; top_switches: { switch: string; n: number }[]; scoreboard: AgentScoreboard; summary: string }
 
 /* ---------- the side list ---------- */
 export type SiSection = "today" | "ideas" | "changes" | "controls" | "health";
@@ -165,11 +172,18 @@ export function agentMissedToday(l: Pick<LoopView, "now_ist" | "weekday" | "agen
   const after = hm(l.agent.run_after_ist);
   return now != null && after != null && now >= after + MISSED_AFTER_MIN;
 }
+/** Round 544: the runner's own proof when it sends one (it matches the Telegram warning); an older runner has none, so the 60-minute rule above stays as the fallback. */
+export function missedWarning(l: LoopView): string | null {
+  const p = l.agent.proof;
+  if (p) return p.state === "missed" ? `${p.detail} (the runner warns by Telegram after ${p.warn_after_ist} IST${p.warned_today ? ", already sent today" : ""}).` : null;
+  return agentMissedToday(l) ? `The agent has not run today although its time (${l.agent.run_after_ist} IST) passed over an hour ago.` : null;
+}
 /** Plain warnings for the health card; empty when nothing needs a person. */
 export function healthWarnings(l: LoopView): string[] {
   const w: string[] = [];
   if (l.agent.stopped) w.push(`The agent switched itself off on ${l.agent.stopped.date || "an earlier day"}. Press Resume to start counting again.`);
-  if (agentMissedToday(l)) w.push(`The agent has not run today although its time (${l.agent.run_after_ist} IST) passed over an hour ago.`);
+  const missed = missedWarning(l);
+  if (missed) w.push(missed);
   if (!l.agent.keys.gemini && !l.agent.keys.groq) w.push("No LLM key is set (GEMINI_API_KEY or GROQ_API_KEY): the agent cannot ask a model.");
   if (l.agent.usage_today.left <= 0) w.push(`Today's call cap is used up (${l.agent.usage_today.cap}).`);
   else if (l.agent.usage_today.gemini_blocked) w.push("Gemini's daily quota is used up: Groq answers.");
@@ -196,4 +210,26 @@ export function settingLines(s: AgentSettingsView): string[] {
 export function auditText(a: AuditLine): string {
   const ch = Object.entries(a.changes || {}).map(([k, v]) => `${k} ${String(v.from)} -> ${String(v.to)}`).join(", ");
   return `${a.at_ist} by ${a.by}: ${a.reset ? "reset to .env" + (ch ? "; " : "") : ""}${ch || (a.reset ? "" : "no change")}`;
+}
+
+/* ---------- round 544 / 545: proof, run log, weekly review ---------- */
+const PROOF_TEXT: Record<string, string> = { ok: "RAN TODAY", waiting: "NOT YET", missed: "DID NOT RUN", off: "OFF", weekend: "WEEKEND" };
+export const proofLabel = (p: Pick<Proof, "state"> | null | undefined): string => (p ? PROOF_TEXT[p.state] || "UNKNOWN" : "UNKNOWN");
+export const proofTone = (p: Pick<Proof, "state"> | null | undefined): Tone => (!p ? undefined : p.state === "ok" ? "good" : p.state === "missed" ? "bad" : p.state === "waiting" ? "warn" : undefined);
+/** One run-log line as text: "2026-11-16 16:12 · scheduled · gemini · 2 ideas, 1 dropped, 0 queued" or "... · CRASHED: boom". A manual run says who. */
+export function runLogText(r: RunLogLine): string {
+  const when = String(r.at_ist || "").slice(0, 16);
+  const kind = r.trigger === "schedule" ? "scheduled" : `manual${r.by ? " by " + r.by : ""}`;
+  if (r.ok === false) return `${when} · ${kind} · CRASHED: ${r.error || "unknown error"}`;
+  const n = r.ideas ?? 0;
+  return `${when} · ${kind} · ${r.source || "no LLM answer"} · ${n} idea${n === 1 ? "" : "s"}, ${r.dropped ?? 0} dropped, ${r.queued ?? 0} queued${r.errors ? `, ${r.errors} error(s)` : ""}`;
+}
+const WEEK_MARK: Record<string, string> = { ran: "✓", missed: "✕", pending: "…", weekend: "–", off: "⊘" };
+const WEEK_TEXT: Record<string, string> = { ran: "ran", missed: "MISSED", pending: "not yet", weekend: "weekend", off: "agent off" };
+export const weekMark = (s: string): string => WEEK_MARK[s] || "?";
+export const weekText = (s: string): string => WEEK_TEXT[s] || s;
+export const weekTone = (s: string): Tone => (s === "ran" ? "good" : s === "missed" ? "bad" : s === "pending" ? "warn" : undefined);
+/** "Mon 11-16: ✓ ran · 2 ideas" for one day of the weekly card. */
+export function weekDayLine(d: WeekDay): string {
+  return `${d.weekday} ${String(d.date).slice(5)}: ${weekMark(d.state)} ${weekText(d.state)}${d.ideas ? ` · ${d.ideas} idea${d.ideas === 1 ? "" : "s"}` : ""}`;
 }

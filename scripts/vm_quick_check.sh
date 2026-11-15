@@ -3,7 +3,8 @@
 #   cd ~/stockky-v2 && bash scripts/vm_quick_check.sh
 #   SITE=https://other.example bash scripts/vm_quick_check.sh        # another site name
 # Checks: containers, the live site (entry file, cache header, every lazy chunk), gateway tiles and sparklines, runner health, recent log errors,
-# git state (clean tracked files, pages.css gone, manifest) and whether today's agent file exists. Exit 0 = no FAIL (WARN and INFO do not fail).
+# git state (clean tracked files, pages.css gone, manifest) and the agent's daily proof (did it run today: the runner's /agent/loop with ADMIN_TOKEN set, else its run log). Exit 0 = no FAIL (WARN and INFO do not fail).
+#   ADMIN_TOKEN=<admin session token> bash scripts/vm_quick_check.sh        # also prints tonight's chain from /agent/loop
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT" || exit 2
 SITE="${SITE:-https://stockky.duckdns.org}"; GW="${GW:-http://localhost:8000}"; RUNNER="${RUNNER:-http://localhost:8012}"
@@ -66,14 +67,54 @@ git fetch -q origin 2>/dev/null; B=$(git rev-parse --abbrev-ref HEAD)
 H=$(git rev-parse HEAD 2>/dev/null); O=$(git rev-parse "origin/$B" 2>/dev/null)
 [ -n "$H" ] && [ "$H" = "$O" ] && ok "pushed: HEAD equals origin/$B" || warn "HEAD differs from origin/$B (git push, or git pull)"
 
-echo "== 7. agent round 3"
+echo "== 7. agent daily proof (round 544)"
 IST_DATE=$(TZ=Asia/Kolkata date +%F); IST_HM=$(TZ=Asia/Kolkata date +%H%M); IST_DOW=$(TZ=Asia/Kolkata date +%u)
-F=$(docker compose exec -T calibration-runner-service sh -c "find / -path '*agent/$IST_DATE.json' 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')
-MODE=$(docker compose exec -T calibration-runner-service printenv AGENT_MODE 2>/dev/null | tr -d '\r')
-info "IST now $IST_DATE $IST_HM, AGENT_MODE in the container: ${MODE:-unknown}"
-if [ -n "$F" ]; then ok "agent file for $IST_DATE exists (bash scripts/agent_round3.sh to read it)"
-elif [ "$IST_DOW" -ge 6 ] || [ "$IST_HM" -lt 1545 ]; then info "no agent file for $IST_DATE yet (weekend or before 15:45 IST: the agent is refused in market hours; nothing to do)"
-else warn "no agent file for $IST_DATE: use the runner page -> run agent now"; fi
+SVC=calibration-runner-service
+MODE=$(docker compose exec -T $SVC printenv AGENT_MODE 2>/dev/null | tr -d '\r')
+info "IST now $IST_DATE $IST_HM, AGENT_MODE in the container: ${MODE:-unknown} (the saved setting on the page wins over .env)"
+LOOP_DONE=0
+if [ -n "${ADMIN_TOKEN:-}" ]; then
+  # preferred: the runner's own view of the whole loop (needs the admin token: ADMIN_TOKEN=<token> bash scripts/vm_quick_check.sh)
+  LOOP=$(curl -s --max-time 20 -H "Authorization: Bearer $ADMIN_TOKEN" "$RUNNER/agent/loop")
+  OUT=$(printf '%s' "$LOOP" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print("the reply is not JSON (wrong token, or the runner is the old one)"); sys.exit(3)
+p=(d.get("agent") or {}).get("proof")
+if not isinstance(p,dict): print("no proof field: the runner is older than round 544"); sys.exit(3)
+print("agent proof: %s - %s (warns after %s IST, %s run(s) today)" % (p.get("state"),p.get("detail"),p.get("warn_after_ist"),p.get("runs_today")))
+for c in d.get("chain") or []: print("  %-8s %s - %s" % (c.get("state"),c.get("title"),c.get("detail")))
+sys.exit(2 if p.get("state")=="missed" else 0)' 2>&1); RC=$?
+  if [ $RC -eq 0 ]; then ok "agent proof from /agent/loop"; echo "$OUT" | sed 's/^/        | /'; LOOP_DONE=1
+  elif [ $RC -eq 2 ]; then warn "the agent did not run today (the runner sends one Telegram warning after 17:30 IST)" "$OUT"; LOOP_DONE=1
+  else warn "/agent/loop could not be read (using the run log instead)" "$OUT"; fi
+fi
+if [ $LOOP_DONE -eq 0 ]; then
+  # no token (or the loop could not be read): the run log and the day file inside the container
+  RL=$(docker compose exec -T $SVC sh -c "find / -path '*agent/runs.jsonl' 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')
+  F=$(docker compose exec -T $SVC sh -c "find / -path '*agent/$IST_DATE.json' 2>/dev/null | head -1" 2>/dev/null | tr -d '\r')
+  if [ -n "$RL" ]; then
+    SUM=$(docker compose exec -T $SVC cat "$RL" 2>/dev/null | python3 -c '
+import json,sys
+day=sys.argv[1]; runs=[]
+for x in sys.stdin.read().splitlines():
+    try: d=json.loads(x)
+    except Exception: continue
+    if isinstance(d,dict) and d.get("day")==day: runs.append(d)
+good=[r for r in runs if r.get("ok",True)]; bad=[r for r in runs if not r.get("ok",True)]
+print("%d saved run(s) today (%d scheduled), %d crashed" % (len(good),sum(1 for r in good if r.get("trigger")=="schedule"),len(bad)))
+if good: print("last: %s IST %s, %s idea(s), source %s" % (str(good[-1].get("at_ist"))[11:16],good[-1].get("trigger"),good[-1].get("ideas"),good[-1].get("source") or "none"))
+if bad: print("crash: %s" % bad[-1].get("error"))
+sys.exit(0 if good else 1)' "$IST_DATE" 2>&1); RC=$?
+    if [ $RC -eq 0 ]; then ok "agent ran today ($IST_DATE)"; echo "$SUM" | sed 's/^/        | /'
+    elif [ "$IST_DOW" -ge 6 ]; then info "no agent run on a weekend"
+    elif [ "$IST_HM" -lt 1545 ]; then info "no agent run yet today (before 15:45 IST the agent is not started)"
+    elif [ "$IST_HM" -lt 1730 ]; then info "no agent run yet today; it starts after the run-after time (16:10 by default) and is reported missing after 17:30 IST" "$SUM"
+    else warn "no agent run saved for $IST_DATE (the runner sends one Telegram warning after 17:30 IST): runner page -> Self Improve System -> Today / Loop -> Run now" "$SUM"; fi
+  elif [ -n "$F" ]; then ok "agent file for $IST_DATE exists (round 544 run log not found: the runner is older than round 544)"
+  elif [ "$IST_DOW" -ge 6 ] || [ "$IST_HM" -lt 1545 ]; then info "no agent file for $IST_DATE yet (weekend or before 15:45 IST: the agent is refused in market hours; nothing to do)"
+  else warn "no agent file for $IST_DATE: use the runner page -> Self Improve System -> Run now"; fi
+fi
 
 echo
 echo "SUMMARY: $PASS pass, $WARN warn, $FAIL fail"

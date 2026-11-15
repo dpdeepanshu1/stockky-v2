@@ -117,6 +117,17 @@ def test_self_improve_routes_need_login_validate_and_never_set_a_switch(client):
     assert back.status_code == 200 and back.json()["saved"] == {}
 
 
+def test_weekly_and_csv_routes_are_admin_only_read_only_and_well_formed(client):
+    """Round 545 (S5): /agent/weekly and /agent/history.csv need login; the CSV is a file download with a header row; neither sets anything."""
+    for path in ("/agent/weekly", "/agent/history.csv"):
+        assert client.get(path).status_code == 401, path
+    w = client.get("/agent/weekly", headers=H())
+    assert w.status_code == 200 and len(w.json()["days"]) == 7 and "summary" in w.json()
+    c = client.get("/agent/history.csv", headers=H())
+    assert c.status_code == 200 and c.headers["content-type"].startswith("text/csv") and "attachment" in c.headers["content-disposition"]
+    assert c.text.splitlines()[0].startswith("date,at_ist,mode,trigger") and client.get("/agent/history.csv?limit=0", headers=H()).status_code == 422
+
+
 def test_autocalib_settings_route_audits_who_changed_what(client):
     """Round 543 (S3): PUT /autocalib/settings needs login, still validates, and a real change shows up in GET /autocalib/status as one audit line by the caller."""
     url = "/autocalib/settings"

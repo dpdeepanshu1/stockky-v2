@@ -381,6 +381,7 @@ frontend/src/screenerPresets.ts
 frontend/src/selfImprove.test.mjs
 frontend/src/selfImproveControls.test.mjs
 frontend/src/selfImproveControls.ts
+frontend/src/selfImproveReview.test.mjs
 frontend/src/selfImproveView.ts
 frontend/src/sellOrders.test.mjs
 frontend/src/sellOrdersView.ts
@@ -1208,6 +1209,8 @@ services/calibration-runner-service/tests/test_round298_is_admin.py
 services/calibration-runner-service/tests/test_round512_market_research_job.py
 services/calibration-runner-service/tests/test_round541_self_improve.py
 services/calibration-runner-service/tests/test_round543_autocalib_audit.py
+services/calibration-runner-service/tests/test_round544_daily_proof.py
+services/calibration-runner-service/tests/test_round545_review_export.py
 services/calibration-runner-service/tests/test_runner_engine.py
 services/calibration-runner-service/tests/test_short_history_replay.py
 services/calibration-runner-service/tests/test_weather.py

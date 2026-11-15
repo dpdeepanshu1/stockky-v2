@@ -1,8 +1,10 @@
 // Self Improve System > Ideas (round 542, E567). Last saved night in full, then one line per saved day with each idea's scoreboard outcome.
 // An idea whose own rule says "no change" is labelled so: read it as unproven. Data: GET /agent/history. Read only.
-import { dayLine, directionText, historyTotals, outcomeText, outcomeTone, supportText, supportTone, totalsLine, whyLine, type HistoryDay, type HistoryView } from "../../selfImproveView";
+import { useState } from "react";
+import { downloadAgentCsv } from "../../calibrationApi";
+import { dayLine, directionText, historyTotals, outcomeText, outcomeTone, supportText, supportTone, totalsLine, weekDayLine, weekTone, whyLine, type HistoryDay, type HistoryView, type WeeklyView } from "../../selfImproveView";
 import { whenIst } from "../../agentView";
-import { Card, Chip, Msg } from "../calibration/ui";
+import { Btn, Card, Chip, Msg } from "../calibration/ui";
 
 function IdeaRows({ day }: { day: HistoryDay }) {
   const ideas = day.ideas || [];
@@ -37,7 +39,8 @@ function IdeaRows({ day }: { day: HistoryDay }) {
   );
 }
 
-export default function IdeasPanel({ history }: { history: HistoryView | null }) {
+export default function IdeasPanel({ history, weekly }: { history: HistoryView | null; weekly?: WeeklyView | null }) {
+  const [csvErr, setCsvErr] = useState<string | null>(null);
   if (!history) return <div className="text-mist">Loading the ideas…</div>;
   const days = history.days;
   const latest = days[0] || null;
@@ -53,7 +56,17 @@ export default function IdeasPanel({ history }: { history: HistoryView | null })
         )}
       </Card>
 
-      <Card title={`History (${history.count} day${history.count === 1 ? "" : "s"})`}>
+      {weekly && (
+        <Card title={`Weekly review: ${weekly.from} to ${weekly.to}`} tone={weekly.missed.length ? "warn" : undefined}>
+          <p className="text-mist" data-testid="si-weekly">{weekly.summary}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2" role="list" aria-label="Last 7 days">
+            {weekly.days.map((d) => <span key={d.date} role="listitem"><Chip tone={weekTone(d.state)}>{weekDayLine(d)}</Chip></span>)}
+          </div>
+        </Card>
+      )}
+
+      <Card title={`History (${history.count} day${history.count === 1 ? "" : "s"})`} right={<Btn small title="Download the idea history as a CSV file (read only)" onClick={() => { setCsvErr(null); downloadAgentCsv().catch((e: any) => setCsvErr(e?.message || String(e))); }}>Download CSV</Btn>}>
+        {csvErr && <Msg kind="err">{csvErr}</Msg>}
         <p className="text-mist">{totalsLine(historyTotals(days))}</p>
         {history.note && <p className="text-[11px] text-mist">Note: {history.note}.</p>}
         <div className="mt-2 space-y-1">

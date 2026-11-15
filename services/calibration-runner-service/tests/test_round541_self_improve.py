@@ -223,7 +223,7 @@ def test_history_is_newest_first_with_outcomes_and_survives_damage():
     assert [x["date"] for x in h["days"]] == [rep["date"], "2026-11-10", "2026-11-09"] and h["days"][2].get("unreadable") is True
     top = h["days"][0]
     assert top["ideas"][0]["switch"] == "SETUP_S2_ENABLED" and top["ideas"][0]["outcome"] == "pending" and top["ideas"][0]["support"] == "rule_holds" and top["breakdown"]["hold"] == 4
-    assert h["days"][1]["dropped"][0]["switch"] == "X" and h["days"][1]["errors_n"] == 1 and "replaces the first" in h["note"]
+    assert h["days"][1]["dropped"][0]["switch"] == "X" and h["days"][1]["errors_n"] == 1 and "scheduled run" in h["note"]
     tr = json.load(open(ag.trials_path))
     tr["log"][0]["verdict"] = "not_confirmed"
     json.dump(tr, open(ag.trials_path, "w"))
@@ -233,7 +233,8 @@ def test_history_is_newest_first_with_outcomes_and_survives_damage():
 
 def test_history_of_a_fresh_install_is_empty():
     ag, _ = _new()
-    assert ag.history() == {"days": [], "count": 0, "note": "one file per day: a second run on the same day replaces the first"}
+    h = ag.history()
+    assert h["days"] == [] and h["count"] == 0 and h["runs"] == [] and "scheduled run" in h["note"]
 
 
 def test_next_run_today_now_monday_or_off():

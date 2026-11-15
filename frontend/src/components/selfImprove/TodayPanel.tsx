@@ -4,12 +4,12 @@
 import { useEffect, useState } from "react";
 import { runnerApi, type AutoReport } from "../../calibrationApi";
 import { runBlock, runResultLines, type AgentRunResult } from "../../agentView";
-import { bannerLabel, bannerTone, breakdownChips, chainSummary, nextArm, nextRunText, slotLine, slotTodayText, slotTodayTone, stepLabel, stepMark, stepTone, whyLine, type HistoryDay, type LoopView } from "../../selfImproveView";
+import { bannerLabel, bannerTone, breakdownChips, chainSummary, nextArm, nextRunText, proofLabel, proofTone, runLogText, slotLine, slotTodayText, slotTodayTone, stepLabel, stepMark, stepTone, whyLine, type HistoryDay, type LoopView, type RunLogLine } from "../../selfImproveView";
 import { Btn, Card, Chip, Msg } from "../calibration/ui";
 
 const ARM_MS = 8000;
 
-export default function TodayPanel({ loop, latest, reload }: { loop: LoopView; latest: HistoryDay | null; reload: () => Promise<void> }) {
+export default function TodayPanel({ loop, latest, runs, reload }: { loop: LoopView; latest: HistoryDay | null; runs?: RunLogLine[]; reload: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [res, setRes] = useState<AgentRunResult | null>(null);
@@ -85,7 +85,9 @@ export default function TodayPanel({ loop, latest, reload }: { loop: LoopView; l
           <Chip tone={a.stopped || a.mode_effective === "off" ? "bad" : a.mode_effective === "propose" ? "warn" : "good"}>mode: {a.stopped ? "OFF (switched itself off)" : a.mode_effective}</Chip>
           <Chip>runs after {a.run_after_ist} IST on weekdays</Chip>
           {a.last && <Chip>last run: {a.last.date || "-"} ({a.last.trigger || "-"}) · {a.last.ideas ?? 0} idea(s)</Chip>}
+          {a.proof && <Chip tone={proofTone(a.proof)}>today: {proofLabel(a.proof)}</Chip>}
         </div>
+        {a.proof && <p className="mt-1 text-[11px] text-mist" data-testid="si-proof">{a.proof.detail}</p>}
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {a.stopped && <Btn small primary disabled={busy} onClick={() => void act(async () => { await runnerApi.agentResume(); setRes(null); })}>Resume</Btn>}
           <Btn small disabled={busy || !!block} title={block || "Ask the AI now (report only: queues nothing)"} onClick={() => click("report", async () => setRes(await runnerApi.agentRun("report")), false)}>Run now (report)</Btn>
@@ -108,6 +110,15 @@ export default function TodayPanel({ loop, latest, reload }: { loop: LoopView; l
           </>
         )}
       </Card>
+
+      {runs && runs.length > 0 && (
+        <Card title={`Run log (last ${runs.length})`}>
+          <p className="text-mist">Every agent run, newest first. A crashed automatic run is listed too; it does not count as a run.</p>
+          <div className="mt-1 space-y-1" role="list" aria-label="Run log">
+            {runs.map((r, i) => <div key={`${r.at}-${i}`} role="listitem" className={`text-[11px] ${r.ok === false ? "text-red-400" : "text-mist"}`}>{runLogText(r)}</div>)}
+          </div>
+        </Card>
+      )}
 
       <Card title="Test timetable" tone={loop.schedule.enabled ? undefined : "warn"}>
         {!loop.schedule.enabled && <Msg kind="warn">The timetable is switched off: the evening tests do not start by themselves.</Msg>}

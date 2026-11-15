@@ -11,7 +11,7 @@ import { getPositionStocksApiUrl, setPositionStocksApiUrl, getSessionToken as ge
 import { getApiUrl } from "./api";
 import { getFnoApiUrl, fnoToken } from "./fnoApi";
 import type { AgentRunResult, AgentStatus } from "./agentView";
-import type { AgentSettingsView, AuditLine, HistoryView, LoopView } from "./selfImproveView";
+import type { AgentSettingsView, AuditLine, HistoryView, LoopView, WeeklyView } from "./selfImproveView";
 import type { OverlayRevertResult, OverlayView, WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
@@ -251,6 +251,7 @@ export const runnerApi = {
   // round 542 (S2): the three read-only views behind the Self Improve System tab (round 541 routes). None of them changes anything.
   agentLoop: () => R<LoopView>("/agent/loop"),
   agentHistory: (limit = 30) => R<HistoryView>(`/agent/history?limit=${limit}`),
+  agentWeekly: () => R<WeeklyView>("/agent/weekly"),     // round 545 (S5): read only
   agentSettings: () => R<AgentSettingsView>("/agent/settings"),
   // round 543 (S3): change the agent's own settings (mode / run-after / caps). The body holds ONLY the fields to change; confirm is the second click for propose. It sets no trading switch.
   agentSetSettings: (body: { mode?: string; run_after?: string; max_ideas?: number; max_queue?: number; confirm?: boolean; reset?: boolean }) => R<AgentSettingsView>("/agent/settings", { method: "POST", body: JSON.stringify(body) }),
@@ -276,6 +277,14 @@ export async function downloadRunFile(id: string, file: string | "zip"): Promise
   if (!resp.ok) throw new ApiError(resp.status, resp.statusText || "download failed");
   const blob = await resp.blob();
   saveBlob(blob, file === "zip" ? `${id}.zip` : `${id}_${file.split("/").pop()}`);
+}
+
+/** Round 545 (S5): the agent's idea history as a CSV file (GET /agent/history.csv, read only). Needs the bearer header, so it is fetched and saved from a blob. */
+export async function downloadAgentCsv(): Promise<void> {
+  const resp = await fetch(`${getRunnerUrl()}/agent/history.csv`, { headers: { Authorization: `Bearer ${anyToken() || ""}` } });
+  if (!resp.ok) throw new ApiError(resp.status, resp.status === 404 ? "The runner is older than round 545: deploy the runner first." : resp.statusText || "download failed");
+  const m = /filename="([^"]+)"/.exec(resp.headers.get("content-disposition") || "");
+  saveBlob(await resp.blob(), m ? m[1] : "agent_ideas.csv");
 }
 
 /** group 471: the latest result of every test in one zip (GET /results/latest.zip on the runner). */

@@ -31,10 +31,22 @@ Round 541 (S1 of the Self Improve plan, E566):
   * an idea check after the validator: an idea is moved to `dropped` (with the reason) when its switch has no usable test result, when it asks for a move that is
     impossible (an off switch can not go down) or when it points the OPPOSITE way to the switch's own rule. Every kept idea says whether its rule agrees or holds;
   * history(): one line per saved day (ideas, outcome from the scoreboard, breakdown); next_run(): the next automatic run time.
-Stdlib only. Offline tests: tests/test_agent.py, tests/test_agent_hardening.py and tests/test_round541_self_improve.py.
+Round 544 (S4 of the Self Improve plan, E569: daily proof):
+  * run log: every run (and every crashed automatic run) is one line in agent/runs.jsonl (when, trigger, mode, source, counts, file, error); the last 200 are kept;
+  * the day file agent/YYYY-MM-DD.json is the SCHEDULED run of that day; a manual run after it is saved as YYYY-MM-DD-manual-HHMMSS.json (the newest 20 are kept) and a
+    scheduled run that follows a manual one moves that manual file aside instead of overwriting it;
+  * proof(): did the agent run today? One Telegram warning (once a day, weekdays) when no run was saved by 17:30 IST (never before the run-after time plus 80 minutes);
+    it says whether the run never started, started and did not finish, or crashed. Read only apart from that one message.
+Round 545 (S5 of the Self Improve plan, E570: review and export):
+  * weekly(): the last 7 days in one read (which weekdays had a run, ideas and their outcomes, the most repeated switches, one plain sentence);
+  * history_csv(): the idea history as a CSV file (one row per idea, one row for a run with no ideas); free text is neutralised against spreadsheet formulas;
+  * both are read only (GET /agent/weekly, GET /agent/history.csv) and set nothing.
+Stdlib only. Offline tests: tests/test_agent.py, tests/test_agent_hardening.py, tests/test_round541_self_improve.py, tests/test_round544_daily_proof.py and tests/test_round545_review_export.py.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import re
@@ -67,6 +79,12 @@ _KEY_SHAPES = (re.compile(r"AIza[0-9A-Za-z_\-]{20,}"), re.compile(r"gsk_[0-9A-Za
 RUN_AFTER_MIN, RUN_AFTER_MAX = 15 * 60 + 45, 23 * 60  # a SAVED run-after time stays between 15:45 (market guard over) and 23:00 IST (the window ends 23:30)
 IDEAS_BOUNDS, QUEUE_BOUNDS = (1, 10), (0, 6)
 AUDIT_KEEP = 200
+RUNLOG_KEEP = 200                                     # round 544: lines kept in agent/runs.jsonl
+MANUAL_FILES_KEEP = 20                                # round 544: manual-run files kept per runner (the newest)
+WARN_AFTER_MIN, WARN_GAP_MIN, WARN_LAST_MIN = 17 * 60 + 30, 80, 23 * 60 + 45   # missed-run warning: 17:30 IST, but never earlier than run-after + 80 min; last possible 23:45
+CSV_COLUMNS = ("date", "at_ist", "mode", "trigger", "source", "switch", "direction", "support", "outcome", "queued_test", "why", "note")
+WEEK_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+HISTORY_NOTE = "one file per day: the scheduled run (a manual run is kept in its own -manual- file once the scheduled run exists); every run is one line in the run log"
 MAX_HEAVY_QUEUE_S = 3600                              # a test that runs longer than this, or needs a download first, is never queued by the agent
 
 SYSTEM_PROMPT = (
@@ -670,6 +688,7 @@ class Agent:
         self.trials_path = os.path.join(data_dir, "agent", "trials.json")
         self.usage_path = os.path.join(data_dir, "agent", "usage.json")
         self.audit_path = os.path.join(data_dir, "agent", "audit.jsonl")
+        self.runlog_path = os.path.join(data_dir, "agent", "runs.jsonl")
         self.env_defaults = {"mode": self.mode, "run_after": fmt_hhmm(self.after_min), "max_ideas": self.max_ideas, "max_queue": self.max_queue}
         self.saved: Dict[str, Any] = {}
         self._load_saved()
@@ -813,15 +832,110 @@ class Agent:
 
     def _loop(self) -> None:
         while not self.stop.wait(45):
-            try:
-                if self.due():
-                    with self.slock:
-                        st = self._state()
-                        st["last_auto_date"] = _day(self.now())      # set first: a failed run is not retried in a loop
-                        self._put_state(st)
+            self._tick()
+
+    def _tick(self) -> None:
+        """One pass of the loop (every 45 s): start the automatic run when it is due, then check whether a weekday run is missing. Never raises."""
+        try:
+            if self.due():
+                with self.slock:
+                    st = self._state()
+                    st["last_auto_date"] = _day(self.now())      # set first: a failed run is not retried in a loop
+                    self._put_state(st)
+                try:
                     self.run(trigger="schedule")
-            except Exception:  # noqa: BLE001 - the agent must never take the runner down
+                except Exception as e:  # noqa: BLE001 - a crashed automatic run is written down, so the missed-run warning can say why
+                    self._runlog_add({"ok": False, "trigger": "schedule", "error": "crashed: " + scrub(e, 160)})
+            self.check_missed()
+        except Exception:  # noqa: BLE001 - the agent must never take the runner down
+            pass
+
+    # -- round 544 (S4): the run log and the daily proof
+    def _runlog_add(self, entry: Dict[str, Any]) -> None:
+        ts = self.now()
+        line = {"at": ts, "at_ist": datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M:%S"), "day": _day(ts), **entry}
+        try:
+            with self.slock:
+                lines = []
+                try:
+                    with open(self.runlog_path, "r", encoding="utf-8") as f:
+                        lines = [x for x in f.read().splitlines() if x.strip()]
+                except FileNotFoundError:
+                    pass
+                lines = (lines + [json.dumps(line, sort_keys=True, default=str)])[-RUNLOG_KEEP:]
+                _atomic_write(self.runlog_path, "\n".join(lines) + "\n")
+        except Exception:  # noqa: BLE001 - the log is best effort; the run itself is already saved
+            pass
+
+    def run_log(self, n: int = 20) -> List[Dict[str, Any]]:
+        """The newest `n` run-log lines, newest first. A damaged line is skipped."""
+        out: List[Dict[str, Any]] = []
+        try:
+            with open(self.runlog_path, "r", encoding="utf-8") as f:
+                for x in f.read().splitlines():
+                    try:
+                        d = json.loads(x)
+                    except ValueError:
+                        continue
+                    if isinstance(d, dict):
+                        out.append(d)
+        except OSError:
+            pass
+        return list(reversed(out[-max(1, int(n)):]))
+
+    def warn_min(self) -> int:
+        """Minute of the day (IST) after which a missing run is reported: 17:30, or run-after + 80 min when the run-after time was moved later."""
+        return min(WARN_LAST_MIN, max(WARN_AFTER_MIN, self.after_min + WARN_GAP_MIN))
+
+    def proof(self, now: Optional[float] = None) -> Dict[str, Any]:
+        """Did the agent run today? state: ok | waiting | missed | off | weekend. Read only; `detail` says why in plain words."""
+        ts = now if now is not None else self.now()
+        t = datetime.fromtimestamp(ts, IST)
+        today, mins = t.strftime("%Y-%m-%d"), t.hour * 60 + t.minute
+        st = self._state()
+        ok_runs = [r for r in self.run_log(RUNLOG_KEEP) if r.get("day") == today and r.get("ok", True)]
+        crashes = [r for r in self.run_log(RUNLOG_KEEP) if r.get("day") == today and not r.get("ok", True)]
+        out = {"day": today, "warn_after_ist": fmt_hhmm(self.warn_min()), "runs_today": len(ok_runs), "scheduled_today": sum(1 for r in ok_runs if r.get("trigger") == "schedule"),
+               "ran_today": bool(ok_runs), "warned_today": st.get("missed_warned") == today, "state": "ok", "detail": ""}
+        if self.eff_mode() == "off":
+            out.update(state="off", detail="the agent is off (mode off or it switched itself off): no run is expected")
+        elif t.weekday() >= 5:
+            out.update(state="weekend", detail="no automatic run on a weekend")
+        elif ok_runs:
+            out["detail"] = f"{len(ok_runs)} run(s) saved today, the last at {str(ok_runs[0].get('at_ist') or '')[11:16]} IST ({ok_runs[0].get('trigger')})"
+        elif self.lock.locked():
+            out.update(state="waiting", detail="a run is in progress now")
+        elif mins < self.warn_min():
+            out.update(state="waiting", detail=f"no run yet; it starts after {fmt_hhmm(self.after_min)} IST and is reported missing after {fmt_hhmm(self.warn_min())} IST")
+        else:
+            if crashes:
+                why = "the automatic run crashed (" + scrub(crashes[0].get("error"), 120) + ")"
+            elif st.get("last_auto_date") == today:
+                why = "the automatic run started but saved no report (the container restarted or the run was cut off)"
+            else:
+                why = f"no run started after {fmt_hhmm(self.after_min)} IST (the runner was down then, or the loop is stuck)"
+            out.update(state="missed", detail="no agent run was saved today: " + why)
+        return out
+
+    def check_missed(self, now: Optional[float] = None) -> Optional[str]:
+        """ONE Telegram warning per weekday when no run was saved by the warn time. Returns the text sent (or the text that would have been sent with no notifier), else None."""
+        p = self.proof(now)
+        if p["state"] != "missed" or p["warned_today"]:
+            return None
+        why = p["detail"][len("no agent run was saved today: "):]
+        text = f"AI agent: no run saved for {p['day']} by {p['warn_after_ist']} IST. {why[:1].upper() + why[1:]}. Open Self Improve System > Today / Loop and press Run now (report), or read the runner log."
+        with self.slock:
+            st = self._state()
+            if st.get("missed_warned") == p["day"]:
+                return None
+            st["missed_warned"] = p["day"]          # set first: a failed send is not retried every 45 seconds (the notifier keeps its own outbox)
+            self._put_state(st)
+        if self.notify:
+            try:
+                self.notify("Stockky AI agent", text[:1000], "normal")
+            except Exception:  # noqa: BLE001
                 pass
+        return text
 
     # -- one run
     def run(self, mode: Optional[str] = None, trigger: str = "manual", by: str = "") -> Dict[str, Any]:
@@ -970,7 +1084,11 @@ class Agent:
     # -- files
     def _save(self, rep: Dict[str, Any], day: str, ctx: Dict[str, Dict[str, Any]]) -> None:
         try:
-            _atomic_write(os.path.join(self.dir, "agent", f"{day}.json"), json.dumps(rep, indent=1, sort_keys=True, default=str))
+            rep["file"] = self._day_file(rep, day)
+            _atomic_write(os.path.join(self.dir, "agent", rep["file"]), json.dumps(rep, indent=1, sort_keys=True, default=str))
+            self._prune_manual()
+            self._runlog_add({"ok": True, "trigger": rep.get("trigger"), "mode": rep.get("mode"), "by": rep.get("by") or "", "source": rep.get("source") or "", "ideas": len(rep["ideas"]),
+                              "dropped": len(rep["dropped"]), "queued": len(rep["queued"]), "errors": len(rep.get("errors") or []), "note": scrub(rep.get("note") or "", 160), "file": rep["file"]})
             with self.slock:
                 tr = self._trials()
                 tr["ideas"] = int(tr.get("ideas", 0)) + len(rep["ideas"])
@@ -990,6 +1108,33 @@ class Agent:
                 st["last_report"]["dropped"] = len(rep["dropped"])
                 self._put_state(st)
         except Exception:  # noqa: BLE001 - files are best effort
+            pass
+
+    def _day_file(self, rep: Dict[str, Any], day: str) -> str:
+        """Name of the file this run is saved to. `<day>.json` is the SCHEDULED run of the day. A manual run is saved there only while the day has no scheduled run; after
+        that it goes to `<day>-manual-HHMMSS.json`. A scheduled run that finds a manual `<day>.json` moves it aside first, so no report is ever overwritten."""
+        d = os.path.join(self.dir, "agent")
+        main = f"{day}.json"
+        old = _read_json(os.path.join(d, main), None)
+        stamp = lambda ts: datetime.fromtimestamp(float(ts), IST).strftime("%H%M%S")      # noqa: E731
+        if isinstance(old, dict) and old.get("trigger") == "schedule" and rep.get("trigger") != "schedule":
+            name = f"{day}-manual-{stamp(rep['at'])}.json"
+        else:
+            name = main
+            if isinstance(old, dict) and old.get("trigger") != "schedule" and rep.get("trigger") == "schedule":
+                try:
+                    os.replace(os.path.join(d, main), os.path.join(d, f"{day}-manual-{stamp(old.get('at') or rep['at'])}.json"))
+                except OSError:
+                    pass
+        return name
+
+    def _prune_manual(self) -> None:
+        d = os.path.join(self.dir, "agent")
+        try:
+            extra = sorted(n for n in os.listdir(d) if re.fullmatch(r"\d{4}-\d{2}-\d{2}-manual-\d{6}\.json", n))
+            for n in extra[:-MANUAL_FILES_KEEP]:
+                os.remove(os.path.join(d, n))
+        except OSError:
             pass
 
     # -- the scoreboard: each idea is judged by what its own test later says
@@ -1104,6 +1249,75 @@ class Agent:
         except Exception:  # noqa: BLE001
             pass
 
+    # -- round 545 (S5): the weekly review and the CSV export. Read only.
+    @staticmethod
+    def _csv_cell(v: Any) -> str:
+        """One CSV cell as text. A cell that starts with = + - @ (or a tab) gets a leading apostrophe: the LLM's free text must never run as a spreadsheet formula."""
+        t = "" if v is None else str(v).replace("\r", " ").replace("\n", " ").strip()
+        return "'" + t if t[:1] in ("=", "+", "-", "@", "\t") else t
+
+    def csv_name(self) -> str:
+        return "agent_ideas_" + _day(self.now()) + ".csv"
+
+    def history_csv(self, limit: int = 120) -> str:
+        """The idea history, oldest day first: one row per idea; a run with no ideas is one row with an empty switch and its note."""
+        days = [d for d in self.history(limit)["days"] if not d.get("unreadable")]
+        out = io.StringIO()
+        w = csv.writer(out, lineterminator="\n")
+        w.writerow(CSV_COLUMNS)
+        for d in reversed(days):
+            at_ist = datetime.fromtimestamp(float(d["at"]), IST).strftime("%Y-%m-%d %H:%M") if d.get("at") else ""
+            head = [d.get("date"), at_ist, d.get("mode"), d.get("trigger"), d.get("source")]
+            ideas = d.get("ideas") or []
+            if not ideas:
+                w.writerow([self._csv_cell(x) for x in head + ["", "", "", "", "", "", d.get("note") or (d.get("breakdown") or {}).get("summary") or ""]])
+            for i in ideas:
+                w.writerow([self._csv_cell(x) for x in head + [i.get("switch"), i.get("direction"), i.get("support"), i.get("outcome"), i.get("queued_test"), i.get("why"), ""]])
+        return out.getvalue()
+
+    def weekly(self, now: Optional[float] = None) -> Dict[str, Any]:
+        """The last 7 days (today included, IST): per day ran / missed / pending / weekend / off, the ideas and their outcomes, the switches named most. Never guesses a day it cannot tell."""
+        ts = now if now is not None else self.now()
+        t = datetime.fromtimestamp(ts, IST)
+        mins = t.hour * 60 + t.minute
+        hist = {d["date"]: d for d in self.history(120)["days"] if not d.get("unreadable")}
+        ran = {r.get("day") for r in self.run_log(RUNLOG_KEEP) if r.get("ok", True)} | set(hist)
+        off = self.eff_mode() == "off"
+        days: List[Dict[str, Any]] = []
+        outcomes: Dict[str, int] = {}
+        names: Dict[str, int] = {}
+        for back in range(6, -1, -1):
+            d = t - timedelta(days=back)
+            ds = d.strftime("%Y-%m-%d")
+            h = hist.get(ds) or {}
+            if ds in ran:
+                state = "ran"
+            elif d.weekday() >= 5:
+                state = "weekend"
+            elif off:
+                state = "off"
+            elif back == 0 and mins < self.warn_min():
+                state = "pending"
+            else:
+                state = "missed"
+            ideas = h.get("ideas") or []
+            for i in ideas:
+                o = str(i.get("outcome") or "pending")
+                outcomes[o] = outcomes.get(o, 0) + 1
+                names[str(i.get("switch"))] = names.get(str(i.get("switch")), 0) + 1
+            days.append({"date": ds, "weekday": WEEK_DAYS[d.weekday()], "state": state, "ideas": len(ideas), "dropped": len(h.get("dropped") or []), "queued_n": int(h.get("queued_n") or 0),
+                         "file": h.get("file")})
+        weekdays = [x for x in days if x["state"] != "weekend"]
+        ran_n = sum(1 for x in weekdays if x["state"] == "ran")
+        missed = [f"{x['weekday']} {x['date'][5:]}" for x in days if x["state"] == "missed"]
+        n_ideas = sum(x["ideas"] for x in days)
+        tally = ", ".join(f"{outcomes[k]} {k.replace('_', ' ')}" for k in ("survived", "not_confirmed", "contradicted", "unclear", "no_result", "pending") if outcomes.get(k))
+        top = sorted(({"switch": k, "n": v} for k, v in names.items()), key=lambda x: (-x["n"], x["switch"]))[:5]
+        summary = (f"Last 7 days: the agent ran on {ran_n} of {len(weekdays)} day(s) it counted" + (f"; missed: {', '.join(missed)}" if missed else "") + ". "
+                   + (f"{n_ideas} idea(s): {tally}." if n_ideas else "No ideas were saved.") + (f" Named most: {top[0]['switch']} ({top[0]['n']}x)." if top and top[0]["n"] > 1 else ""))
+        return {"from": days[0]["date"], "to": days[-1]["date"], "days": days, "weekdays": len(weekdays), "weekdays_ran": ran_n, "missed": missed, "ideas": n_ideas, "outcomes": outcomes,
+                "top_switches": top, "scoreboard": self.scoreboard(), "summary": summary}
+
     # -- what the API shows (never a key)
     def status(self) -> Dict[str, Any]:
         st = self._state()
@@ -1120,7 +1334,7 @@ class Agent:
                 "trials": {k: tr.get(k, 0) for k in ("runs", "ideas", "dropped")}, "scoreboard": self.scoreboard(),
                 "usage_today": {"date": u["date"], "gemini": int(u.get("gemini", 0)), "groq": int(u.get("groq", 0)), "runs": int(u.get("runs", 0)), "used": used,
                                 "cap": self.max_calls_day, "left": max(0, self.max_calls_day - used), "gemini_blocked": bool(u.get("gemini_blocked"))},
-                "last_report": st.get("last_report"), "settings": self.settings(), "next_run": self.next_run()}
+                "last_report": st.get("last_report"), "settings": self.settings(), "next_run": self.next_run(), "proof": self.proof()}
 
     # -- round 541: one line per saved day, with each idea's outcome from the scoreboard
     def history(self, limit: int = 30) -> Dict[str, Any]:
@@ -1131,6 +1345,7 @@ class Agent:
         except OSError:
             names = []
         verdicts = {(e.get("date"), e.get("switch")): e.get("verdict") for e in self._trials()["log"]}
+        runs_all = self.run_log(RUNLOG_KEEP)
         days: List[Dict[str, Any]] = []
         for n in names:
             rep = _read_json(os.path.join(d, n), None)
@@ -1144,5 +1359,5 @@ class Agent:
             days.append({"date": rep.get("date") or n[:-5], "at": rep.get("at"), "mode": rep.get("mode"), "trigger": rep.get("trigger"), "by": rep.get("by"), "source": rep.get("source"),
                          "note": rep.get("note"), "auto_calibration": rep.get("auto_calibration"), "breakdown": rep.get("breakdown"), "ideas": ideas, "dropped": rep.get("dropped") or [],
                          "weaknesses": rep.get("weaknesses") or [], "queued_n": len(rep.get("queued") or []), "skipped_n": len(rep.get("skipped") or []), "errors_n": len(rep.get("errors") or []),
-                         "health": rep.get("health") or []})
-        return {"days": days, "count": len(days), "note": "one file per day: a second run on the same day replaces the first"}
+                         "health": rep.get("health") or [], "file": rep.get("file") or n, "runs_n": sum(1 for r in runs_all if r.get("day") == (rep.get("date") or n[:-5]))})
+        return {"days": days, "count": len(days), "runs": self.run_log(15), "note": HISTORY_NOTE}

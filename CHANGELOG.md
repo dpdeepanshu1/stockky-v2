@@ -1,3 +1,11 @@
+## 15 Nov 2026 - Round 540 hotfix (E562): the frontend did not build on the VM - a broken import in `HistoryTab.tsx` (from round 537); import guard test added
+
+ * **Found by the first VM run (15 Nov, 04:46 UTC):** `vite build` and `tsc` failed with `HistoryTab.tsx:14: Expected "as" but found "{"`. Round 537 had inserted `import { Button } from "../../kit";` between `import {` and its list of names. Every node test passed because none of them parses the TSX; the earlier "type-checked against a minimal shim" note was partial. **That is a miss on my side: I reported "all tests pass" without a real `tsc`; the VM was the first real compiler run.** Result on the VM: `docker compose up -d --build` failed at the frontend step and nothing was running afterwards.
+ * **Fix:** the `Button` import now sits on its own line before the multi-line import. A global `tsc` over the whole frontend (this time run here) reports 0 syntax errors (`TS1xxx`); the only message left is `TS2688` (type packages missing without `node_modules`).
+ * **New guard:** `src/importSyntax.test.mjs` (2 tests, in `npm test`) fails when a new `import ... from` starts while an `import {` list is still open. 68 frontend test files pass.
+ * **Also found on the VM:** `frontend/src/styles/pages.css` is still tracked in git (unpacking a zip never deletes), so `styles.test.mjs` and `check_stale_files.py --verify` fail. Run `git rm frontend/src/styles/pages.css`.
+ * **Roll back:** restore `frontend/src/components/realAuto/tabs/HistoryTab.tsx` (it does not compile) - there is nothing to roll back to; delete `importSyntax.test.mjs` and its two lines in `package.json` and `docs/FILE_MANIFEST.txt`.
+
 ## 15 Nov 2026 - Round 540 closed (E561): F4 is finished at 14 `!important`; the screenshot check is skipped by decision
 
  * **Decision:** the Dashboard / Auto Trade / Settings screenshot check is dropped. The 6 `!important` that compete with Tailwind colour utilities (input colour, input background, `.h-1.5`, manual-trade focus ring, main panel background and border) stay as they are; the other 8 stay as deliberate. F4 ends at 17 -> 14 (ratchet 14 in `cssClean.test.mjs`).

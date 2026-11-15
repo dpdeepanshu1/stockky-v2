@@ -47,9 +47,9 @@ export interface HistoryDay {
 }
 export interface HistoryView { days: HistoryDay[]; count: number; note?: string; runs?: RunLogLine[] }
 /** Round 545 (S5): GET /agent/weekly. */
-export type WeekState = "ran" | "missed" | "pending" | "weekend" | "off";
+export type WeekState = "ran" | "missed" | "pending" | "weekend" | "off" | "not_started";
 export interface WeekDay { date: string; weekday: string; state: WeekState; ideas: number; dropped: number; queued_n: number; file?: string | null }
-export interface WeeklyView { from: string; to: string; days: WeekDay[]; weekdays: number; weekdays_ran: number; missed: string[]; ideas: number; outcomes: Record<string, number>; top_switches: { switch: string; n: number }[]; scoreboard: AgentScoreboard; summary: string }
+export interface WeeklyView { from: string; to: string; days: WeekDay[]; weekdays: number; weekdays_ran: number; missed: string[]; first_day?: string; not_started?: number; ideas: number; outcomes: Record<string, number>; top_switches: { switch: string; n: number }[]; scoreboard: AgentScoreboard; summary: string }
 
 /* ---------- the side list ---------- */
 export type SiSection = "today" | "ideas" | "changes" | "controls" | "health";
@@ -224,8 +224,8 @@ export function runLogText(r: RunLogLine): string {
   const n = r.ideas ?? 0;
   return `${when} · ${kind} · ${r.source || "no LLM answer"} · ${n} idea${n === 1 ? "" : "s"}, ${r.dropped ?? 0} dropped, ${r.queued ?? 0} queued${r.errors ? `, ${r.errors} error(s)` : ""}`;
 }
-const WEEK_MARK: Record<string, string> = { ran: "✓", missed: "✕", pending: "…", weekend: "–", off: "⊘" };
-const WEEK_TEXT: Record<string, string> = { ran: "ran", missed: "MISSED", pending: "not yet", weekend: "weekend", off: "agent off" };
+const WEEK_MARK: Record<string, string> = { ran: "✓", missed: "✕", pending: "…", weekend: "–", off: "⊘", not_started: "·" };
+const WEEK_TEXT: Record<string, string> = { ran: "ran", missed: "MISSED", pending: "not yet", weekend: "weekend", off: "agent off", not_started: "agent not started" };
 export const weekMark = (s: string): string => WEEK_MARK[s] || "?";
 export const weekText = (s: string): string => WEEK_TEXT[s] || s;
 export const weekTone = (s: string): Tone => (s === "ran" ? "good" : s === "missed" ? "bad" : s === "pending" ? "warn" : undefined);

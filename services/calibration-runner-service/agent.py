@@ -1276,13 +1276,16 @@ class Agent:
         return out.getvalue()
 
     def weekly(self, now: Optional[float] = None) -> Dict[str, Any]:
-        """The last 7 days (today included, IST): per day ran / missed / pending / weekend / off, the ideas and their outcomes, the switches named most. Never guesses a day it cannot tell."""
+        """The last 7 days (today included, IST): per day ran / missed / pending / weekend / off / not_started (before the agent's first saved run, round 549), the ideas and their outcomes, the switches named most. Never guesses a day it cannot tell."""
         ts = now if now is not None else self.now()
         t = datetime.fromtimestamp(ts, IST)
         mins = t.hour * 60 + t.minute
         hist = {d["date"]: d for d in self.history(120)["days"] if not d.get("unreadable")}
         ran = {r.get("day") for r in self.run_log(RUNLOG_KEEP) if r.get("ok", True)} | set(hist)
         off = self.eff_mode() == "off"
+        # round 549 (W1): the count starts at the first day the agent left any trace (a day file or a run-log line). Earlier days are "not_started", never MISSED.
+        # With no trace at all the count starts today, so a first weekday that passes with nothing saved can still be MISSED.
+        first = min(ran) if ran else t.strftime("%Y-%m-%d")
         days: List[Dict[str, Any]] = []
         outcomes: Dict[str, int] = {}
         names: Dict[str, int] = {}
@@ -1292,6 +1295,8 @@ class Agent:
             h = hist.get(ds) or {}
             if ds in ran:
                 state = "ran"
+            elif ds < first:
+                state = "not_started"
             elif d.weekday() >= 5:
                 state = "weekend"
             elif off:
@@ -1307,15 +1312,16 @@ class Agent:
                 names[str(i.get("switch"))] = names.get(str(i.get("switch")), 0) + 1
             days.append({"date": ds, "weekday": WEEK_DAYS[d.weekday()], "state": state, "ideas": len(ideas), "dropped": len(h.get("dropped") or []), "queued_n": int(h.get("queued_n") or 0),
                          "file": h.get("file")})
-        weekdays = [x for x in days if x["state"] != "weekend"]
+        weekdays = [x for x in days if x["state"] not in ("weekend", "not_started")]
         ran_n = sum(1 for x in weekdays if x["state"] == "ran")
         missed = [f"{x['weekday']} {x['date'][5:]}" for x in days if x["state"] == "missed"]
         n_ideas = sum(x["ideas"] for x in days)
         tally = ", ".join(f"{outcomes[k]} {k.replace('_', ' ')}" for k in ("survived", "not_confirmed", "contradicted", "unclear", "no_result", "pending") if outcomes.get(k))
         top = sorted(({"switch": k, "n": v} for k, v in names.items()), key=lambda x: (-x["n"], x["switch"]))[:5]
-        summary = (f"Last 7 days: the agent ran on {ran_n} of {len(weekdays)} day(s) it counted" + (f"; missed: {', '.join(missed)}" if missed else "") + ". "
+        n_before = sum(1 for x in days if x["state"] == "not_started" and WEEK_DAYS.index(x["weekday"]) < 5)
+        summary = (f"Last 7 days: the agent ran on {ran_n} of {len(weekdays)} day(s) it counted" + (f"; missed: {', '.join(missed)}" if missed else "") + (f"; agent not started yet on {n_before} earlier weekday(s), not counted" if n_before else "") + ". "
                    + (f"{n_ideas} idea(s): {tally}." if n_ideas else "No ideas were saved.") + (f" Named most: {top[0]['switch']} ({top[0]['n']}x)." if top and top[0]["n"] > 1 else ""))
-        return {"from": days[0]["date"], "to": days[-1]["date"], "days": days, "weekdays": len(weekdays), "weekdays_ran": ran_n, "missed": missed, "ideas": n_ideas, "outcomes": outcomes,
+        return {"from": days[0]["date"], "to": days[-1]["date"], "days": days, "weekdays": len(weekdays), "weekdays_ran": ran_n, "missed": missed, "first_day": first, "not_started": n_before, "ideas": n_ideas, "outcomes": outcomes,
                 "top_switches": top, "scoreboard": self.scoreboard(), "summary": summary}
 
     # -- what the API shows (never a key)

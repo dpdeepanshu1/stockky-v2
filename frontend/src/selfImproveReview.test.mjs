@@ -43,6 +43,8 @@ assert.equal(v.weekDayLine({ date: "2026-11-16", weekday: "Mon", state: "ran", i
 assert.equal(v.weekDayLine({ date: "2026-11-18", weekday: "Wed", state: "missed", ideas: 0, dropped: 0, queued_n: 0 }), "Wed 11-18: ✕ MISSED");
 assert.equal(v.weekDayLine({ date: "2026-11-14", weekday: "Sat", state: "weekend", ideas: 0, dropped: 0, queued_n: 0 }), "Sat 11-14: – weekend");
 assert.equal(v.weekMark("junk"), "?");
+assert.equal(v.weekDayLine({ date: "2026-11-11", weekday: "Wed", state: "not_started", ideas: 0, dropped: 0, queued_n: 0 }), "Wed 11-11: · agent not started");
+assert.equal(v.weekTone("not_started"), undefined, "days before the agent existed are neutral, never red");
 ok("weekly: a mark, words and tone per state; a day line reads plainly");
 
 /* ---------- source checks ---------- */

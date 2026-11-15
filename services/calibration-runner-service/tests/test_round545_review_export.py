@@ -91,7 +91,7 @@ def test_weekly_names_each_day_ran_missed_weekend_or_pending():
     w = ag.weekly(at(20, 18, 0))                                   # Friday evening: Sat 14 .. Fri 20
     st = {x["date"][-2:]: x["state"] for x in w["days"]}
     assert [x["date"] for x in w["days"]][0] == "2026-11-14" and w["to"] == "2026-11-20" and len(w["days"]) == 7
-    assert st == {"14": "weekend", "15": "weekend", "16": "ran", "17": "ran", "18": "missed", "19": "ran", "20": "missed"}
+    assert st == {"14": "not_started", "15": "not_started", "16": "ran", "17": "ran", "18": "missed", "19": "ran", "20": "missed"}
     assert w["weekdays"] == 5 and w["weekdays_ran"] == 3 and w["missed"] == ["Wed 11-18", "Fri 11-20"]
     assert "3 of 5" in w["summary"] and "missed: Wed 11-18, Fri 11-20" in w["summary"] and "1 idea(s): 1 pending" in w["summary"]
     early = ag.weekly(at(20, 16, 0))
@@ -126,10 +126,11 @@ def test_weekly_counts_outcomes_and_names_the_most_repeated_switch():
 def test_weekly_with_the_agent_off_says_off_not_missed_and_a_fresh_install_is_honest():
     ag, d = _new(mode="off")
     w = ag.weekly(at(20, 18, 0))
-    assert {x["state"] for x in w["days"]} == {"weekend", "off"} and w["missed"] == [] and "No ideas were saved" in w["summary"]
+    assert {x["state"] for x in w["days"]} == {"not_started", "off"} and w["missed"] == [] and "No ideas were saved" in w["summary"]   # round 549: days before the first trace are not_started
     ag2, _ = _new()
     w2 = ag2.weekly(at(20, 18, 0))
-    assert w2["weekdays_ran"] == 0 and w2["ideas"] == 0 and len(w2["missed"]) == 5 and w2["scoreboard"]["ideas"] == 0
+    assert w2["weekdays_ran"] == 0 and w2["ideas"] == 0 and w2["missed"] == ["Fri 11-20"] and w2["scoreboard"]["ideas"] == 0, "a fresh install counts from today only"
+    assert [x["state"] for x in w2["days"]][:6] == ["not_started"] * 6
 
 
 def test_the_new_methods_and_routes_only_read():
@@ -152,3 +153,26 @@ if __name__ == "__main__":
             v()
             n += 1
     print(f"{n} tests passed")
+
+
+# ------------------------------------------------------------------------------------------------------------------------------ round 549 (W1)
+def test_w1_days_before_the_first_saved_run_are_not_started_not_missed():
+    """The 15 Nov log: first run Sun 15 Nov; the weekly review called Mon 11-09 .. Fri 11-13 MISSED. Now they are not_started and not counted."""
+    ag, d = _new()
+    _day_file(d, "2026-11-15", [_idea("STRUCTURE_EXIT_MODE")])
+    w = ag.weekly(at(16, 18, 0))                                   # Monday evening: Tue 10 .. Mon 16
+    st = {x["date"][-2:]: x["state"] for x in w["days"]}
+    assert st == {"10": "not_started", "11": "not_started", "12": "not_started", "13": "not_started", "14": "not_started", "15": "ran", "16": "missed"}
+    assert w["first_day"] == "2026-11-15" and w["not_started"] == 4 and w["weekdays"] == 2 and w["weekdays_ran"] == 1 and w["missed"] == ["Mon 11-16"]
+    assert "1 of 2" in w["summary"] and "not started yet on 4 earlier weekday(s)" in w["summary"] and "Tue 11-10" not in w["summary"]
+    json.dumps(w)
+
+
+def test_w1_a_run_log_line_alone_sets_the_start_and_later_gaps_still_count_as_missed():
+    ag, d = _new()
+    ag.now = lambda: at(17, 17, 0)
+    ag._runlog_add({"ok": True, "trigger": "manual"})
+    w = ag.weekly(at(20, 18, 0))
+    st = {x["date"][-2:]: x["state"] for x in w["days"]}
+    assert st["16"] == "not_started" and st["17"] == "ran" and st["18"] == "missed" and st["19"] == "missed" and st["20"] == "missed"
+    assert w["missed"] == ["Wed 11-18", "Thu 11-19", "Fri 11-20"]

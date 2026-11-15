@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from orders import candidate_outcomes as co
@@ -48,7 +49,7 @@ def test_no_bars_or_last_bar_only():
 
 def test_label_rows_dedupes_and_counts():
     bars = _bars([100.0] + [101.0] * 70)
-    day = co.datetime.utcfromtimestamp(T0 + 19800).strftime("%Y-%m-%d")
+    day = co.datetime.fromtimestamp(T0 + 19800, timezone.utc).strftime("%Y-%m-%d")
     rows = [{"symbol": "AAA", "decision": "SKIPPED", "reason": "RANGE_GATE:NEAR_DAY_HIGH:x", "created_ts": T0},
             {"symbol": "AAA", "decision": "SKIPPED", "reason": "RANGE_GATE:NEAR_DAY_HIGH:y", "created_ts": T0 + 30},      # same gate, same 5-min bucket
             {"symbol": "BBB", "decision": "ENTERED", "reason": None, "created_ts": T0}]
@@ -59,7 +60,7 @@ def test_label_rows_dedupes_and_counts():
 
 def test_run_day_saves_a_file_and_reads_bar_files():
     with tempfile.TemporaryDirectory() as d:
-        day = co.datetime.utcfromtimestamp(T0 + 19800).strftime("%Y-%m-%d")
+        day = co.datetime.fromtimestamp(T0 + 19800, timezone.utc).strftime("%Y-%m-%d")
         os.makedirs(os.path.join(d, day))
         json.dump({"bars": _bars([100.0] + [102.0] * 70)}, open(os.path.join(d, day, "AAA.json"), "w"))
         out = co.run_day([{"symbol": "AAA", "decision": "SKIPPED", "reason": "X_GATE", "created_ts": T0}], d, day)

@@ -660,6 +660,8 @@ scripts/test_round572_swing_snapshot.py
 scripts/test_round573_swing_shadow_report.py
 scripts/test_round574_records_report_stops.py
 scripts/test_round575_exit_followup_stops.py
+scripts/test_round576_service_advice_inputs.py
+scripts/test_round577_test_totp_secrets.py
 scripts/test_service_onoff_advice.py
 scripts/test_setup_engine.py
 scripts/test_short_exit_paths.py
@@ -2314,6 +2316,7 @@ services/position-stocks-service/tests/test_round227_entry_stage_marks.py
 services/position-stocks-service/tests/test_round242_capital_board.py
 services/position-stocks-service/tests/test_round551_sector_traded_value.py
 services/position-stocks-service/tests/test_round559_liquidity_badge.py
+services/position-stocks-service/tests/test_round579_candidate_log_utcnow.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py

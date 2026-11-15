@@ -106,7 +106,7 @@ OTHER_KEY = Fernet.generate_key().decode()
 
 CLIENT_ID = "1100123456"
 PIN = "987654"
-TOTP_SECRET = "JBSWY3DPEHPK3PXP"  # valid base32, the pyotp docs' example secret
+TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"  # valid base32, 160 bits (newer pyotp refuses secrets under 112 bits; the docs example is only 80)
 TOKEN = "eyJ0b2tlbi1mcm9tLWRoYW4ifQ.SECRET-ACCESS-TOKEN"
 
 UTC = timezone.utc

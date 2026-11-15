@@ -22,7 +22,7 @@ import queue
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
@@ -68,6 +68,12 @@ def is_duplicate(symbol: str, decision: str, reason: str, now: Optional[float] =
     return False
 
 
+def _utcnow() -> datetime:
+    """Naive UTC 'now', the same value the deprecated utcnow() call gave (the created_at column is naive UTC and the purge cutoff is compared with
+    it). The old call warns on every use from Python 3.12 (round 579)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def submit(row: Dict[str, Any]) -> bool:
     """Queue one SKIPPED row (a dict of ScalpCandidateLog column values). True when queued or de-duplicated away;
     False when it could not be queued (caller may then write it the old way)."""
@@ -76,7 +82,7 @@ def submit(row: Dict[str, Any]) -> bool:
             return True
         _ensure_thread()
         try:
-            _q.put_nowait(dict(row, created_at=datetime.utcnow()))
+            _q.put_nowait(dict(row, created_at=_utcnow()))
         except queue.Full:
             stats["dropped_full"] += 1
             return False
@@ -190,7 +196,7 @@ def purge_old(db: Any, now: Optional[datetime] = None, chunk: int = 5000, max_ch
     try:
         import models
         M = models.ScalpCandidateLog
-        cutoff = (now or datetime.utcnow()) - timedelta(days=days)
+        cutoff = (now or _utcnow()) - timedelta(days=days)
         for _ in range(max_chunks):
             ids = [r[0] for r in db.query(M.id).filter(M.created_at < cutoff).order_by(M.id).limit(chunk).all()]
             if not ids:

@@ -1,7 +1,7 @@
 """Batch 1 (2026-11-02): candidate log writer - de-dup, queue, batch write, retention, rollback flag."""
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -72,7 +72,7 @@ def _mem_factory(monkeypatch):
 def test_write_batch_inserts_all_rows_in_one_commit(monkeypatch):
     import models
     factory = _mem_factory(monkeypatch)
-    rows = [dict(_row(f"S{i}", f"G{i}:x"), created_at=datetime.utcnow()) for i in range(5)]
+    rows = [dict(_row(f"S{i}", f"G{i}:x"), created_at=datetime.now(timezone.utc).replace(tzinfo=None)) for i in range(5)]
     assert clw.write_batch(rows) == 5
     s = factory()
     assert s.query(models.ScalpCandidateLog).count() == 5
@@ -101,7 +101,7 @@ def test_purge_deletes_only_old_rows_in_chunks(monkeypatch):
     import models
     factory = _mem_factory(monkeypatch)
     s = factory()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)      # naive UTC (round 579: utcnow() is deprecated)
     for i in range(12):
         s.add(models.ScalpCandidateLog(symbol=f"O{i}", window_source="5m", pct_change=1.0, decision="SKIPPED", reason="x",
                                        created_at=now - timedelta(days=40)))

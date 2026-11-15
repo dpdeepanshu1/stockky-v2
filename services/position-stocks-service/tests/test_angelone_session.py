@@ -38,7 +38,7 @@ import pytest
 os.environ["ANGELONE_CLIENT_ID"] = "TEST_CLIENT"
 os.environ["ANGELONE_MPIN"] = "1234"
 os.environ["ANGELONE_API_KEY"] = "TESTAPIKEY"
-os.environ["ANGELONE_TOTP_SECRET"] = "JBSWY3DPEHPK3PXP"  # valid base32 for pyotp
+os.environ["ANGELONE_TOTP_SECRET"] = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"  # valid base32 for pyotp
 os.environ.setdefault("ANGELONE_STATIC_IP", "")
 
 import feed.angelone_session as aosess
@@ -53,7 +53,7 @@ def _make_session(**kwargs) -> AngelOneSession:
     sess.client_id   = kwargs.get("client_id", "TEST_CLIENT")
     sess.mpin        = kwargs.get("mpin", "1234")
     sess.api_key     = kwargs.get("api_key", "TESTAPIKEY")
-    sess.totp_secret = kwargs.get("totp_secret", "JBSWY3DPEHPK3PXP")
+    sess.totp_secret = kwargs.get("totp_secret", "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
     sess.token       = kwargs.get("token", None)
     sess.feed_token  = kwargs.get("feed_token", None)
     sess.token_expiry = kwargs.get("token_expiry", None)

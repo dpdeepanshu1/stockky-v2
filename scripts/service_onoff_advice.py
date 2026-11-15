@@ -23,7 +23,9 @@ It only RECOMMENDS. It never changes a switch, an order or a service. Turning a 
 A trading day that is still in progress (run before 15:45 IST on a weekday) is NOT counted: its trades are shown in a NOTE, but they do not make a
 losing day, a streak or a trading-day count (--include-today overrides). --since YYYY-MM-DD judges only the days from that date on (use it after you change
 switches, so the old setup does not count against the new one); the 'NOT ENOUGH DATA' limits still apply, so a short window gives no call.
-Exit 0 = report written, nothing to act on; 1 = at least one service is TURN OFF, or no trades were found. Stdlib only.
+Exit 0 = report written, nothing to act on; 1 = at least one service is TURN OFF, or no trades were found; 2 = an input you named could not be read
+(missing or corrupt --rt-file / --ps-file / --from-csv, a bad --as-of): no report is made, because a ranking built from half the inputs would be wrong
+(round 576; before, that was a traceback, and a traceback also exits 1, the same code as TURN OFF). Stdlib only.
 """
 from __future__ import annotations
 
@@ -46,10 +48,26 @@ LABEL = {"real-trade": "real-trade-service", "position-stocks": "position-stocks
 
 
 # ---------------------------------------------------------------- input
+class InputError(Exception):
+    """A file the person named could not be read. Ends the run with exit 2 and no report (round 576)."""
+
+
+def read_json_file(path: str) -> Any:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as e:
+        raise InputError(f"cannot read {path}: {type(e).__name__}: {e}") from e
+
+
 def rows_from_csv(path: str) -> List[Dict[str, Any]]:
     """Rows from the daily_trades.csv written by daily_trade_report.py (times are IST 'YYYY-MM-DD HH:MM')."""
     out: List[Dict[str, Any]] = []
-    with open(path, encoding="utf-8", newline="") as fh:
+    try:
+        fh = open(path, encoding="utf-8", newline="")
+    except OSError as e:
+        raise InputError(f"cannot read {path}: {type(e).__name__}: {e}") from e
+    with fh:
         for r in csv.DictReader(fh):
             try:
                 o = datetime.strptime(r["entry_ist"], "%Y-%m-%d %H:%M").replace(tzinfo=IST)
@@ -194,7 +212,7 @@ def load_rows(a: argparse.Namespace, notes: List[str]) -> List[Dict[str, Any]]:
         rows += rows_from_csv(f)
     if a.rt_file:
         for f in a.rt_file:
-            rows += d.rows_from_rt(json.load(open(f, encoding="utf-8")), a.origin)
+            rows += d.rows_from_rt(read_json_file(f), a.origin)
     elif not a.no_rt and not a.from_csv:
         try:
             if not a.token:
@@ -205,7 +223,7 @@ def load_rows(a: argparse.Namespace, notes: List[str]) -> List[Dict[str, Any]]:
             notes.append(f"real-trade: could not read ({type(e).__name__}: {e})")
     if a.ps_file:
         for f in a.ps_file:
-            rows += d.rows_from_ps(json.load(open(f, encoding="utf-8")))
+            rows += d.rows_from_ps(read_json_file(f))
     elif not a.no_ps and not a.from_csv:
         try:
             rows += d.rows_from_ps(d._get(f"{a.ps_url.rstrip('/')}/trades/history?limit=1000"))
@@ -239,7 +257,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--as-of", default="", help="treat this ISO time as 'now' (tests / re-running an old export)")
     a = ap.parse_args(argv)
     notes: List[str] = []
-    rows = load_rows(a, notes)
+    if a.as_of and d.parse_ts(a.as_of) is None:
+        print(f"--as-of must be an ISO time like 2026-11-16T16:00:00+05:30, got {a.as_of!r}", file=sys.stderr)
+        return 2
+    try:
+        rows = load_rows(a, notes)
+    except InputError as e:
+        print(f"service_onoff_advice: {e}. No report made.", file=sys.stderr)
+        return 2
     now = (d.parse_ts(a.as_of) or datetime.now(IST)).astimezone(IST)
     cutoff = now - timedelta(days=max(1, a.days))
     rows = [r for r in rows if r["exit"] >= cutoff and (a.origin == "all" or r.get("origin", "system") == a.origin)]
@@ -260,18 +285,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         text = "SERVICE ON / OFF ADVICE\nNo closed trades found in the window: no recommendation.\n" + "\n".join(header) + "\n"
         print(text)
         if a.out:
-            open(a.out, "w", encoding="utf-8").write(text)
+            Path(a.out).write_text(text, encoding="utf-8")
         return 1
     th = {"min_n": a.min_n, "min_days": a.min_days, "pf_off": a.pf_off, "pf_keep": a.pf_keep, "streak_off": a.streak_off}
     adv = advise(rows, **th)
     text = build_text(adv, a.days, header, th)
     print(text)
     if a.out:
-        open(a.out, "w", encoding="utf-8").write(text)
+        Path(a.out).write_text(text, encoding="utf-8")
     if a.json:
         slim = {"generated": now.isoformat(), "days": a.days, "thresholds": th, "better": adv["better"], "overlap": adv["overlap"],
                 "services": {s: {k: v for k, v in r.items()} for s, r in adv["services"].items()}}
-        open(a.json, "w", encoding="utf-8").write(json.dumps(slim, indent=2))
+        Path(a.json).write_text(json.dumps(slim, indent=2), encoding="utf-8")
     return 1 if any(r["verdict"] == OFF for r in adv["services"].values()) else 0
 
 

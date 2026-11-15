@@ -432,7 +432,7 @@ class _Client:
 
 def _session(monkeypatch, resp=None):
     s = ac.AngelOneSession()
-    s.client_id, s.mpin, s.api_key, s.totp_secret = "C1", "1234", "KEY", "JBSWY3DPEHPK3PXP"
+    s.client_id, s.mpin, s.api_key, s.totp_secret = "C1", "1234", "KEY", "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
     s.token = "tok"
     s.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
     monkeypatch.setattr(ac, "_resolve_client_public_ip", lambda: "1.2.3.4")

@@ -84,9 +84,9 @@ def _configured_session(monkeypatch) -> ac.AngelOneSession:
     monkeypatch.setenv("ANGELONE_CLIENT_ID", "C1")
     monkeypatch.setenv("ANGELONE_MPIN", "1234")
     monkeypatch.setenv("ANGELONE_API_KEY", "APIKEY")
-    monkeypatch.setenv("ANGELONE_TOTP_SECRET", "JBSWY3DPEHPK3PXP")
+    monkeypatch.setenv("ANGELONE_TOTP_SECRET", "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
     s.client_id = "C1"; s.mpin = "1234"; s.api_key = "APIKEY"
-    s.totp_secret = "JBSWY3DPEHPK3PXP"
+    s.totp_secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
     return s
 
 

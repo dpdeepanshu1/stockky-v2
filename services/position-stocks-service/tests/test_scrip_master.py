@@ -41,8 +41,17 @@ import feed.scrip_master as sm
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
+def _join_refresh_threads(timeout: float = 5.0) -> None:
+    """round 578: wait for any background refresh a test started. It holds _load_lock and releases it in its own finally; a reset that freed the
+    lock first made that release raise 'release unlocked lock' later (a CI warning) and let the late thread overwrite the NEXT test's token map."""
+    for th in list(threading.enumerate()):
+        if th.name == "scrip-master-refresh" and th is not threading.current_thread():
+            th.join(timeout)
+
+
 def _reset(monkeypatch=None):
     """Reset all module-level state between tests."""
+    _join_refresh_threads()
     sm._token_map = {}
     sm._loaded_at = 0.0
     sm._fail_count = 0
@@ -418,10 +427,14 @@ class TestEnsureLoaded:
         _reset()
         _seed_map({"OLD": "0"})
         sm._loaded_at = time.time() - sm.REFRESH_INTERVAL_S - 10
+        monkeypatch.setattr(sm, "_BG_START_DELAY_S", 0.0)      # round 578: no staggered boot wait, so the thread ends inside this test
         sm.ensure_loaded()
-        # Background thread may not have finished yet; just ensure no exception
-        # and that the old map is still being served (stale-while-revalidate)
+        # The old map is still served right after the call (stale-while-revalidate) ...
         assert sm._token_map  # map not cleared
+        # ... and the background refresh finishes inside this test, frees the lock and swaps in the new map.
+        _join_refresh_threads()
+        assert not sm._load_lock.locked()
+        assert sm._token_map == {"NEW": "2"}
 
     def test_warm_from_disk_called_on_cold_start(self, monkeypatch, tmp_path):
         cache = str(tmp_path / "warm.json")

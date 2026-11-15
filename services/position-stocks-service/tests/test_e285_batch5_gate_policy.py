@@ -168,7 +168,7 @@ def _fill(factory, gate_reason, n, gains, decision="SKIPPED", days=6, syms=25):
     for i in range(n):
         day = (datetime(2026, 10, 27) + timedelta(days=i % days)).strftime("%Y-%m-%d")
         s.add(models.ScalpCandidateLog(symbol=f"S{i % syms:02d}", window_source="5m", pct_change=2.0, decision=decision, reason=gate_reason,
-                                       created_at=datetime.utcfromtimestamp(_ts(day))))
+                                       created_at=datetime.fromtimestamp(_ts(day), timezone.utc).replace(tzinfo=None)))
     s.commit()
     s.close()
     return lambda sym, d: _bars(d, gains(d))

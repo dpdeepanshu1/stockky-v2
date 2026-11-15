@@ -10,8 +10,8 @@ import { AiOrb } from "../../ui/AiOrb";
 import { Skeleton } from "../../ui/motion";
 import type { Mode } from "../types";
 import { entryReason } from "../../../setupView";   // E285 round 104: Entry reason on each closed trade
-import {
 import { Button } from "../../kit";   // round 537
+import {
   HISTORY_RANGES, daysFor, equityCurve, heldLabel, inRange, insights, newestFirst, pctLabel, pnlOf, priceLabel,
   reasonLabel, signedInr, summarize, toCsv, type HistoryRange,
 } from "../history";

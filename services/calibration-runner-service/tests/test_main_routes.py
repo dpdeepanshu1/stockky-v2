@@ -92,3 +92,41 @@ def test_agent_routes_need_login_and_never_show_a_key(client):
     assert d["mode"] in ("off", "report", "propose") and set(d["keys"]) == {"gemini", "groq"} and all(isinstance(v, bool) for v in d["keys"].values())
     assert "BROKER_STOP_ENABLED" not in d["allow_list"] and "KRONOS_GATE_MODE" in d["allow_list"]
     assert client.post("/agent/run", headers=H(), json={"mode": "apply"}).status_code == 400
+
+
+def test_self_improve_routes_need_login_validate_and_never_set_a_switch(client):
+    """Round 541 (S1): /agent/loop, /agent/history, /agent/settings are admin-only; settings are bounded; propose needs confirm; a change is saved and can be reset.
+    Not run in the authoring sandbox (no fastapi): the same logic is covered offline by test_round541_self_improve.py."""
+    for method, path in (("get", "/agent/loop"), ("get", "/agent/history"), ("get", "/agent/settings"), ("post", "/agent/settings")):
+        assert getattr(client, method)(path).status_code == 401, path
+    loop = client.get("/agent/loop", headers=H())
+    assert loop.status_code == 200, loop.text
+    d = loop.json()
+    assert d["banner"]["state"] in ("off", "dry_run", "live") and [c["id"] for c in d["chain"]] == ["daily_close", "agent", "queued_tests", "autocalib"]
+    assert all(c["state"] in ("done", "waiting", "skipped", "failed", "not_due", "unknown") for c in d["chain"]) and d["schedule"]["slots"]
+    hist = client.get("/agent/history?limit=5", headers=H())
+    assert hist.status_code == 200 and "days" in hist.json() and client.get("/agent/history?limit=0", headers=H()).status_code == 422
+    assert client.get("/agent/settings", headers=H()).json()["bounds"]["max_ideas"] == [1, 10]
+    url = "/agent/settings"
+    assert client.post(url, headers=H(), json={"mode": "apply"}).status_code == 400
+    assert client.post(url, headers=H(), json={"mode": "propose"}).status_code == 400, "propose needs confirm"
+    assert client.post(url, headers=H(), json={"max_ideas": 11}).status_code == 400 and client.post(url, headers=H(), json={"run_after": "10:00"}).status_code == 400
+    ok = client.post(url, headers=H(), json={"max_ideas": 4})
+    assert ok.status_code == 200 and ok.json()["values"]["max_ideas"] == 4 and ok.json()["source"]["max_ideas"] == "saved" and ok.json()["audit"][0]["by"] == "tester"
+    back = client.post(url, headers=H(), json={"reset": True})
+    assert back.status_code == 200 and back.json()["saved"] == {}
+
+
+def test_autocalib_settings_route_audits_who_changed_what(client):
+    """Round 543 (S3): PUT /autocalib/settings needs login, still validates, and a real change shows up in GET /autocalib/status as one audit line by the caller."""
+    url = "/autocalib/settings"
+    assert client.put(url, json={"dry_run": True}).status_code == 401
+    assert client.put(url, headers=H(), json={"pinned": ["BROKER_STOP_ENABLED"]}).status_code == 400
+    before = len(client.get("/autocalib/status?coverage=false", headers=H()).json()["audit"])
+    cur = client.get("/autocalib/status?coverage=false", headers=H()).json()["settings"]["dry_run"]
+    ok = client.put(url, headers=H(), json={"dry_run": not cur})
+    assert ok.status_code == 200 and ok.json()["dry_run"] is (not cur)
+    st = client.get("/autocalib/status?coverage=false", headers=H()).json()
+    assert len(st["audit"]) == before + 1 and st["audit"][0]["by"] == "tester" and st["audit"][0]["changes"]["dry_run"] == {"from": cur, "to": not cur}
+    client.put(url, headers=H(), json={"dry_run": cur})                  # put it back
+    assert "coverage" not in st and "protected" in st

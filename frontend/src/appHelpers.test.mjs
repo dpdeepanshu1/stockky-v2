@@ -102,7 +102,7 @@ assert.match(tc, /export const loadTrades = /, "loadTrades is exported (App fire
 for (const piece of ['PageHeader title="Alerts"', 'PageHeader title="Training Lab"', 'PageHeader title="Paper Trades"', 'PageHeader title="Data Feed"',
                      'PageHeader title="Hot Picks"', 'PageHeader title="Surprise Momentum"', 'PageHeader title="IPO Tracker"', 'AdminGate title="Auto Trade"',
                      'AdminGate title="Position Stocks"', 'AdminGate title="Real Money Calibration"', "<SettingsPage", 'PageHeader title="Watchlist"',
-                     "<DashboardView {...dashboard} />", "<RealAutoTrade />", "<PositionStocksTab />", "<CalibrationControlTab />", "<DataHealthAudit />"]) {
+                     "<DashboardView {...dashboard} />", "<RealAutoTrade />", "<PositionStocksTab />", "<CalibrationControlTab />", "<DataHealthAudit />", 'AdminGate title="Self Improve System"', "<SelfImproveTab />"]) {
   assert.ok(tc.includes(piece), `TabContent keeps ${piece}`);
 }
 // every lazy page is still its own chunk and resolves from components/app/
@@ -110,7 +110,7 @@ for (const m of tc.matchAll(/lazy\(\(\) => import\("([^"]+)"\)\)|import\("([^"]+
   const target = join(here, "components/app", m[1] || m[2]);
   assert.ok(["", ".ts", ".tsx"].some((e) => existsSync(target + e)), `lazy import ${m[1] || m[2]} resolves`);
 }
-assert.equal([...tc.matchAll(/= lazy\(/g)].length, 12, "12 lazy pages (the 11 before + F&O Options) (Trades via loadTrades)");
+assert.equal([...tc.matchAll(/= lazy\(/g)].length, 13, "13 lazy pages (the 12 before + Self Improve System, E567) (Trades via loadTrades)");
 for (const gone of ["lazy(", 'PageHeader title=', "<AdminGate", "<SettingsPage", "<RealAutoTrade", "<CalibrationControlTab"]) {
   assert.ok(!app.includes(gone), `App.tsx no longer holds ${gone}`);
 }

@@ -87,6 +87,8 @@ frontend/src/calibrationTrades.ts
 frontend/src/chargesRates.ts
 frontend/src/chartContext.test.mjs
 frontend/src/chartContext.ts
+frontend/src/chunkReload.test.mjs
+frontend/src/chunkReload.ts
 frontend/src/components/AdminGate.tsx
 frontend/src/components/AlertsFeed.tsx
 frontend/src/components/ApprovalsPanel.tsx
@@ -121,6 +123,7 @@ frontend/src/components/RealAutoTrade.tsx
 frontend/src/components/RowSpark.tsx
 frontend/src/components/ScanPanel.tsx
 frontend/src/components/ScanPanel_UniverseButton_Snippet.tsx
+frontend/src/components/SelfImproveTab.tsx
 frontend/src/components/ServiceManager.tsx
 frontend/src/components/SignalStream.tsx
 frontend/src/components/StockCandleBlock.tsx
@@ -271,6 +274,13 @@ frontend/src/components/realAuto/tabs/PositionsTab.tsx
 frontend/src/components/realAuto/tabs/WatchlistTab.tsx
 frontend/src/components/realAuto/types.ts
 frontend/src/components/rowSpark.ts
+frontend/src/components/selfImprove/ChangesPanel.tsx
+frontend/src/components/selfImprove/ControlsPanel.tsx
+frontend/src/components/selfImprove/HealthPanel.tsx
+frontend/src/components/selfImprove/IdeasPanel.tsx
+frontend/src/components/selfImprove/SiNav.tsx
+frontend/src/components/selfImprove/TodayPanel.tsx
+frontend/src/components/selfImprove/useArm.ts
 frontend/src/components/serviceView.ts
 frontend/src/components/session/PremarketPlanCard.tsx
 frontend/src/components/session/SessionRail.tsx
@@ -337,14 +347,11 @@ frontend/src/hooks/useBackendStatus.ts
 frontend/src/hooks/useScanRunner.ts
 frontend/src/hooks/useWatchlist.ts
 frontend/src/hotView.test.mjs
+frontend/src/importSyntax.test.mjs
 frontend/src/ipoView.test.mjs
 frontend/src/kit.test.mjs
 frontend/src/labels.test.mjs
 frontend/src/lightContrast.test.mjs
-frontend/src/paletteContrast.test.mjs
-frontend/src/importSyntax.test.mjs
-frontend/src/chunkReload.ts
-frontend/src/chunkReload.test.mjs
 frontend/src/liveStateView.test.mjs
 frontend/src/liveStateView.ts
 frontend/src/main.tsx
@@ -353,6 +360,7 @@ frontend/src/markets.test.mjs
 frontend/src/marketsFilter.ts
 frontend/src/moneyView.test.mjs
 frontend/src/moneyView.ts
+frontend/src/paletteContrast.test.mjs
 frontend/src/paperNet.test.mjs
 frontend/src/paperNet.ts
 frontend/src/popupLayout.test.mjs
@@ -370,6 +378,10 @@ frontend/src/rowSpark.test.mjs
 frontend/src/rtEntryReason.test.mjs
 frontend/src/screenerPresets.test.mjs
 frontend/src/screenerPresets.ts
+frontend/src/selfImprove.test.mjs
+frontend/src/selfImproveControls.test.mjs
+frontend/src/selfImproveControls.ts
+frontend/src/selfImproveView.ts
 frontend/src/sellOrders.test.mjs
 frontend/src/sellOrdersView.ts
 frontend/src/serviceView.test.mjs
@@ -428,6 +440,7 @@ scripts/_intraday_data.py
 scripts/_progress.py
 scripts/_repo_walk.py
 scripts/_robust.py
+scripts/agent_round3.sh
 scripts/analyze_latency_check.py
 scripts/audit_functions.py
 scripts/audit_live_fields.py
@@ -640,9 +653,8 @@ scripts/vm_calibrate.sh
 scripts/vm_docker_recover.sh
 scripts/vm_frontend_check.sh
 scripts/vm_full_check.sh
-scripts/vm_quick_check.sh
-scripts/agent_round3.sh
 scripts/vm_ops.sh
+scripts/vm_quick_check.sh
 scripts/vm_review_evidence.sh
 scripts/vm_runjob.sh
 scripts/vm_structure_report.sh
@@ -1162,6 +1174,7 @@ services/calibration-runner-service/regime/profiles.py
 services/calibration-runner-service/requirements.txt
 services/calibration-runner-service/runner.py
 services/calibration-runner-service/scheduler.py
+services/calibration-runner-service/selfimprove.py
 services/calibration-runner-service/session_keys.py
 services/calibration-runner-service/tests/test_agent.py
 services/calibration-runner-service/tests/test_agent_hardening.py
@@ -1193,6 +1206,8 @@ services/calibration-runner-service/tests/test_round16_audit.py
 services/calibration-runner-service/tests/test_round229_fno_backtests_job.py
 services/calibration-runner-service/tests/test_round298_is_admin.py
 services/calibration-runner-service/tests/test_round512_market_research_job.py
+services/calibration-runner-service/tests/test_round541_self_improve.py
+services/calibration-runner-service/tests/test_round543_autocalib_audit.py
 services/calibration-runner-service/tests/test_runner_engine.py
 services/calibration-runner-service/tests/test_short_history_replay.py
 services/calibration-runner-service/tests/test_weather.py

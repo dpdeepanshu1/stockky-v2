@@ -23,7 +23,15 @@ Round 536 (agent Rounds 4, 5 and 6):
     20 tested and under 5% survived the agent switches ITSELF off (state/agent.json, survives a restart) until you press Resume; 3 answers outside the
     allow-list in 7 days sends a warning;
   * run now (POST /agent/run, the runner page button) is refused while the market-hours guard is on.
-Stdlib only. Offline tests: tests/test_agent.py and tests/test_agent_hardening.py.
+Round 541 (S1 of the Self Improve plan, E566):
+  * settings on disk: mode, run-after time, max ideas and max queued tests are saved in state/agent.json (bounded; the saved value wins over the .env default, a reset
+    goes back to the .env value); every change is one line in agent/audit.jsonl; switching to propose needs confirm=true (the page's second click);
+  * every run carries a plain "breakdown" (how many switches are pinned / without a test result / on hold / would change, and WHY no ideas) near the top of the report,
+    and the auto-calibration state (LIVE / DRY-RUN / OFF) as one line;
+  * an idea check after the validator: an idea is moved to `dropped` (with the reason) when its switch has no usable test result, when it asks for a move that is
+    impossible (an off switch can not go down) or when it points the OPPOSITE way to the switch's own rule. Every kept idea says whether its rule agrees or holds;
+  * history(): one line per saved day (ideas, outcome from the scoreboard, breakdown); next_run(): the next automatic run time.
+Stdlib only. Offline tests: tests/test_agent.py, tests/test_agent_hardening.py and tests/test_round541_self_improve.py.
 """
 from __future__ import annotations
 
@@ -56,6 +64,9 @@ OFFLIST_WARN_N, OFFLIST_WINDOW_D = 3, 7
 STOP_RULE = "self-off after 50 ideas when at least 20 are tested and under 5% survived"
 _BANNED_IN_PROMPT = re.compile(r"(?i)\b(password|passwd|api[_-]?key|secret|client[_-]?id|access[_-]?token|bearer|authorization|account[_-]?(id|no|number)|balance|order[_-]?id|trade[_-]?id|pnl)\b")
 _KEY_SHAPES = (re.compile(r"AIza[0-9A-Za-z_\-]{20,}"), re.compile(r"gsk_[0-9A-Za-z]{16,}"), re.compile(r"\b[A-Za-z0-9_\-]{32,}\b"))
+RUN_AFTER_MIN, RUN_AFTER_MAX = 15 * 60 + 45, 23 * 60  # a SAVED run-after time stays between 15:45 (market guard over) and 23:00 IST (the window ends 23:30)
+IDEAS_BOUNDS, QUEUE_BOUNDS = (1, 10), (0, 6)
+AUDIT_KEEP = 200
 MAX_HEAVY_QUEUE_S = 3600                              # a test that runs longer than this, or needs a download first, is never queued by the agent
 
 SYSTEM_PROMPT = (
@@ -491,6 +502,149 @@ def direction_of(old: Any, new: Any, kind: str = "", choices: Sequence[str] = ()
     return None
 
 
+# ------------------------------------------------------------------------------------------------------------------ round 541: settings, banner, breakdown, idea check
+def parse_hhmm(v: Any) -> Optional[int]:
+    try:
+        hh, mm = [int(x) for x in str(v).strip().split(":")]
+    except Exception:  # noqa: BLE001
+        return None
+    return hh * 60 + mm if 0 <= hh < 24 and 0 <= mm < 60 else None
+
+
+def fmt_hhmm(m: int) -> str:
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def _whole(v: Any, name: str, lo: int, hi: int) -> int:
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        raise ValueError(f"{name} must be a whole number")
+    try:
+        f = float(v)
+        n = int(f)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be a whole number")
+    if n != f:
+        raise ValueError(f"{name} must be a whole number")
+    if n < lo or n > hi:
+        raise ValueError(f"{name} must be between {lo} and {hi}")
+    return n
+
+
+def clean_setting(key: str, v: Any) -> Any:
+    """One agent setting, checked against its bounds (ValueError with a plain sentence otherwise)."""
+    if key == "mode":
+        m = str(v).strip().lower()
+        if m not in MODES:
+            raise ValueError("mode must be off, report or propose")
+        return m
+    if key == "run_after":
+        m = parse_hhmm(v)
+        if m is None or not RUN_AFTER_MIN <= m <= RUN_AFTER_MAX:
+            raise ValueError(f"run_after must be HH:MM IST between {fmt_hhmm(RUN_AFTER_MIN)} and {fmt_hhmm(RUN_AFTER_MAX)}")
+        return fmt_hhmm(m)
+    if key == "max_ideas":
+        return _whole(v, "max_ideas", *IDEAS_BOUNDS)
+    if key == "max_queue":
+        return _whole(v, "max_queue", *QUEUE_BOUNDS)
+    raise ValueError(f"unknown setting: {key}")
+
+
+def banner(settings: Dict[str, Any], allowed: Sequence[str]) -> Dict[str, Any]:
+    """The one line that says whether auto-calibration can change anything: OFF / DRY-RUN / LIVE, and which allowed switches it may touch."""
+    pinned = set(settings.get("pinned") or [])
+    free = sorted(k for k in allowed if k not in pinned)
+    if not settings.get("enabled"):
+        return {"state": "off", "text": "Auto-calibration is OFF: nothing is applied.", "unpinned": free}
+    if settings.get("dry_run"):
+        return {"state": "dry_run", "text": f"DRY-RUN: auto-calibration only reports, nothing is applied ({len(free)} switch(es) unpinned).", "unpinned": free}
+    return {"state": "live", "text": f"LIVE: auto-calibration applies changes to {len(free)} unpinned switch(es) after a finished test.", "unpinned": free}
+
+
+def breakdown(rows: Sequence[Dict[str, Any]], allowed: Sequence[str], pinned: Sequence[str]) -> Dict[str, Any]:
+    """Counts behind \"why no ideas\": of the switches the agent may name, how many are pinned (hidden from it), have no recent test result, are on hold or would change."""
+    pin = set(pinned)
+    c = {"no_evidence": 0, "hold": 0, "would_change": 0, "unreachable": 0, "unreadable": 0}
+    for r in rows:
+        st = r.get("status")
+        if st in ("service_unreachable", "not_in_catalog"):
+            c["unreachable"] += 1
+        elif st in ("no_evidence", "hold", "would_change"):
+            c[st] += 1
+        else:
+            c["unreadable"] += 1
+    return {"allowed": len(allowed), "pinned": sum(1 for k in allowed if k in pin), "seen": len(rows), **c, "asked": False, "ideas": 0, "dropped": 0, "summary": ""}
+
+
+def why_summary(bd: Dict[str, Any], note: str = "") -> str:
+    """One plain sentence for the breakdown, written once the run is finished."""
+    parts = []
+    for k, txt in (("no_evidence", "without a recent test result"), ("hold", "on hold (their test says no change)"), ("would_change", "where the test would change the switch"),
+                   ("unreachable", "not reachable or not listed"), ("unreadable", "unreadable")):
+        if bd.get(k):
+            parts.append(f"{bd[k]} {txt}")
+    s = f"{bd['allowed']} switches the agent may name: {bd['pinned']} pinned (hidden from it), {bd['seen']} shown" + (" - " + ", ".join(parts) if parts else "")
+    usable = bd.get("hold", 0) + bd.get("would_change", 0)
+    if bd.get("ideas"):
+        return s + f". {bd['ideas']} idea(s) kept" + (f", {bd['dropped']} dropped by the rules" if bd.get("dropped") else "") + "."
+    if bd["seen"] == 0:
+        return s + ". No ideas: every switch the agent may name is pinned."
+    if usable == 0:
+        return s + ". No ideas: none of the shown switches has a usable test result, so nothing was asked."
+    if not bd.get("asked"):
+        return s + ". No ideas: " + (note or "the model was not asked") + "."
+    if bd.get("dropped"):
+        return s + f". No ideas kept: {bd['dropped']} answer(s) were dropped by the rules (see `dropped`)."
+    return s + ". No ideas: the model named no switch."
+
+
+def _at_end(cur: Any, kind: str, choices: Sequence[str], direction: str) -> Optional[str]:
+    """A move that cannot happen: an off switch cannot go down, an on switch cannot go up, the first / last choice of a list cannot go further."""
+    c = str(cur).strip().lower() if cur is not None else ""
+    if c in ("true", "false"):
+        if direction == "down" and c == "false":
+            return "already off (lowest value)"
+        if direction == "up" and c == "true":
+            return "already on (highest value)"
+        return None
+    ch = [str(x).lower() for x in choices]
+    if c in ch:
+        if direction == "down" and ch.index(c) == 0:
+            return f"already at the lowest choice ({c})"
+        if direction == "up" and ch.index(c) == len(ch) - 1:
+            return f"already at the highest choice ({c})"
+    return None
+
+
+def check_ideas(ideas: Sequence[Dict[str, Any]], rows: Sequence[Dict[str, Any]], ctx: Dict[str, Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Round 541 idea check, on plain data (no text matching): drop an idea whose switch has no usable test result, whose move cannot happen, or that points the
+    opposite way to the switch's own rule. A kept idea is labelled `rule_agrees` (the rule would move it the same way) or `rule_holds` (the rule says no change:
+    the idea has no support from its test yet) and carries the rule's own line in `rule_says`."""
+    by = {str(r.get("switch")): r for r in rows}
+    kept: List[Dict[str, Any]] = []
+    dropped: List[Dict[str, Any]] = []
+    for i in ideas:
+        sw, d = i["switch"], i["direction"]
+        row = by.get(sw) or {}
+        st = row.get("status")
+        if st not in ("hold", "would_change"):
+            dropped.append({"switch": sw, "reason": "no usable test result for this switch (" + str(st or "not shown to the model") + ")"})
+            continue
+        c = ctx.get(sw, {})
+        end = _at_end(c.get("value"), c.get("kind", ""), c.get("choices", []), d)
+        if end:
+            dropped.append({"switch": sw, "reason": f"the move is impossible: {end}"})
+            continue
+        support = "rule_holds"
+        if st == "would_change":
+            rd = direction_of(c.get("value"), row.get("test_suggests"), c.get("kind", ""), c.get("choices", []))
+            if rd is not None and rd != d:
+                dropped.append({"switch": sw, "reason": f"opposite to the switch's own rule, which would move it {rd}"})
+                continue
+            support = "rule_agrees"
+        kept.append({**i, "support": support, "rule_says": scrub(row.get("verdict"), 160)})
+    return kept, dropped
+
+
 class Agent:
     def __init__(self, data_dir: str, auto: Any, runner: Any, jobs: Dict[str, Dict[str, Any]], llm: LLM, notify: Optional[Callable[[str, str, str], Optional[str]]] = None,
                  mode: str = "report", max_ideas: int = 5, max_queue: int = 3, min_rerun_h: float = 20.0, run_after: str = "16:10",
@@ -515,6 +669,92 @@ class Agent:
         self.state_path = os.path.join(data_dir, "state", "agent.json")
         self.trials_path = os.path.join(data_dir, "agent", "trials.json")
         self.usage_path = os.path.join(data_dir, "agent", "usage.json")
+        self.audit_path = os.path.join(data_dir, "agent", "audit.jsonl")
+        self.env_defaults = {"mode": self.mode, "run_after": fmt_hhmm(self.after_min), "max_ideas": self.max_ideas, "max_queue": self.max_queue}
+        self.saved: Dict[str, Any] = {}
+        self._load_saved()
+
+    # -- round 541: settings kept on disk (the saved value wins over the .env default; reset goes back to the .env value)
+    def current_settings(self) -> Dict[str, Any]:
+        return {"mode": self.mode, "run_after": fmt_hhmm(self.after_min), "max_ideas": self.max_ideas, "max_queue": self.max_queue}
+
+    def _apply(self, vals: Dict[str, Any]) -> None:
+        if "mode" in vals:
+            self.mode = vals["mode"]
+        if "run_after" in vals:
+            self.after_min = parse_hhmm(vals["run_after"]) or self.after_min
+        if "max_ideas" in vals:
+            self.max_ideas = int(vals["max_ideas"])
+        if "max_queue" in vals:
+            self.max_queue = int(vals["max_queue"])
+
+    def _load_saved(self) -> None:
+        raw = self._state().get("settings")
+        self.saved = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                try:
+                    self.saved[k] = clean_setting(k, v)
+                except ValueError:
+                    pass        # a damaged or out-of-bounds saved value is ignored: the .env default stays
+        self._apply(self.saved)
+
+    def configure(self, changes: Dict[str, Any], by: str = "", confirm: bool = False, reset: bool = False) -> Dict[str, Any]:
+        """Change settings (None = leave alone). Every value is bounded; propose needs confirm=True; a change is one audit line; reset drops the saved values first."""
+        with self.slock:
+            clean = {k: clean_setting(k, v) for k, v in (changes or {}).items() if v is not None}
+            if clean.get("mode") == "propose" and self.mode != "propose" and not confirm:
+                raise ValueError("switching to propose needs confirm=true (the second click): it lets the agent queue the existing tests behind its ideas")
+            before = self.current_settings()
+            saved = {} if reset else dict(self.saved)
+            saved.update(clean)
+            self._apply(self.env_defaults)
+            self._apply(saved)
+            st = self._state()
+            if saved:
+                st["settings"] = saved
+            else:
+                st.pop("settings", None)
+            self._put_state(st)
+            self.saved = saved
+            after = self.current_settings()
+            diff = {k: {"from": before[k], "to": after[k]} for k in after if before[k] != after[k]}
+            if diff or reset:
+                self._audit(by, diff, reset)
+            return self.settings()
+
+    def _audit(self, by: str, diff: Dict[str, Any], reset: bool) -> None:
+        line = {"at": self.now(), "at_ist": datetime.fromtimestamp(self.now(), IST).strftime("%Y-%m-%d %H:%M:%S"), "by": scrub(by or "-", 60), "reset": bool(reset), "changes": diff}
+        try:
+            lines = []
+            try:
+                with open(self.audit_path, "r", encoding="utf-8") as f:
+                    lines = [x for x in f.read().splitlines() if x.strip()]
+            except FileNotFoundError:
+                pass
+            lines = (lines + [json.dumps(line, sort_keys=True)])[-AUDIT_KEEP:]
+            _atomic_write(self.audit_path, "\n".join(lines) + "\n")
+        except Exception:  # noqa: BLE001 - the audit file is best effort; the change itself is already saved
+            pass
+
+    def audit_tail(self, n: int = 10) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        try:
+            with open(self.audit_path, "r", encoding="utf-8") as f:
+                for x in f.read().splitlines()[-n:]:
+                    try:
+                        out.append(json.loads(x))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        return list(reversed(out))
+
+    def settings(self) -> Dict[str, Any]:
+        return {"values": self.current_settings(), "env_defaults": dict(self.env_defaults), "saved": dict(self.saved),
+                "source": {k: ("saved" if k in self.saved else "env") for k in self.env_defaults},
+                "bounds": {"modes": list(MODES), "run_after": [fmt_hhmm(RUN_AFTER_MIN), fmt_hhmm(RUN_AFTER_MAX)], "max_ideas": list(IDEAS_BOUNDS), "max_queue": list(QUEUE_BOUNDS)},
+                "audit": self.audit_tail(10)}
 
     # -- small state helpers
     def _state(self) -> Dict[str, Any]:
@@ -548,6 +788,25 @@ class Agent:
         mins = t.hour * 60 + t.minute
         last = self._state().get("last_auto_date")
         return self.eff_mode() != "off" and t.weekday() < 5 and self.after_min <= mins <= 23 * 60 + 30 and last != t.strftime("%Y-%m-%d")
+
+    def next_run(self, now: Optional[float] = None) -> Dict[str, Any]:
+        """When the automatic run happens next (IST): today after the run-after time if it has not run today, else the next weekday. Read only."""
+        ts = now if now is not None else self.now()
+        t = datetime.fromtimestamp(ts, IST)
+        if self.eff_mode() == "off":
+            return {"state": "off", "at_ist": None, "reason": "the agent is off (mode off or it switched itself off): no automatic run"}
+        today = t.strftime("%Y-%m-%d")
+        mins = t.hour * 60 + t.minute
+        if t.weekday() < 5 and self._state().get("last_auto_date") != today and mins <= 23 * 60 + 30:
+            if mins >= self.after_min:
+                return {"state": "due_now", "at_ist": t.strftime("%Y-%m-%d %H:%M"), "reason": "the run-after time has passed and it has not run today: it starts within a minute"}
+            d = t
+        else:
+            d = t + timedelta(days=1)
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+        at = d.replace(hour=self.after_min // 60, minute=self.after_min % 60, second=0, microsecond=0)
+        return {"state": "scheduled", "at_ist": at.strftime("%Y-%m-%d %H:%M"), "reason": ""}
 
     def start(self) -> None:
         threading.Thread(target=self._loop, name="agent", daemon=True).start()
@@ -593,8 +852,9 @@ class Agent:
     def _run(self, mode: str, trigger: str, by: str) -> Dict[str, Any]:
         ts = self.now()
         day = _day(ts)
-        rep: Dict[str, Any] = {"ran": True, "date": day, "at": ts, "mode": mode, "trigger": trigger, "by": by, "source": "", "ideas": [], "dropped": [], "weaknesses": [],
-                               "queued": [], "skipped": [], "errors": [], "health": []}
+        acs = self.auto.settings()
+        rep: Dict[str, Any] = {"ran": True, "date": day, "at": ts, "mode": mode, "trigger": trigger, "by": by, "auto_calibration": banner(acs, list(self.rules))["text"],
+                               "breakdown": {}, "source": "", "ideas": [], "dropped": [], "weaknesses": [], "queued": [], "skipped": [], "errors": [], "health": []}
         try:
             self._resolve(ts)
         except Exception:  # noqa: BLE001 - judging old ideas must never stop tonight's run
@@ -603,6 +863,8 @@ class Agent:
         inp = whitelist(build_input(self.auto, self.rules, ts, ctx))
         usable = [r for r in inp["switches"] if r.get("status") in ("hold", "would_change")]
         rep["switches_seen"], rep["switches_with_evidence"] = len(inp["switches"]), len(usable)
+        bd = breakdown(inp["switches"], list(self.rules), acs.get("pinned") or [])
+        rep["breakdown"] = bd           # same dict object: filled in below, but its place near the top of the report is fixed here
         usage = self._usage(ts)
         if not usable:
             rep["note"] = "no auto-calibrated switch has a usable test result yet, so nothing was asked"
@@ -636,7 +898,8 @@ class Agent:
                     rep["note"] = "no LLM answered (free quota used up or no key); nothing changed"
                 else:
                     v = validate(parse_json(text), self.rules, pinned, self.max_ideas)
-                    rep["ideas"], rep["dropped"], rep["weaknesses"] = v["ideas"], v["dropped"], v["weaknesses"]
+                    kept, checked = check_ideas(v["ideas"], inp["switches"], ctx)
+                    rep["ideas"], rep["dropped"], rep["weaknesses"] = kept, v["dropped"] + checked, v["weaknesses"]
                     off = sum(1 for d in rep["dropped"] if d.get("reason") == "not in the allow-list")
                     if off:
                         w = self._offlist(ts, off)
@@ -644,6 +907,8 @@ class Agent:
                             rep["health"].append(w)
                     if mode == "propose" and rep["ideas"]:
                         rep["queued"], rep["skipped"] = self._queue(rep["ideas"], ts)
+        bd.update(asked="llm" in rep, ideas=len(rep["ideas"]), dropped=len(rep["dropped"]))
+        bd["summary"] = why_summary(bd, rep.get("note", ""))
         self._save(rep, day, ctx)
         stop_msg = self._check_stop(ts)
         if stop_msg:
@@ -715,13 +980,13 @@ class Agent:
                 for i in rep["ideas"]:
                     c = ctx.get(i["switch"], {})
                     tr["log"].append({"date": day, "at": rep["at"], "switch": i["switch"], "direction": i["direction"], "mode": rep["mode"], "queued_run": qd.get(i["switch"]),
-                                      "value": c.get("value"), "kind": c.get("kind", ""), "choices": c.get("choices", []), "verdict": None, "verdict_at": None})
+                                      "value": c.get("value"), "kind": c.get("kind", ""), "choices": c.get("choices", []), "support": i.get("support"), "verdict": None, "verdict_at": None})
                 tr["log"] = tr["log"][-TRIALS_KEEP:]
                 _atomic_write(self.trials_path, json.dumps(tr, indent=1, sort_keys=True))
                 st = self._state()
                 st["last"] = {k: rep.get(k) for k in ("date", "at", "mode", "trigger", "source", "note")}
                 st["last"].update(ideas=len(rep["ideas"]), dropped=len(rep["dropped"]), queued=len(rep["queued"]))
-                st["last_report"] = {k: rep.get(k) for k in ("date", "at", "mode", "trigger", "source", "note", "weaknesses", "ideas", "queued", "skipped", "health")}
+                st["last_report"] = {k: rep.get(k) for k in ("date", "at", "mode", "trigger", "source", "note", "auto_calibration", "breakdown", "weaknesses", "ideas", "queued", "skipped", "health")}
                 st["last_report"]["dropped"] = len(rep["dropped"])
                 self._put_state(st)
         except Exception:  # noqa: BLE001 - files are best effort
@@ -820,13 +1085,15 @@ class Agent:
             for w in rep["weaknesses"][:3]:
                 lines.append(f"- {w}")
             for i in rep["ideas"]:
-                lines.append(f"• {i['switch']} {i['direction']}: {i['why']}")
+                lines.append(f"• {i['switch']} {i['direction']}: {i['why']}" + (" (its rule says: no change)" if i.get("support") == "rule_holds" else ""))
             if rep["queued"]:
                 lines.append("Queued tests: " + ", ".join(sorted({q["test"] for q in rep["queued"]})))
             if rep["skipped"]:
                 lines.append(f"Not queued: {len(rep['skipped'])} ({scrub(rep['skipped'][0]['reason'], 80)})")
             if rep["dropped"]:
                 lines.append(f"Dropped {len(rep['dropped'])} answer(s) outside the rules")
+            if rep.get("auto_calibration"):
+                lines.append(scrub(rep["auto_calibration"], 120))
             for h in health[:4]:
                 lines.append("⚠ " + scrub(h, 160))
             self.notify("Stockky AI agent", "\n".join(lines)[:1500], "normal")
@@ -853,4 +1120,29 @@ class Agent:
                 "trials": {k: tr.get(k, 0) for k in ("runs", "ideas", "dropped")}, "scoreboard": self.scoreboard(),
                 "usage_today": {"date": u["date"], "gemini": int(u.get("gemini", 0)), "groq": int(u.get("groq", 0)), "runs": int(u.get("runs", 0)), "used": used,
                                 "cap": self.max_calls_day, "left": max(0, self.max_calls_day - used), "gemini_blocked": bool(u.get("gemini_blocked"))},
-                "last_report": st.get("last_report")}
+                "last_report": st.get("last_report"), "settings": self.settings(), "next_run": self.next_run()}
+
+    # -- round 541: one line per saved day, with each idea's outcome from the scoreboard
+    def history(self, limit: int = 30) -> Dict[str, Any]:
+        limit = max(1, min(120, int(limit)))
+        d = os.path.join(self.dir, "agent")
+        try:
+            names = sorted((n for n in os.listdir(d) if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.json", n)), reverse=True)[:limit]
+        except OSError:
+            names = []
+        verdicts = {(e.get("date"), e.get("switch")): e.get("verdict") for e in self._trials()["log"]}
+        days: List[Dict[str, Any]] = []
+        for n in names:
+            rep = _read_json(os.path.join(d, n), None)
+            if not isinstance(rep, dict):
+                days.append({"date": n[:-5], "unreadable": True})
+                continue
+            qd = {q.get("switch"): q for q in rep.get("queued") or [] if isinstance(q, dict)}
+            ideas = [{"switch": i.get("switch"), "direction": i.get("direction"), "why": i.get("why"), "support": i.get("support"),
+                      "queued_test": (qd.get(i.get("switch")) or {}).get("test"), "outcome": verdicts.get((rep.get("date"), i.get("switch"))) or "pending"}
+                     for i in rep.get("ideas") or [] if isinstance(i, dict)]
+            days.append({"date": rep.get("date") or n[:-5], "at": rep.get("at"), "mode": rep.get("mode"), "trigger": rep.get("trigger"), "by": rep.get("by"), "source": rep.get("source"),
+                         "note": rep.get("note"), "auto_calibration": rep.get("auto_calibration"), "breakdown": rep.get("breakdown"), "ideas": ideas, "dropped": rep.get("dropped") or [],
+                         "weaknesses": rep.get("weaknesses") or [], "queued_n": len(rep.get("queued") or []), "skipped_n": len(rep.get("skipped") or []), "errors_n": len(rep.get("errors") or []),
+                         "health": rep.get("health") or []})
+        return {"days": days, "count": len(days), "note": "one file per day: a second run on the same day replaces the first"}

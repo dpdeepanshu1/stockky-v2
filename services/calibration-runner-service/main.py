@@ -357,12 +357,12 @@ class AutoSettings(BaseModel):
 
 
 @app.put("/autocalib/settings")
-def autocalib_settings(req: AutoSettings, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+def autocalib_settings(req: AutoSettings, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     pinned = req.pinned
     if pinned is not None and (not isinstance(pinned, list) or not all(isinstance(x, str) for x in pinned)):
         raise HTTPException(400, "pinned must be a list of switch names")
     try:
-        return _a().configure(req.enabled, req.dry_run, pinned)
+        return _a().configure(req.enabled, req.dry_run, pinned, by=str(claims.get("sub") or "-"))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -406,6 +406,48 @@ def agent_run(req: AgentRun, claims: Dict[str, Any] = Depends(require_admin)) ->
 def agent_resume(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     """Switch the agent back on after it switched itself off (stop rule). The rule counts from this point. It sets no trading switch."""
     return _ag().resume()
+
+
+class AgentSettings(BaseModel):
+    """Round 541: every field optional (None = leave it alone); the agent checks each one against its bounds."""
+    mode: Optional[Any] = None           # off | report | propose
+    run_after: Optional[Any] = None      # HH:MM IST, 15:45 .. 23:00
+    max_ideas: Optional[Any] = None      # 1 .. 10
+    max_queue: Optional[Any] = None      # 0 .. 6
+    confirm: bool = False                # the second click: required to switch to propose
+    reset: bool = False                  # drop the saved values: back to the .env defaults
+
+
+@app.get("/agent/settings")
+def agent_settings_get(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Round 541: the values in force, the .env defaults, which ones are saved, the bounds and the last audit lines."""
+    return _ag().settings()
+
+
+@app.post("/agent/settings")
+def agent_settings_set(req: AgentSettings, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Round 541: change the agent's mode / run-after time / caps. Saved in state/agent.json (survives a restart), bounded, one audit line per change.
+    It changes no trading switch: the agent has no apply mode."""
+    try:
+        return _ag().configure({"mode": req.mode, "run_after": req.run_after, "max_ideas": req.max_ideas, "max_queue": req.max_queue},
+                               by=str(claims.get("sub") or "-"), confirm=req.confirm, reset=req.reset)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/agent/history")
+def agent_history(limit: int = Query(30, ge=1, le=120), _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Round 541: one line per saved day (newest first): ideas with their scoreboard outcome, what was dropped, the breakdown."""
+    return _ag().history(limit)
+
+
+@app.get("/agent/loop")
+def agent_loop(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Round 541: the whole nightly loop in one read (LIVE / DRY-RUN banner, timetable with next times, agent, auto-calibration, today's chain, latest runs). Read only."""
+    if sched is None:
+        raise HTTPException(503, "timetable not started")
+    import selfimprove as SI
+    return SI.loop_view(_ag(), _a(), sched.get(), _r().list_runs(60))
 
 
 # ----------------------------------------------------------------------------------------------- Part 1 step 4: Market Weather (shadow)

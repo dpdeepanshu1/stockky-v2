@@ -1,7 +1,7 @@
 // E535 (redesign round 3): the ONE description of the app's navigation. The sidebar, the phone bottom bar, the More drawer, the Markets tab strip,
 // the mode strip and the command palette all read it, so a tab added here can never silently displace a bottom-bar slot.
 // Pure data and pure functions (no React, no import), so shell.test.mjs runs them. Tab ids and routes are unchanged: only labels and grouping moved.
-export type NavTab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "ipo" | "datafeed" | "settings" | "watchlist" | "realtrade" | "positionstocks" | "fno" | "calibration";
+export type NavTab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "ipo" | "datafeed" | "settings" | "watchlist" | "realtrade" | "positionstocks" | "fno" | "calibration" | "selfimprove";
 export type NavIconId = "home" | "bot" | "trend" | "flame" | "zap" | "tag" | "swap" | "star" | "bell" | "database" | "flask" | "sliders" | "menu" | "lock" | "layers";
 export type SectionId = "home" | "markets" | "trading" | "paper" | "system";
 
@@ -18,6 +18,7 @@ export const NAV_ITEMS: NavEntry[] = [
   { id: "positionstocks", label: "Position Stocks", short: "Scalp", icon: "trend", group: "Trading" },
   { id: "fno", label: "F&O Options", short: "F&O", icon: "trend", group: "Trading" },
   { id: "calibration", label: "Real Money Calibration", short: "Calibrate", icon: "sliders", group: "Trading" },
+  { id: "selfimprove", label: "Self Improve System", short: "Improve", icon: "flask", group: "Trading" },   // E567 (S2)
   { id: "trades", label: "Paper Trades", short: "Paper", icon: "swap", group: "Paper" },
   { id: "notifications", label: "Alerts", short: "Alerts", icon: "bell", group: "System" },
   { id: "datafeed", label: "Data Feed", short: "Feed", icon: "database", group: "System" },
@@ -30,13 +31,16 @@ export interface NavSection { id: SectionId; label: string; icon: NavIconId; ent
 export const SECTIONS: NavSection[] = [
   { id: "home", label: "Home", icon: "home", entry: "dashboard", tabs: ["dashboard"], locked: false, foldedByDefault: false },
   { id: "markets", label: "Markets", icon: "flame", entry: "hot", tabs: ["hot", "surprise", "ipo", "watchlist"], locked: false, foldedByDefault: false },
-  { id: "trading", label: "Trading", icon: "lock", entry: "realtrade", tabs: ["realtrade", "positionstocks", "fno", "calibration"], locked: true, foldedByDefault: false },
+  { id: "trading", label: "Trading", icon: "lock", entry: "realtrade", tabs: ["realtrade", "positionstocks", "fno", "calibration", "selfimprove"], locked: true, foldedByDefault: false },
   { id: "paper", label: "Paper", icon: "swap", entry: "trades", tabs: ["trades"], locked: false, foldedByDefault: false },
   { id: "system", label: "System", icon: "layers", entry: "notifications", tabs: ["notifications", "datafeed", "training", "settings"], locked: false, foldedByDefault: true },
 ];
 
 export const MARKETS_TABS: NavTab[] = SECTIONS.find((s) => s.id === "markets")!.tabs;
 export const TRADING_TABS: NavTab[] = SECTIONS.find((s) => s.id === "trading")!.tabs;
+
+/** True for a string that is one of the app's tab ids (used by the "go to this tab" event, so a bad id can never blank the page). */
+export const isNavTab = (id: unknown): id is NavTab => typeof id === "string" && NAV_ITEMS.some((i) => i.id === id);
 
 export const sectionOf = (tab: NavTab): NavSection => SECTIONS.find((s) => s.tabs.includes(tab))!;
 export const itemOf = (tab: NavTab): NavEntry => NAV_ITEMS.find((i) => i.id === tab)!;

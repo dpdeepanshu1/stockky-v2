@@ -11,22 +11,23 @@ const adm = await import("./adminSession.ts");
 let n = 0; const test = (name, f) => { f(); n++; console.log("ok -", name); };
 
 const ORIGINAL_TABS = ["dashboard", "notifications", "training", "trades", "hot", "surprise", "ipo", "datafeed", "settings", "watchlist", "realtrade", "positionstocks", "fno", "calibration"];
+const ALL_TABS = [...ORIGINAL_TABS, "selfimprove"];   // E567: the 15th tab, Self Improve System
 
 /* ---------- navigation model ---------- */
-test("the 14 tab ids are exactly the old ones (no route or tab id changed)", () => {
-  assert.deepEqual([...nav.NAV_ITEMS.map((i) => i.id)].sort(), [...ORIGINAL_TABS].sort());
+test("the 14 old tab ids are all still there (no route or tab id changed) and the only new one is selfimprove", () => {
+  assert.deepEqual([...nav.NAV_ITEMS.map((i) => i.id)].sort(), [...ALL_TABS].sort());
   const t = rd("./components/app/appTypes.ts");
-  for (const id of ORIGINAL_TABS) assert.ok(t.includes(`"${id}"`), `Tab type lost ${id}`);
+  for (const id of ALL_TABS) assert.ok(t.includes(`"${id}"`), `Tab type lost ${id}`);
 });
 test("five sections hold every tab exactly once, and each entry page belongs to its own section", () => {
   assert.deepEqual(nav.SECTIONS.map((s) => s.id), ["home", "markets", "trading", "paper", "system"]);
   const all = nav.SECTIONS.flatMap((s) => s.tabs);
-  assert.equal(all.length, 14); assert.equal(new Set(all).size, 14);
+  assert.equal(all.length, 15); assert.equal(new Set(all).size, 15);
   for (const s of nav.SECTIONS) assert.ok(s.tabs.includes(s.entry), `${s.id} entry`);
 });
-test("Markets = Hot Picks, Surprise, IPO, Watchlist; Trading = the four admin-login pages", () => {
+test("Markets = Hot Picks, Surprise, IPO, Watchlist; Trading = the five admin-login pages", () => {
   assert.deepEqual(nav.MARKETS_TABS, ["hot", "surprise", "ipo", "watchlist"]);
-  assert.deepEqual(nav.TRADING_TABS, ["realtrade", "positionstocks", "fno", "calibration"]);
+  assert.deepEqual(nav.TRADING_TABS, ["realtrade", "positionstocks", "fno", "calibration", "selfimprove"]);
   assert.ok(nav.SECTIONS.find((s) => s.id === "trading").locked);
 });
 test("Paper Trades never shares a section with the real-money pages", () => {
@@ -48,23 +49,23 @@ test("phone bar: five slots in order Home, Markets, Trading, Alerts, More", () =
   assert.deepEqual(nav.BOTTOM_SLOTS.map((s) => s.id), ["home", "markets", "trading", "alerts", "more"]);
 });
 test("phone bar: every tab lights exactly one slot; an open sheet or drawer wins", () => {
-  for (const t of ORIGINAL_TABS) { const a = nav.activeSlot(t, null); assert.ok(nav.BOTTOM_SLOTS.some((s) => s.id === a), t); }
+  for (const t of ALL_TABS) { const a = nav.activeSlot(t, null); assert.ok(nav.BOTTOM_SLOTS.some((s) => s.id === a), t); }
   assert.equal(nav.activeSlot("dashboard", null), "home"); assert.equal(nav.activeSlot("hot", null), "markets");
-  assert.equal(nav.activeSlot("calibration", null), "trading"); assert.equal(nav.activeSlot("notifications", null), "alerts");
+  assert.equal(nav.activeSlot("calibration", null), "trading"); assert.equal(nav.activeSlot("selfimprove", null), "trading"); assert.equal(nav.activeSlot("notifications", null), "alerts");
   assert.equal(nav.activeSlot("trades", null), "more"); assert.equal(nav.activeSlot("settings", null), "more");
   assert.equal(nav.activeSlot("hot", "trading"), "trading"); assert.equal(nav.activeSlot("hot", "more"), "more");
 });
 test("the More drawer lists Paper and System, so every page stays reachable on a phone", () => {
   assert.deepEqual(nav.DRAWER_SECTIONS, ["paper", "system"]);
   const reachable = new Set([...nav.SECTIONS.find((s) => s.id === "home").tabs, ...nav.MARKETS_TABS, ...nav.TRADING_TABS, ...nav.DRAWER_SECTIONS.flatMap((id) => nav.itemsOf(id).map((i) => i.id)), "notifications"]);
-  for (const t of ORIGINAL_TABS) assert.ok(reachable.has(t), t);
+  for (const t of ALL_TABS) assert.ok(reachable.has(t), t);
 });
 
 /* ---------- login is still the one shared gate ---------- */
-test("the four Trading pages are still wrapped in AdminGate, with the same titles; no other page is", () => {
+test("the five Trading pages are wrapped in AdminGate, with the same titles; no other page is", () => {
   const tc = rd("./components/app/TabContent.tsx");
-  for (const t of ["Auto Trade", "Position Stocks", "F&O Options", "Real Money Calibration"]) assert.ok(tc.includes(`<AdminGate title="${t}"`), t);
-  assert.equal([...tc.matchAll(/<AdminGate /g)].length, 4);
+  for (const t of ["Auto Trade", "Position Stocks", "F&O Options", "Real Money Calibration", "Self Improve System"]) assert.ok(tc.includes(`<AdminGate title="${t}"`), t);
+  assert.equal([...tc.matchAll(/<AdminGate /g)].length, 5);
 });
 test("AdminGate still logs in through adminAuth and keeps its gate state machine; storage keys are untouched", () => {
   const g = rd("./components/AdminGate.tsx");
@@ -117,6 +118,7 @@ test("signedRupees: sign is in the text, Indian grouping, no minus on a zero", (
 test("strip: no snapshot = Locked; the control room always says it changes real-money rules; logged in but nothing yet is not 'Locked'", () => {
   const v = ms.stripView("realtrade", null); assert.equal(v.tone, "locked"); assert.ok(/log in/i.test(v.hint));
   const c = ms.stripView("calibration", null); assert.equal(c.tone, "control"); assert.ok(/real-money/i.test(c.hint));
+  const si = ms.stripView("selfimprove", null); assert.equal(si.tone, "control"); assert.ok(/cannot change a trading switch/i.test(si.hint));   // E567
   const w = ms.stripView("realtrade", null, 1, true); assert.ok(!/log in/i.test(w.hint) && /not loaded/i.test(w.modeText));
 });
 test("strip: DEMO and REAL differ in words and tone; armed has its own text; P&L carries sign and arrow", () => {

@@ -14,7 +14,7 @@ RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.t
 # the service itself
 COPY services/calibration-runner-service/config.py services/calibration-runner-service/auth.py services/calibration-runner-service/jobs.py \
      services/calibration-runner-service/runner.py services/calibration-runner-service/scheduler.py services/calibration-runner-service/main.py \
-     services/calibration-runner-service/notify.py services/calibration-runner-service/autocalib.py services/calibration-runner-service/agent.py \
+     services/calibration-runner-service/notify.py services/calibration-runner-service/autocalib.py services/calibration-runner-service/agent.py services/calibration-runner-service/selfimprove.py \
      services/calibration-runner-service/weather.py services/calibration-runner-service/weather_apply.py services/calibration-runner-service/weather_overlay.py \
      services/calibration-runner-service/session_keys.py ./
 

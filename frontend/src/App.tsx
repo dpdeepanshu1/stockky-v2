@@ -14,7 +14,7 @@ import { DesktopSidebar, MobileTopBar, MobileDrawer, DesktopTopBar, BackendDownB
 import { TabContent, loadTrades } from "./components/app/TabContent";
 import type { DashboardViewProps } from "./components/app/DashboardView";
 import type { Tab } from "./components/app/appTypes";
-import { isMarketsTab, isTradingTab, sectionTarget } from "./components/app/navModel";
+import { isMarketsTab, isNavTab, isTradingTab, sectionTarget } from "./components/app/navModel";
 import { useWatchlist } from "./hooks/useWatchlist";
 import { useBackendStatus } from "./hooks/useBackendStatus";
 import { useScanRunner } from "./hooks/useScanRunner";
@@ -84,7 +84,7 @@ export default function App() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [boardSym, setBoardSym] = useState<BoardRowLite | null>(null);   // group311: Market Board popup opened from the command palette
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
-  const [tradingOpen, setTradingOpen] = useState(false);   // E535: the phone "Trading" sheet (the four admin-login pages)
+  const [tradingOpen, setTradingOpen] = useState(false);   // E535: the phone "Trading" sheet (the five admin-login pages)
 
   // Watchlist overlay must not stick when navigating Dashboard / other tabs
   useEffect(() => {
@@ -129,6 +129,13 @@ export default function App() {
     };
     window.addEventListener("stockky:goto-trades", goTrades as EventListener);
     return () => window.removeEventListener("stockky:goto-trades", goTrades as EventListener);
+  }, []);
+
+  // E567: a page can ask the shell to open another tab (the Calibration page's AI agent card links to Self Improve System). A bad id is ignored.
+  useEffect(() => {
+    const go = (ev: Event) => { const id = (ev as CustomEvent)?.detail?.tab; if (isNavTab(id)) setTab(id); };
+    window.addEventListener("stockky:goto-tab", go as EventListener);
+    return () => window.removeEventListener("stockky:goto-tab", go as EventListener);
   }, []);
 
   // Idle-aware free-tier load control:
@@ -206,7 +213,7 @@ export default function App() {
     // E535: the five sections (a section opens its first page, or stays on the page of that section you are already on)
     { id: "sec-home", label: "Home", group: "Sections", hint: "section", keywords: "dashboard", run: () => goTo(sectionTarget(tab, "home")) },
     { id: "sec-markets", label: "Markets", group: "Sections", hint: "section", keywords: "hot picks surprise ipo watchlist", run: () => goTo(sectionTarget(tab, "markets")) },
-    { id: "sec-trading", label: "Trading", group: "Sections", hint: "section", keywords: "auto trade position stocks f&o calibration real money admin login", run: () => goTo(sectionTarget(tab, "trading")) },
+    { id: "sec-trading", label: "Trading", group: "Sections", hint: "section", keywords: "auto trade position stocks f&o calibration self improve real money admin login", run: () => goTo(sectionTarget(tab, "trading")) },
     { id: "sec-paper", label: "Paper", group: "Sections", hint: "section", keywords: "paper trades practice demo", run: () => goTo(sectionTarget(tab, "paper")) },
     { id: "sec-system", label: "System", group: "Sections", hint: "section", keywords: "alerts data feed training settings", run: () => goTo(sectionTarget(tab, "system")) },
     { id: "dash", label: "Dashboard", group: "Navigate", hint: "tab", run: () => setTab("dashboard") },
@@ -217,6 +224,7 @@ export default function App() {
     { id: "positionstocks", label: "Position Stocks", group: "Navigate", hint: "tab", keywords: "scalp scalping momentum 5m 15m 60m", run: () => setTab("positionstocks") },
     { id: "fno", label: "F&O Options", group: "Navigate", hint: "tab", keywords: "fno options nifty sensex call put ce pe derivatives", run: () => setTab("fno") },
     { id: "calibration", label: "Real Money Calibration", group: "Navigate", hint: "tab", keywords: "switches on off controls tests calibration retrain g1 g2 g3 g4 kronos timesfm daily trades pnl run", run: () => setTab("calibration") },
+    { id: "selfimprove", label: "Self Improve System", group: "Navigate", hint: "tab", keywords: "ai agent ideas nightly loop auto calibration scoreboard dry run improve", run: () => setTab("selfimprove") },
     { id: "train", label: "Training Lab", group: "Navigate", hint: "tab", run: () => setTab("training") },
 
     { id: "trades", label: "Trades", group: "Navigate", hint: "tab", run: () => setTab("trades") },
@@ -273,7 +281,7 @@ export default function App() {
       <DesktopTopBar setCmdOpen={setCmdOpen} wsLive={wsLive} backendUp={backendUp} handleWakeBackend={handleWakeBackend} setTab={setTab}
         dbWakeState={dbWakeState} wakeAllDbs={wakeAllDbs} themeLabel={themeLabel} theme={theme} setTheme={setTheme} />
 
-      {/* E535: always-visible mode strip on the four Trading pages (DEMO or REAL, armed or not, today's P&L). Read-only. */}
+      {/* E535: always-visible mode strip on the five Trading pages (DEMO or REAL, armed or not, today's P&L). Read-only. */}
       {isTradingTab(tab) && <ModeStrip tab={tab} />}
 
       {showServiceManager && (

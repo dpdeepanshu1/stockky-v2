@@ -36,6 +36,7 @@ RT, PS = "real-trade-service", "position-stocks-service"
 USABLE = ("success", "attention")          # a script that exits 1 with a verdict is "attention": its verdict is still evidence
 MAX_TEXT = 3_000_000
 HISTORY_KEEP = 200
+AUDIT_KEEP = 50          # round 543: settings audit lines kept (newest last)
 
 # Switches that no test result may ever move. Each has a reason the page shows.
 PROTECTED: Dict[str, str] = {
@@ -535,7 +536,7 @@ class AutoCalibrator:
         self.rules = list(rules)
         self.cooldown_s, self.step_pct, self.now = cooldown_s, step_pct, now_fn
         self.lock = threading.RLock()
-        self.state: Dict[str, Any] = {"enabled": bool(enabled), "dry_run": bool(dry_run), "pinned": [], "pending": {}, "history": [], "last": None, "last_errors": {}}
+        self.state: Dict[str, Any] = {"enabled": bool(enabled), "dry_run": bool(dry_run), "pinned": [], "pending": {}, "history": [], "last": None, "last_errors": {}, "audit": []}
         self._load()
 
     # -- state on disk (atomic; a damaged file is ignored)
@@ -544,7 +545,7 @@ class AutoCalibrator:
             with open(self.path, "r", encoding="utf-8") as fh:
                 d = json.load(fh)
             if isinstance(d, dict):
-                for k in ("enabled", "dry_run", "pinned", "pending", "history", "last", "last_errors"):
+                for k in ("enabled", "dry_run", "pinned", "pending", "history", "last", "last_errors", "audit"):
                     if k in d:
                         self.state[k] = d[k]
         except FileNotFoundError:
@@ -568,18 +569,34 @@ class AutoCalibrator:
             return {"enabled": self.state["enabled"], "dry_run": self.state["dry_run"], "pinned": list(self.state["pinned"]),
                     "cooldown_h": round(self.cooldown_s / 3600, 2), "step_pct": self.step_pct}
 
-    def configure(self, enabled: Optional[bool] = None, dry_run: Optional[bool] = None, pinned: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    def configure(self, enabled: Optional[bool] = None, dry_run: Optional[bool] = None, pinned: Optional[Sequence[str]] = None, by: str = "-") -> Dict[str, Any]:
+        """Change the master switch / dry-run / pinned list. Round 543 (S3): every real change is also ONE audit line (who, when, from -> to);
+        a call that changes nothing writes none. The pinned list is audited per switch (\"pin KEY\": unpinned -> pinned)."""
         with self.lock:
+            diff: Dict[str, Dict[str, Any]] = {}
             if enabled is not None:
+                if bool(enabled) != bool(self.state["enabled"]):
+                    diff["enabled"] = {"from": bool(self.state["enabled"]), "to": bool(enabled)}
                 self.state["enabled"] = bool(enabled)
             if dry_run is not None:
+                if bool(dry_run) != bool(self.state["dry_run"]):
+                    diff["dry_run"] = {"from": bool(self.state["dry_run"]), "to": bool(dry_run)}
                 self.state["dry_run"] = bool(dry_run)
             if pinned is not None:
                 known = {r.key for r in self.rules}
                 bad = [k for k in pinned if k not in known]
                 if bad:
                     raise ValueError("not an auto-calibrated switch: " + ", ".join(bad))
+                before, after = set(self.state["pinned"]), set(pinned)
+                for k in sorted(after - before):
+                    diff[f"pin {k}"] = {"from": "unpinned", "to": "pinned"}
+                for k in sorted(before - after):
+                    diff[f"pin {k}"] = {"from": "pinned", "to": "unpinned"}
                 self.state["pinned"] = sorted(set(pinned))
+            if diff:
+                ts = self.now()
+                line = {"at": ts, "at_ist": datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M:%S"), "by": str(by or "-")[:40], "reset": False, "changes": diff}
+                self.state["audit"] = (list(self.state.get("audit") or []) + [line])[-AUDIT_KEEP:]
             self._save()
             return self.settings()
 
@@ -742,7 +759,7 @@ class AutoCalibrator:
             out = {"settings": self.settings(), "pending": dict(self.state["pending"]), "last": self.state.get("last"),
                    "history": list(reversed(self.state["history"][-50:])), "rules": [
                        {"key": r.key, "service": r.service, "title": r.title, "tests": list(r.tests), "explain": r.explain, "pinned": r.key in self.state["pinned"]}
-                       for r in self.rules], "evidence_jobs": EVIDENCE_JOBS, "protected": PROTECTED}
+                       for r in self.rules], "evidence_jobs": EVIDENCE_JOBS, "protected": PROTECTED, "audit": list(reversed(list(self.state.get("audit") or [])[-15:]))}
         if with_coverage:
             out["coverage"] = self.coverage()
         return out

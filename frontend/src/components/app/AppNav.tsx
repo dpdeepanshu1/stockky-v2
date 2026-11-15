@@ -13,7 +13,7 @@ import {
 } from "./navModel";
 import { modeStripVersion, readModeStrip, stripView, subscribeModeStrip } from "./modeStrip";
 
-// E68 / E535: the app's navigation and top bars. E535 (redesign round 3) regrouped the 14 tabs into five sections (navModel.ts), made the phone
+// E68 / E535: the app's navigation and top bars. E535 (redesign round 3) regrouped the 14 tabs (E567 added a 15th, Self Improve System) into five sections (navModel.ts), made the phone
 // bottom bar Home / Markets / Trading / Alerts / More, and added the mode strip. State stays in App and arrives as props; no tab id or route changed.
 type Setter<T> = (v: T) => void;
 export type BackendUp = "checking" | "up" | "down";
@@ -147,11 +147,11 @@ export function MobileBottomNav({ tab, goTo, tradingOpen, setTradingOpen, mobile
   );
 }
 
-/* ---------- phone "Trading" sheet: the four pages that need the admin login ---------- */
+/* ---------- phone "Trading" sheet: the five pages that need the admin login ---------- */
 export function TradingSheet({ open, onClose, tab, goTo }: { open: boolean; onClose: () => void; tab: Tab; goTo: (id: Tab) => void }) {
   return (
     <Sheet open={open} onClose={onClose} title="Trading">
-      <p className="sh-sheet-note"><NavIcon name="lock" /> These four pages use one admin login.</p>
+      <p className="sh-sheet-note"><NavIcon name="lock" /> These five pages use one admin login.</p>
       <div className="sh-sheet-list">
         {TRADING_TABS.map((id) => {
           const item = itemOf(id);

@@ -19,6 +19,7 @@ const RealAutoTrade = lazy(() => import("../RealAutoTrade"));
 const PositionStocksTab = lazy(() => import("../PositionStocksTab"));
 const FnoTab = lazy(() => import("../fno/FnoTab"));
 const CalibrationControlTab = lazy(() => import("../CalibrationControlTab"));
+const SelfImproveTab = lazy(() => import("../SelfImproveTab"));   // E567 (S2)
 const DataFeed = lazy(() => import("../DataFeed"));
 const DataHealthAudit = lazy(() => import("../DataHealthAudit"));
 export const loadTrades = () => import("../Trades");          // also called before the open-deposit event, so the page exists to hear it
@@ -119,6 +120,13 @@ export function TabContent({
         <div className="page-terminal">
           <PageHeader title="Real Money Calibration" desc="Switch the real-money rules ON / OFF, see daily trades with entry and exit time, and run every test, calibration and training job from here." />
           <ErrorBoundary label="Real Money Calibration"><CalibrationControlTab /></ErrorBoundary>
+        </div>
+      </AdminGate>
+    ) : tab === "selfimprove" ? (
+      <AdminGate title="Self Improve System" onExit={() => setTab("dashboard")}>
+        <div className="page-terminal">
+          <PageHeader title="Self Improve System" desc="The nightly loop in one place: tests, the AI agent's ideas, the tests it queued and what auto-calibration did. The agent only suggests; nothing here sets a trading switch." />
+          <ErrorBoundary label="Self Improve System"><SelfImproveTab /></ErrorBoundary>
         </div>
       </AdminGate>
     ) : tab === "settings" ? (

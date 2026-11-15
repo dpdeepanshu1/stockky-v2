@@ -1,4 +1,4 @@
-// E535: the always-visible mode strip on the four Trading pages. Each page PUBLISHES what it already knows (mode, armed, today's P&L) and the
+// E535: the always-visible mode strip on the five Trading pages. Each page PUBLISHES what it already knows (mode, armed, today's P&L) and the
 // strip only READS it: this file imports nothing, makes no call and has no handler, so it cannot change what a page does.
 export type StripMode = "DEMO" | "REAL";
 export interface StripSnapshot { mode: StripMode; armed: boolean | null; pnl: number | null }
@@ -41,6 +41,9 @@ export interface StripView {
 export function stripView(tab: string, snap: Stored | null, nowMs: number = Date.now(), hasSession: boolean = false): StripView {
   if (tab === "calibration") {
     return { tone: "control", modeText: "Control room", armedText: null, armedOn: false, pnlText: null, pnlTone: null, stale: false, hint: "Changes here alter the rules real-money trading follows." };
+  }
+  if (tab === "selfimprove") {
+    return { tone: "control", modeText: "Self improve", armedText: null, armedOn: false, pnlText: null, pnlTone: null, stale: false, hint: "Ideas and checks only: the agent cannot change a trading switch." };
   }
   if (!snap && hasSession) {
     return { tone: "locked", modeText: "Mode not loaded yet", armedText: null, armedOn: false, pnlText: null, pnlTone: null, stale: false, hint: "Waiting for this page to report its mode, armed state and today's P&L." };

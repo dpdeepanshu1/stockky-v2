@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { runnerApi, type AutoReport, type AutoStatus } from "../../calibrationApi";
 import { Btn, Card, Chip, Msg } from "./ui";
 import AgentCard from "./AgentCard";
+import { acBody, acConfirmText, acNeedsTwoClicks, type AcAction } from "../../selfImproveControls";
 
 const when = (ts: number) => new Date(ts * 1000).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false }).slice(0, 17);
 const STATUS_TONE: Record<string, "good" | "warn" | "bad" | undefined> = { changed: "good", ok: "good", would_change: "warn", waiting: "warn", cooldown: "warn", error: "bad", service_unreachable: "bad" };
@@ -30,7 +31,12 @@ export default function AutoCalibPanel() {
   };
   if (!st) return <div className="text-mist">{err ? <Msg kind="err">{err}</Msg> : "Loading auto-calibration…"}</div>;
   const s = st.settings;
-  const togglePin = (key: string, pinned: boolean) => act(() => runnerApi.autoSettings({ pinned: pinned ? s.pinned.filter((k) => k !== key) : [...s.pinned, key] }));
+  // round 543: the same second-click rule as the Self Improve System tab (a move that widens what can happen asks first; a narrowing move is one click)
+  const change = (a: AcAction) => {
+    if (acNeedsTwoClicks(a, s) && !window.confirm(acConfirmText(a) + "\n\nContinue?")) return;
+    void act(() => runnerApi.autoSettings(acBody(a, s.pinned)));
+  };
+  const togglePin = (key: string, pinned: boolean) => change({ kind: "pin", key, to: !pinned });
   const cov = st.coverage;
 
   return (
@@ -40,8 +46,8 @@ export default function AutoCalibPanel() {
         title="Auto-calibration"
         tone={s.enabled ? (s.dry_run ? "warn" : "good") : undefined}
         right={<>
-          <Btn small disabled={busy} onClick={() => void act(() => runnerApi.autoSettings({ enabled: !s.enabled }))}>{s.enabled ? "Switch OFF" : "Switch ON"}</Btn>
-          <Btn small disabled={busy} onClick={() => void act(() => runnerApi.autoSettings({ dry_run: !s.dry_run }))}>{s.dry_run ? "Dry run: ON (applies nothing)" : "Dry run: off"}</Btn>
+          <Btn small disabled={busy} onClick={() => change({ kind: "enabled", to: !s.enabled })}>{s.enabled ? "Switch OFF" : "Switch ON"}</Btn>
+          <Btn small disabled={busy} onClick={() => change({ kind: "dry_run", to: !s.dry_run })}>{s.dry_run ? "Dry run: ON (applies nothing)" : "Dry run: off"}</Btn>
         </>}
       >
         <p className="text-mist">

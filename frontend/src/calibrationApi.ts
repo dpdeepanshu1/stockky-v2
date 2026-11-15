@@ -11,6 +11,7 @@ import { getPositionStocksApiUrl, setPositionStocksApiUrl, getSessionToken as ge
 import { getApiUrl } from "./api";
 import { getFnoApiUrl, fnoToken } from "./fnoApi";
 import type { AgentRunResult, AgentStatus } from "./agentView";
+import type { AgentSettingsView, AuditLine, HistoryView, LoopView } from "./selfImproveView";
 import type { OverlayRevertResult, OverlayView, WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
@@ -220,6 +221,8 @@ export interface AutoStatus {
   history: AutoChange[];
   rules: AutoRuleRow[];
   coverage?: { switches: AutoCoverageRow[]; unreachable: { service: string; error: string }[]; counts: Record<string, number> };
+  protected?: Record<string, string>;      // round 543: switches that can never get a rule, with the reason
+  audit?: AuditLine[];                     // round 543 runner: who changed the master switch / dry-run / pinned list, newest first
 }
 
 export const runnerApi = {
@@ -238,13 +241,19 @@ export const runnerApi = {
   schedule: () => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule"),
   putSchedule: (body: { enabled?: boolean; entries?: ScheduleSlot[] }) => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule", { method: "PUT", body: JSON.stringify(body) }),
   // group 476: auto-calibration (switches set from the test results)
-  autoStatus: () => R<AutoStatus>("/autocalib/status"),
+  autoStatus: (coverage = true) => R<AutoStatus>(coverage ? "/autocalib/status" : "/autocalib/status?coverage=false"),
   autoSettings: (body: { enabled?: boolean; dry_run?: boolean; pinned?: string[] }) => R<AutoSettings>("/autocalib/settings", { method: "PUT", body: JSON.stringify(body) }),
   autoRun: (dry_run?: boolean) => R<AutoReport>("/autocalib/run", { method: "POST", body: JSON.stringify(dry_run === undefined ? {} : { dry_run }) }),
   // round 536: the nightly AI idea source (agent.py). It only suggests; none of these calls sets a switch.
   agentStatus: () => R<AgentStatus>("/agent/status"),
   agentRun: (mode?: "report" | "propose") => R<AgentRunResult>("/agent/run", { method: "POST", body: JSON.stringify(mode ? { mode } : {}) }),
   agentResume: () => R<{ resumed: boolean; mode: string }>("/agent/resume", { method: "POST", body: "{}" }),
+  // round 542 (S2): the three read-only views behind the Self Improve System tab (round 541 routes). None of them changes anything.
+  agentLoop: () => R<LoopView>("/agent/loop"),
+  agentHistory: (limit = 30) => R<HistoryView>(`/agent/history?limit=${limit}`),
+  agentSettings: () => R<AgentSettingsView>("/agent/settings"),
+  // round 543 (S3): change the agent's own settings (mode / run-after / caps). The body holds ONLY the fields to change; confirm is the second click for propose. It sets no trading switch.
+  agentSetSettings: (body: { mode?: string; run_after?: string; max_ideas?: number; max_queue?: number; confirm?: boolean; reset?: boolean }) => R<AgentSettingsView>("/agent/settings", { method: "POST", body: JSON.stringify(body) }),
   // Part 1 step 5: Market Weather (shadow). /weather/* on calibration-runner-service; none of these changes a trading switch.
   weatherStatus: () => R<WeatherStatus>("/weather/status"),
   weatherLog: (limit = 100) => R<{ rows: WeatherLogRow[] }>(`/weather/log?limit=${limit}`),

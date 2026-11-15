@@ -305,7 +305,7 @@ def test_propose_never_queues_a_long_or_download_test():
 
 def test_propose_skips_a_fresh_result_and_respects_the_queue_cap_and_the_runner_guard():
     ideas = {"ideas": [{"switch": "SETUP_S2_ENABLED", "direction": "down", "why": "a"}, {"switch": "ENTRY_VWAP_GATE_ENABLED", "direction": "down", "why": "b"},
-                       {"switch": "OVERNIGHT_HOLD_ENABLED", "direction": "up", "why": "c"}]}
+                       {"switch": "OVERNIGHT_HOLD_ENABLED", "direction": "down", "why": "c"}]}   # round 541: the fixture value is "true", so only "down" is a possible move (the idea check drops "up")
     fresh = FakeEvidence({"setup_backtest": ev("setup_backtest", NOW - 3600, files={"setup_backtest.json": {}}),
                           "intraday_gates": ev("intraday_gates", NOW - 5 * 86400, files={"gate_backtest.json": {}}),
                           "hold_bucket": ev("hold_bucket", NOW - 5 * 86400, "1 day vs same day: no clear difference\n")})

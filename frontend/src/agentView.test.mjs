@@ -51,7 +51,11 @@ assert.match(api, /agentStatus: \(\) => R<AgentStatus>\("\/agent\/status"\)/);
 assert.match(api, /agentRun: .*"\/agent\/run"/); assert.match(api, /agentResume: .*"\/agent\/resume"/);
 const panel = readFileSync(new URL("./components/calibration/AutoCalibPanel.tsx", import.meta.url), "utf8");
 assert.match(panel, /import AgentCard/); assert.match(panel, /<AgentCard \/>/);
-assert.match(card, /runnerApi\.agentRun\(/); assert.match(card, /runnerApi\.agentResume\(/); assert.match(card, /data-testid="agent-card"/);
-ok("the API client and the panel mount are wired");
+// round 542 (E567): the card on the Calibration page is a short link; the Run-now / Resume buttons live on the Self Improve System tab
+assert.match(card, /data-testid="agent-card"/); assert.match(card, /stockky:goto-tab/); assert.match(card, /tab: "selfimprove"/);
+assert.ok(!/runnerApi\.agentRun\(|runnerApi\.agentResume\(/.test(card), "no duplicate controls on the old card");
+const today = readFileSync(new URL("./components/selfImprove/TodayPanel.tsx", import.meta.url), "utf8");
+assert.match(today, /runnerApi\.agentRun\("report"\)/); assert.match(today, /runnerApi\.agentRun\("propose"\)/); assert.match(today, /runnerApi\.agentResume\(/);
+ok("the API client and the panel mount are wired; the Run-now buttons moved to the Self Improve tab");
 
 console.log(`agentView.test.mjs: ${n} ok`);

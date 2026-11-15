@@ -1,6 +1,0 @@
-/* STOCKKY pages (round 532): one import for the five page sheets, in their old cascade order (shell, home, trading, control, markets). */
-@import "./shell.css";
-@import "./home.css";
-@import "./trading.css";
-@import "./control.css";
-@import "./markets.css";

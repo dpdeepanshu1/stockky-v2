@@ -1,3 +1,10 @@
+## 15 Nov 2026 - Round 540 (E565): one-command quick check and an Agent Round 3 helper (no application code changed)
+
+ * **Why:** the VM checks of plan v8 were about 15 separate commands. `scripts/vm_quick_check.sh` runs them as one (about 30 s) and ends with PASS / WARN / FAIL and an exit code: containers Up and healthy; the live site (entry file 200, `index.html` no-cache, every chunk the entry names answers 200: the E564 failure would show here); gateway tiles (`banknifty` / `vix` present, change not 0.0) and sparklines (`BADNAME` listed as missing); runner health; error lines of the last 10 min; git (tracked files clean, `pages.css` gone, manifest, pushed); whether today's agent file exists (weekend / before 15:45 IST is INFO, not a failure).
+ * **Agent Round 3:** `scripts/agent_round3.sh` prints the day's agent JSON and `AGENT_MODE`; `--apply-propose` (only when a file exists) backs up `.env`, sets `AGENT_MODE=propose` with a small Python edit (no `sed`) and restarts the runner. It never starts the agent (that needs the admin login on the runner page).
+ * **Checked here:** `bash -n` on both; the index / sparkline checks against the real VM output of 15 Nov (pass) and a 0.0 tile (fails as intended); the whole quick check with fake `docker` / `curl` (11 pass); the `.env` edit on a sample file.
+ * **Roll back:** delete the two scripts and their two lines in `docs/FILE_MANIFEST.txt`.
+
 ## 15 Nov 2026 - Round 540 (E564): after the redeploy every page showed "Failed to fetch dynamically imported module" - the app now reloads itself to the new build
 
  * **What the VM showed (15 Nov):** the frontend built and came up healthy (image 6 min old, health 200, indices / sparklines / runner health all fine), but the browser showed "hit an error and was stopped - Failed to fetch dynamically imported module .../assets/<Page>-<hash>.js" on every lazy page (Auto Trade, Position Stocks, F&O, Calibration, Surprise, IPO, Trades, Alerts, Data Feed, Training). **Not a code bug:** the tab (or cached entry script) was from the OLD build, which asks for chunk filenames that the new image no longer has (Vite hashes every file name), so nginx answers 404.

@@ -640,6 +640,8 @@ scripts/vm_calibrate.sh
 scripts/vm_docker_recover.sh
 scripts/vm_frontend_check.sh
 scripts/vm_full_check.sh
+scripts/vm_quick_check.sh
+scripts/agent_round3.sh
 scripts/vm_ops.sh
 scripts/vm_review_evidence.sh
 scripts/vm_runjob.sh

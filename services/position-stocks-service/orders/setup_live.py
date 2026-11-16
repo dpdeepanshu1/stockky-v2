@@ -75,6 +75,44 @@ def no_setup_refusal(res: Optional[Dict[str, Any]], *, mode: str, exempt: bool, 
         return None
 
 
+def opening_no_setup_refusal(res: Optional[Dict[str, Any]], *, now: Optional[datetime], exempt: bool, enabled: bool = True, until: str = "09:30") -> Optional[str]:
+    """Round 589: refuse a LONG that matched no setup while the clock is before `until` (09:30). Independent of NO_SETUP_MODE (which stays off for the rest of the day).
+    Never for a re-arm / reclaim entry, never when a setup matched, and an engine error is not a verdict (lets the entry go on). Never raises."""
+    try:
+        if not enabled or exempt or now is None:
+            return None
+        if isinstance(res, dict) and res.get("id"):
+            return None
+        if not isinstance(res, dict) or res.get("why") == "error":
+            return None
+        hh, mm = (int(x) for x in str(until).split(":")[:2])
+        if now.hour * 60 + now.minute < hh * 60 + mm and now.hour * 60 + now.minute >= 9 * 60 + 15:
+            return f"OPENING_NO_SETUP: no S1 / S2 / S3 setup before {hh:02d}:{mm:02d} (a plain shortlist entry waits for the 09:30 slot)"
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def window_no_setup_refusal(res: Optional[Dict[str, Any]], *, now: Optional[datetime], exempt: bool, enabled: bool = True, until: str = "15:30", since: str = "09:20") -> Optional[str]:
+    """Round 591 (widened): wait until `since` (09:20), then only a LONG that matched S1 / S2 / S3 may enter, until `until` (15:30). Before `since` (from 09:15) every long waits.
+    Re-arm / reclaim entries are exempt after `since`; an engine error or no walk result lets the entry go on; a bad time string fails open. Never raises."""
+    try:
+        if not enabled or now is None:
+            return None
+        minute = now.hour * 60 + now.minute
+        sh, sm = (int(x) for x in str(since).split(":")[:2])
+        uh, um = (int(x) for x in str(until).split(":")[:2])
+        if 9 * 60 + 15 <= minute < sh * 60 + sm:
+            return f"WINDOW_WAIT: no new entry before {sh:02d}:{sm:02d} (opening noise)"
+        if exempt or not isinstance(res, dict) or res.get("id") or res.get("why") == "error":
+            return None
+        if sh * 60 + sm <= minute < uh * 60 + um:
+            return "WINDOW_NO_SETUP: only a setup that matched (S1 / S2 / S3) may enter; a plain shortlist entry waits"
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def facts_long(*, symbol: str, price: Optional[float], now: Optional[datetime], event_polarity: Optional[int], flow_json: Any, quote: Optional[dict],
                gap_pct: Optional[float], tape: Any = None, penalties: Optional[Dict[str, float]] = None,
                allowed: Optional[set] = None, inputs: Optional[Dict[str, Any]] = None, penalty_skip: Optional[float] = None) -> Dict[str, Any]:

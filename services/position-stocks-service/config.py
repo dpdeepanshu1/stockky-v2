@@ -919,6 +919,12 @@ OPENING_LOSS_BUDGET_FRAC = max(0.0, min(1.0, _get_float("OPENING_LOSS_BUDGET_FRA
 # false = no automatic entry, long or short, until OPENING_0920_PATH_UNTIL_IST (09:30), when S2 starts. Manual BUYs are not touched.
 OPENING_0920_PATH = _get_bool("OPENING_0920_PATH", True)
 OPENING_0920_PATH_UNTIL_IST = _get_str("OPENING_0920_PATH_UNTIL_IST", "09:30")
+# round 589: 16 Nov the 09:20 slot took 2 "shortlist (no setup)" longs (NATCOPHARM, DHANBANK) and both were stopped out within minutes (-2.1 %, -1.8 %), 0 wins of 5 for the day.
+# Before OPENING_0920_PATH_UNTIL_IST an automatic LONG must match a setup (S1 catalyst etc.); a plain shortlist entry with no setup waits for the 09:30 slot. false = old behaviour.
+OPENING_NO_SETUP_REFUSE = _get_bool("OPENING_NO_SETUP_REFUSE", True)
+# round 591 (widened): wait until OPENING_NO_SETUP_SINCE_IST (09:20), then until OPENING_NO_SETUP_UNTIL_IST (15:30) only a LONG that matched a setup enters (same switch as above).
+OPENING_NO_SETUP_SINCE_IST = _get_str("OPENING_NO_SETUP_SINCE_IST", "09:20")
+OPENING_NO_SETUP_UNTIL_IST = _get_str("OPENING_NO_SETUP_UNTIL_IST", "15:30")
 
 # group 333 (2026-10-12): VWAP confirmation (orders/vwap_gate.py). No long below the day's VWAP (Dhan average_price on the /quote row, the same row the
 # depth and circuit gates read) by more than the tolerance; before ENTRY_VWAP_MIN_TIME_IST the average rests on too few trades to judge.
@@ -1080,6 +1086,11 @@ SIZING_MAX_OVERSHOOT_PCT = _get_float("SIZING_MAX_OVERSHOOT_PCT", 10.0)
 SIZING_ONE_SHARE_MAX_MULT = _get_float("SIZING_ONE_SHARE_MAX_MULT", 1.5)
 # Cheap-stock floor (0 = off). Ships OFF: set e.g. 50 to skip sub-Rs50 names once the journal supports it.
 ENTRY_MIN_PRICE = _get_float("ENTRY_MIN_PRICE", 0.0)
+# round 590: 16 Nov AGL traded at about Rs 14 as 4 shares (about Rs 57), and a 2.5 % stop is only 7 ticks of Rs 0.05 there. Instead of a flat price floor (which would also drop cheap names with a wide stop),
+# the entry is refused when ONE tick is more than PENNY_TICK_MAX_STOP_FRAC of the stop distance (adaptive to the stock's own volatility), and when the final position is dust (< ENTRY_MIN_NOTIONAL_RS, 0 = off).
+PENNY_TICK_GATE_ENABLED = _get_bool("PENNY_TICK_GATE_ENABLED", True)
+PENNY_TICK_MAX_STOP_FRAC = max(0.0, _get_float("PENNY_TICK_MAX_STOP_FRAC", 0.12))
+ENTRY_MIN_NOTIONAL_RS = max(0.0, _get_float("ENTRY_MIN_NOTIONAL_RS", 300.0))
 # Optional cut-off for ordinary days (blank = none). The two latest entries on 2026-10-12 (14:12, 14:29) lost; two trades prove nothing, so OFF.
 SCALP_ENTRY_CUTOFF_IST = _get_str("SCALP_ENTRY_CUTOFF_IST", "14:00")   # group 479: default 14:00 (was blank). No new scalp after this on any day; the 21 Oct review showed late entries are the weakest and the real-trade 14:00 cut-off (group 470) is the same rule. Blank is NOT "off" now (blank = default); set 23:59 to disable.
 # Reconcile announces the same closed-trade fill correction once per process per position (was every 5 minutes, all day).

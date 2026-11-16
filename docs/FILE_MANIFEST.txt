@@ -1933,6 +1933,7 @@ services/position-stocks-service/orders/order_flow.py
 services/position-stocks-service/orders/overnight_stop.py
 services/position-stocks-service/orders/own_norms.py
 services/position-stocks-service/orders/own_spread.py
+services/position-stocks-service/orders/penny_gate.py
 services/position-stocks-service/orders/plain_short.py
 services/position-stocks-service/orders/position_save.py
 services/position-stocks-service/orders/pullback_rearm.py
@@ -2325,6 +2326,9 @@ services/position-stocks-service/tests/test_round242_capital_board.py
 services/position-stocks-service/tests/test_round551_sector_traded_value.py
 services/position-stocks-service/tests/test_round559_liquidity_badge.py
 services/position-stocks-service/tests/test_round579_candidate_log_utcnow.py
+services/position-stocks-service/tests/test_round589_opening_no_setup.py
+services/position-stocks-service/tests/test_round590_penny_gate.py
+services/position-stocks-service/tests/test_round591_window_no_setup.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -2936,6 +2940,7 @@ services/real-trade-service/tests/test_round242_capital_board.py
 services/real-trade-service/tests/test_round323_atr_nan.py
 services/real-trade-service/tests/test_round512_market_research.py
 services/real-trade-service/tests/test_round557_strategy_version.py
+services/real-trade-service/tests/test_round591_window_no_setup.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

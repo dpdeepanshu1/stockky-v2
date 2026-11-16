@@ -227,7 +227,12 @@ def trials_from_file(path: str) -> int:
 def build_report(records: List[Dict[str, Any]], n_trials: int = 1, min_n: int = MIN_N,
                  groups: Optional[List[Tuple[str, str]]] = None, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The whole report as a dict (JSON-safe). Pure; never raises on odd rows."""
-    groups = groups or DEFAULT_GROUPS
+    if not groups:
+        groups = list(DEFAULT_GROUPS)
+        # round 593: once real-trade records carry the round 557 `strategy_version` stamp, judge each strategy per settings version too.
+        # Added only when at least one row has a stamp, so an unstamped book (every row reads `none`) gets no extra noise group.
+        if any(str((r or {}).get("strategy_version") or "").strip() for r in records if isinstance(r, dict)):
+            groups.append(("strategy_by_version", "source_tab+decision_label+strategy_version"))
     book = group_stats(records, n_trials, min_n)
     try:
         perf = rr.performance_block(records)

@@ -1,0 +1,34 @@
+==============================================================================
+F&O REAL ORDER PROBE  -  LIVE: REAL MONEY  -  NIFTY CE  -  09 Nov 2026 12:55:02 IST
+==============================================================================
+WHAT THIS DOES: 1) pick the contract and read its live bid / ask  2) BUY 1 lot with a LIMIT order at the ask  3) read the fill back from Dhan  4) hold a few seconds
+                5) SELL it with a LIMIT order at the bid  6) work out profit / loss and the charges and show where every rupee went.
+It does NOT use the engine's locks, arm or database. Orders are INTRADAY product: nothing can be carried overnight.
+
+STEP 1  PICK THE CONTRACT
+  nearest expiry at least 1 day away: 2026-11-17 (8 day(s))   spot 24920.35   strike step 50
+  contract: NIFTY 2026-11-17 25050 CE   (the ATM strike +3 step(s))   Dhan security id 45388   segment NSE_FNO   lot size 65 units   tick 0.05
+  -> check the LOT SIZE against the exchange circular: it is what 'quantity' means below (quantity is in UNITS, 1 lot = lot-size units).
+
+STEP 2  READ THE QUOTE
+  bid 197.65   ask 198.35   last traded 196.45   mid 198.00   spread 0.70 = 0.35% of mid   quote age 0s
+  bid = the best price a buyer offers (what you GET when you sell); ask = the best price a seller wants (what you PAY when you buy). You always cross this gap: it is a real cost.
+  plan: BUY 65 units (1 lot) LIMIT at 198.35 -> premium to pay about Rs 12,892.75 (must be in the account; options are bought with the full premium)
+  if the price did not move at all, buying at the ask and selling at the bid would cost about Rs 123.18  (spread Rs 45.50 + charges Rs 77.68). That is the price of the lesson.
+
+STEP 3  THE ORDER, EXACTLY AS IT GOES TO DHAN  (POST /v2/orders)
+    dhanClientId     *******554
+    correlationId    probebuy125505
+    transactionType  BUY
+    exchangeSegment  NSE_FNO
+    productType      INTRADAY
+    orderType        LIMIT
+    validity         DAY
+    securityId       45388
+    quantity         65
+    disclosedQuantity 0
+    price            198.35
+    afterMarketOrder False
+  transactionType BUY/SELL | productType INTRADAY = squared off the same day | orderType LIMIT = never worse than `price` | validity DAY | quantity in UNITS | correlationId = our tag
+
+REFUSED: the premium Rs 12,893 is above --max-outlay Rs 12,000.

@@ -1,0 +1,17 @@
+{
+ "live": true,
+ "underlying": "NIFTY",
+ "side": "CE",
+ "exit_code": 2,
+ "orders": [
+  {
+   "side": "BUY",
+   "price": 107.2,
+   "qty": 65,
+   "ok": false,
+   "order_id": "",
+   "status": "HTTP 400",
+   "message": "DH-906: Please enable in trade control to proceed. (order error (see the message))"
+  }
+ ]
+}

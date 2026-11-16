@@ -667,6 +667,7 @@ scripts/test_round581_flow_tape_stops.py
 scripts/test_round582_exit_slippage_stops.py
 scripts/test_round583_robustness_median.py
 scripts/test_round587_lifespan_services.py
+scripts/test_round588_gitignore.py
 scripts/test_service_onoff_advice.py
 scripts/test_setup_engine.py
 scripts/test_short_exit_paths.py

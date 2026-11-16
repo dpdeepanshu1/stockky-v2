@@ -1,3 +1,10 @@
+## 16 Nov 2026 - Round 588 (E613): .gitignore covers the local VM leftovers a blanket `git add` pushed (no code change; repo only)
+
+ * **What happened:** on the morning of 16 Nov a `git add -A` on the VM committed and pushed 72 untracked local files: real-trade record exports (`rt_*.json`), F&O real-order probe output, replay and rolling data, UI screenshots, backups and scratch reports. The commit was removed from the branch the same morning (force-with-lease, nothing else was on top). A second, narrower `git add services scripts` then pushed two stray files (a `.backup-` copy of the probe script and `headlines.txt`); they are removed in this round's commit.
+ * **Fix:** `.gitignore` now lists those paths and the `*.bak`, `*.bak.*`, `*.backup-*` backup names. Only untracked files are affected. Rule for the VM: stage by name or with `git add -u` (tracked files only), never `git add -A` or a bare directory.
+ * **Tests:** `scripts/test_round588_gitignore.py` (3, stdlib). Manifest 3065 files.
+ * **Deploy:** none.
+
 ## 16 Nov 2026 - Round 587 (E612): the last `@app.on_event` users and two pydantic `class Config` blocks move to the current API (no behaviour change; rides with the next rebuild of each service)
 
  * **What the build log showed:** FastAPI warns that `@app.on_event` is deprecated, in the timesfm service (new in the log). A sweep found three services still on it: `timesfm-forecast-service` (startup), `kronos-forecast-service` (startup) and `fno-options-service` (startup and shutdown). Every other service was already moved (group318 / round 546).

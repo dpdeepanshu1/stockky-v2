@@ -37,3 +37,19 @@ run_output*/
 
 # E285 round 122: local snapshot output written by the VM tooling
 snap.jsonl
+
+# round 588: local VM leftovers that a blanket `git add` once pushed (real-trade records, order-probe output, backups, scratch reports).
+# Only untracked files are affected; nothing already in git changes.
+data/fno_real_probe/
+data/fno_rolling/
+data/fno_rolling_long/
+*.bak
+*.bak.*
+*.backup-*
+/headlines.csv
+/merged-log.txt
+/ps_report.txt
+/rt_*.json
+/rt_*.txt
+/vm_full_check.sh
+services/analysis-intelligence-service/headlines.txt

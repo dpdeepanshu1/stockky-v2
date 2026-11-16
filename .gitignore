@@ -53,3 +53,8 @@ data/fno_rolling_long/
 /rt_*.txt
 /vm_full_check.sh
 services/analysis-intelligence-service/headlines.txt
+
+# round 592: screenshots written by `node scripts/ui-baseline.mjs` (frontend/ui-baseline/<label>/<theme>-<size>/*.png). Local before/after output, not release code;
+# a blanket `git add -A` pushed frontend/ui-baseline/r532/light-phone/*.png and CI then reported them as tracked files missing from the manifest.
+# On the VM / PC, once: `git rm -r --cached frontend/ui-baseline` (keeps the files on disk), then commit.
+frontend/ui-baseline/

@@ -53,11 +53,6 @@
   "real-trade-service": "==2.5.3",
   "timesfm-forecast-service": "==2.5.3"
  },
- "pyotp": {
-  "market-data-service": "==2.9.0",
-  "position-stocks-service": ">=2.9.0",
-  "real-trade-service": "==2.9.0"
- },
  "sqlalchemy": {
   "analysis-intelligence-service": "==2.0.31",
   "api-gateway": "==2.0.31",

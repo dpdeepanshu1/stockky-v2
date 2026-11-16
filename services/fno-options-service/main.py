@@ -34,7 +34,40 @@ from fno.store import Store, day_of
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("fno-options-service")
 
-app = FastAPI(title="fno-options-service", version="1.0.0")
+# round 587: FastAPI deprecated @app.on_event. Same change as group318 (real-trade, api-gateway ...): these decorators keep what on_event did (handlers run in the
+# order declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run them from a lifespan. The decorated
+# function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
+
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="fno-options-service", version="1.0.0", lifespan=_lifespan)
 
 os.makedirs(config.DATA_DIR, exist_ok=True)
 store = Store(os.path.join(config.DATA_DIR, "fno.db"))
@@ -55,7 +88,7 @@ except Exception as _control_err:  # noqa: BLE001
     log.error("control routes NOT mounted (%s: %s)", type(_control_err).__name__, _control_err)
 
 
-@app.on_event("startup")
+@_on_startup
 def _startup() -> None:
     try:
         engine.warn_unmanaged_real(force=True)            # round 296: a restart drops the borrowed Dhan token: say so loudly if REAL positions are still open
@@ -65,7 +98,7 @@ def _startup() -> None:
         runner.start()
 
 
-@app.on_event("shutdown")
+@_on_shutdown
 def _shutdown() -> None:
     runner.stop()
 

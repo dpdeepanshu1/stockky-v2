@@ -44,6 +44,8 @@ def _run(root, tmp_path, **env):
     # round 500: no HOME override. The script gets OUT explicitly, and a changed HOME hides a `pip install --user` pytest from the inner `python -m pytest` step
     # (it passed here with a system-wide pytest and failed on the VM, where pytest is a user install). The user site is pinned as well, for a harness run with another HOME.
     e = dict(os.environ, PYTHON=sys.executable, OUT=str(tmp_path / "out"), DOCKER_BIN=sys.executable, PYTHONUSERBASE=site.getuserbase())
+    for k in ("SERVICES", "SKIP_FRONTEND"):      # round 586: a SERVICES / SKIP_FRONTEND left in the caller's shell (the helper's own documented options) must not reach the sandbox run
+        e.pop(k, None)
     e.update(env)
     return subprocess.run(["bash", str(root / "scripts" / "vm_full_check.sh")], capture_output=True, text=True, env=e, timeout=120)
 

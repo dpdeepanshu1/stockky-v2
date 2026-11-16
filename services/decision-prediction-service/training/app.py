@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from json_safe import SafeJSONResponse as JSONResponse
 import structure_entry as _se   # group359/373: entry-time market-structure snapshot kept inside feature_snapshot
 import structure_obs as _so     # group374: all-decision structure observations + T+1/5/10/20 outcomes
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any   # <-- fixed: added Dict, Any
 import joblib
 import numpy as np
@@ -218,8 +218,8 @@ class PredictionSnapshotCreate(BaseModel):
     feature_snapshot: Optional[dict] = None
     structure: Optional[dict] = None   # group359: the /decide `structure` record sent with the pick (sanitised by structure_entry)
     # Accept extra keys the frontend may still send (score aliases, etc.)
-    class Config:
-        extra = "ignore"
+    # round 587: model_config instead of the pydantic-v2-deprecated inner `class Config` (same behaviour: unknown keys are dropped)
+    model_config = ConfigDict(extra="ignore")
 
 # ---------- Numpy conversion helper ----------
 def _wake_pings_enabled() -> bool:
@@ -1230,8 +1230,7 @@ class ActionableCommitRequest(BaseModel):
     # Optional top-level market_score some frontends send — ignored safely
     market_score: Optional[float] = 50.0
 
-    class Config:
-        extra = "ignore"
+    model_config = ConfigDict(extra="ignore")   # round 587: was the deprecated inner `class Config`
 
 @app.post("/api/actionable/commit")
 async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks: BackgroundTasks):

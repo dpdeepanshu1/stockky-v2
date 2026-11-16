@@ -666,6 +666,7 @@ scripts/test_round581_ci_settings.py
 scripts/test_round581_flow_tape_stops.py
 scripts/test_round582_exit_slippage_stops.py
 scripts/test_round583_robustness_median.py
+scripts/test_round587_lifespan_services.py
 scripts/test_service_onoff_advice.py
 scripts/test_setup_engine.py
 scripts/test_short_exit_paths.py
@@ -1607,6 +1608,7 @@ services/fno-options-service/tests/test_round550_vix_rank.py
 services/fno-options-service/tests/test_round552_chain_fields.py
 services/fno-options-service/tests/test_round559_view_only_chain.py
 services/fno-options-service/tests/test_round585_true_median_range.py
+services/fno-options-service/tests/test_round587_lifespan.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile
@@ -2986,6 +2988,7 @@ services/timesfm-forecast-service/tests/conftest.py
 services/timesfm-forecast-service/tests/test_e506_range_checked_env_settings.py
 services/timesfm-forecast-service/tests/test_engine_backends.py
 services/timesfm-forecast-service/tests/test_main.py
+services/timesfm-forecast-service/tests/test_round587_lifespan.py
 services/timesfm-forecast-service/tests/test_tsfm_features.py
 services/timesfm-forecast-service/tsfm_features.py
 shared/adaptive_thresholds.py

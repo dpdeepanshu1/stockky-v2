@@ -31,7 +31,40 @@ LOOKBACK = env_int_safe("KRONOS_LOOKBACK", 128, positive=True)
 CACHE_TTL_S = env_float_safe("KRONOS_WORKER_CACHE_TTL_S", 900, lo=0)
 HISTORY_TIMEOUT_S = env_float_safe("KRONOS_HISTORY_TIMEOUT_S", 20, positive=True)
 
-app = FastAPI(title="kronos-forecast-service")
+# round 587: FastAPI deprecated @app.on_event. Same change as group318 (real-trade, api-gateway ...): these decorators keep what on_event did (handlers run in the
+# order declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run them from a lifespan. The decorated
+# function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
+
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="kronos-forecast-service", lifespan=_lifespan)
 _lock = threading.Lock()                       # one forecast at a time: the CPU budget is small
 _forecaster: Any = None
 _cache: Dict[str, tuple] = {}
@@ -70,7 +103,7 @@ def _fetch_candles(symbol: str) -> list:
     return (body.get("candles") or body.get("data") or []) if isinstance(body, dict) else (body if isinstance(body, list) else [])
 
 
-@app.on_event("startup")
+@_on_startup
 def _startup() -> None:
     if (os.getenv("KRONOS_PRELOAD") or "").strip().lower() in ("1", "true", "yes"):
         threading.Thread(target=lambda: (_lock.acquire(), _get_forecaster(), _lock.release()), daemon=True).start()

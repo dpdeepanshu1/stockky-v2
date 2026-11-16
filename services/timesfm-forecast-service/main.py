@@ -44,7 +44,40 @@ HORIZON = max(1, min(_int_env("TSFM_HORIZON", 5), 20))
 MAX_AGE_DAYS = max(1, _int_env("TSFM_MAX_AGE_DAYS", 5))        # same reasoning as STRUCTURE_MAX_AGE_DAYS: Friday's bar is ~3.4 days old on Monday 09:15
 BATCH_MAX = max(1, _int_env("TSFM_BATCH_MAX", 60))
 
-app = FastAPI(title="timesfm-forecast-service")
+# round 587: FastAPI deprecated @app.on_event. Same change as group318 (real-trade, api-gateway ...): these decorators keep what on_event did (handlers run in the
+# order declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run them from a lifespan. The decorated
+# function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
+
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="timesfm-forecast-service", lifespan=_lifespan)
 _lock = threading.Lock()                 # one model call at a time: the CPU budget is small
 _backend: Any = None
 _backend_error: Optional[str] = None
@@ -133,7 +166,7 @@ def _compute(symbol: str, horizon: int) -> Dict[str, Any]:
     return rec
 
 
-@app.on_event("startup")
+@_on_startup
 def _startup() -> None:
     _load_cache()
     if (os.getenv("TSFM_PRELOAD") or "").strip().lower() in ("1", "true", "yes"):

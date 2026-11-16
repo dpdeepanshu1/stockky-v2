@@ -35,9 +35,9 @@ def test_exempt_error_switch_clock_and_garbage_fail_open():
 
 def test_config_and_wiring_present():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cfg = open(os.path.join(here, "config.py")).read()
+    cfg = open(os.path.join(here, "config.py"), encoding="utf-8").read()
     assert "OPENING_NO_SETUP_SINCE_IST" in cfg and "OPENING_NO_SETUP_UNTIL_IST" in cfg
-    ent = open(os.path.join(here, "orders", "entry.py")).read()
+    ent = open(os.path.join(here, "orders", "entry.py"), encoding="utf-8").read()
     assert "window_no_setup_refusal" in ent
 
 

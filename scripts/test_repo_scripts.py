@@ -438,3 +438,22 @@ def test_tracked_file_that_gitignore_covers_is_not_stale(tmp_path):
     assert "data/fno_real_probe/probe_1.json" in tracked
     gone = csf.stale_not_ignored(tracked, {".gitignore"}, tmp_path)
     assert gone == ["live.py"], gone
+
+
+def test_tracked_ui_baseline_screenshots_are_covered_by_the_real_gitignore(tmp_path):
+    """Round 592: frontend/ui-baseline/r532/light-phone/*.png (output of frontend/scripts/ui-baseline.mjs) was pushed by a blanket `git add -A` and CI listed them as tracked files
+    missing from the manifest. The repo's own .gitignore must now cover that folder, so stale_not_ignored() skips them while a tracked live file the manifest lacks is still reported."""
+    import subprocess
+    import check_stale_files as csf
+    run = lambda *a: subprocess.run(a, cwd=tmp_path, capture_output=True, text=True)
+    run("git", "init", "-q")
+    (tmp_path / ".gitignore").write_text((csf.ROOT / ".gitignore").read_text(encoding="utf-8"), encoding="utf-8")
+    shot = "frontend/ui-baseline/r532/light-phone/Dashboard.png"
+    (tmp_path / "frontend" / "ui-baseline" / "r532" / "light-phone").mkdir(parents=True)
+    (tmp_path / shot).write_bytes(b"\x89PNG")
+    (tmp_path / "live.py").write_text("x", encoding="utf-8")
+    run("git", "add", "-f", shot, "live.py", ".gitignore")
+    tracked = csf.tracked_files(tmp_path)
+    assert shot in tracked
+    gone = csf.stale_not_ignored(tracked, {".gitignore"}, tmp_path)
+    assert gone == ["live.py"], gone

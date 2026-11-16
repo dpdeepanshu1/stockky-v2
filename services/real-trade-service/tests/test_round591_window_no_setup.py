@@ -48,13 +48,13 @@ def test_since_and_until_are_configurable_and_garbage_fails_open():
 
 def test_config_catalog_and_wiring_present():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cfg = open(os.path.join(here, "config.py")).read()
+    cfg = open(os.path.join(here, "config.py"), encoding="utf-8").read()
     assert "OPENING_NO_SETUP_REFUSE" in cfg and "OPENING_NO_SETUP_UNTIL_IST" in cfg and "OPENING_NO_SETUP_SINCE_IST" in cfg
-    cat = open(os.path.join(here, "control", "catalog.py")).read()
+    cat = open(os.path.join(here, "control", "catalog.py"), encoding="utf-8").read()
     assert '"OPENING_NO_SETUP_REFUSE"' in cat and '"OPENING_NO_SETUP_UNTIL_IST"' in cat and '"OPENING_NO_SETUP_SINCE_IST"' in cat
-    ent = open(os.path.join(here, "entry_engine", "entry.py")).read()
+    ent = open(os.path.join(here, "entry_engine", "entry.py"), encoding="utf-8").read()
     assert "window_no_setup_refusal" in ent and "no_setup_window" in ent
-    auto = open(os.path.join(here, "..", "calibration-runner-service", "autocalib.py")).read()
+    auto = open(os.path.join(here, "..", "calibration-runner-service", "autocalib.py"), encoding="utf-8").read()
     assert '"OPENING_NO_SETUP_REFUSE"' in auto and '"OPENING_NO_SETUP_UNTIL_IST"' in auto and '"OPENING_NO_SETUP_SINCE_IST"' in auto
 
 

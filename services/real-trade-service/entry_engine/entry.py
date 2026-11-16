@@ -1608,6 +1608,16 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _ns_reject, "risk_verdict": None, "gate_tag": "no_setup"})
             continue
+        # round 591: no entry before OPENING_NO_SETUP_SINCE_IST (09:20); from then to OPENING_NO_SETUP_UNTIL_IST (15:30) a long with no matched setup waits (16 Nov: 7 failed-entry exits, all no-setup). A WAIT, looked at again next cycle. Fails open.
+        _wns_reject = setup_live.window_no_setup_refusal(
+            _setup_res, now=ist_now(), exempt=bool(_rearm.has_waiver(mode, cand.symbol)), enabled=bool(getattr(config, "OPENING_NO_SETUP_REFUSE", True)),
+            until=str(getattr(config, "OPENING_NO_SETUP_UNTIL_IST", "15:30")), since=str(getattr(config, "OPENING_NO_SETUP_SINCE_IST", "09:20")))
+        if _wns_reject:
+            _wait_with_preview(_wns_reject)
+            decision.gate_tag = "no_setup_window"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _wns_reject, "risk_verdict": None, "gate_tag": "no_setup_window"})
+            continue
         adj_risk_pct, _floor_lifted = size_floor.floored_risk_pct(_risk_base_pct, adj_risk_pct)
         _stack_reject = size_floor.stacked_refusal(_soft_pen, _floor_lifted)      # E285 round 152 (plan item 7): stacked soft penalties skip, they are not lifted
         if _stack_reject:

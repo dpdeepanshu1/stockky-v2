@@ -75,6 +75,27 @@ def no_setup_refusal(res: Optional[Dict[str, Any]], *, mode: str, exempt: bool, 
         return None
 
 
+def window_no_setup_refusal(res: Optional[Dict[str, Any]], *, now: Optional[datetime], exempt: bool, enabled: bool = True, until: str = "15:30", since: str = "09:20") -> Optional[str]:
+    """Round 591 (widened the same day): "wait until `since` (09:20), then only trade a setup that matched". (1) From 09:15 to `since` every long waits, matched or not. (2) From `since` to
+    `until` (15:30) a long whose setup walk ended in a real NO_SETUP verdict waits. Independent of NO_SETUP_MODE. Never for a pullback re-arm entry in (2); a matched setup,
+    PENALTY_TOO_HIGH, an engine error, no walk result or a bad time string lets the entry go on. Never raises."""
+    try:
+        if not enabled or now is None:
+            return None
+        minute = now.hour * 60 + now.minute
+        sh, sm = (int(x) for x in str(since).split(":")[:2])
+        uh, um = (int(x) for x in str(until).split(":")[:2])
+        if 9 * 60 + 15 <= minute < sh * 60 + sm:
+            return f"WINDOW_WAIT: no new entry before {sh:02d}:{sm:02d} (opening noise)"
+        if exempt or not isinstance(res, dict) or res.get("id") or res.get("why") == "error" or res.get("skip") != "NO_SETUP":
+            return None
+        if sh * 60 + sm <= minute < uh * 60 + um:
+            return "WINDOW_NO_SETUP: only a setup that matched (S1 / S2 / S3) may enter; a plain shortlist entry waits"
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def classify_long(**kw) -> Dict[str, Any]:
     """setup_engine.classify over facts_long(**kw). {"id": None, "skip": "NO_SETUP", "why": "error"} on any problem."""
     try:

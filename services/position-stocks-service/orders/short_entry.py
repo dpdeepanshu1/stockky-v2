@@ -20,7 +20,7 @@ from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
 from orders import learned_stop, setup_short, short_refusals, short_target, squeeze_guard
-from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
+from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, penny_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels, widen_to_atr_floor
 from tz_utils import ist_now
 
@@ -267,6 +267,10 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     why = cost_gate.reject_reason(live, qty, levels.target_pct)
     if why:
         _refuse(db, cand, "SHORT_COST_GATE", str(why))
+        return None
+    why = penny_gate.reject_reason(live, levels.stop_pct, qty)   # round 590: one tick vs the stop, and dust notional (same rule as the long side)
+    if why:
+        _refuse(db, cand, "SHORT_" + str(why).split(":", 1)[0], str(why))
         return None
     if _widened:
         _min_q = cost_gate.effective_min_qty(live, levels.target_pct, int(getattr(config, "ENTRY_MIN_QTY", 0) or 0))

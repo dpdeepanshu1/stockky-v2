@@ -477,3 +477,11 @@ def _round242_capital_board_off_by_default(monkeypatch):
     import config as _cfg
     monkeypatch.setattr(_cfg, "CAPITAL_ALLOC_MODE", "off", raising=False)
     yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _round591_opening_no_setup_off_by_default(monkeypatch):
+    """round 591: the opening no-setup guard is clock-dependent (09:15-09:45 IST); older tests run with it off, the round 591 tests call the helper directly."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "OPENING_NO_SETUP_REFUSE", False, raising=False)
+    yield

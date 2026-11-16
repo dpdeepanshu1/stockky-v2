@@ -81,6 +81,16 @@ def stale(tracked: list[str], manifest: set[str]) -> list[str]:
     return sorted(f for f in tracked if f not in manifest)
 
 
+def stale_not_ignored(tracked: list[str], manifest: set[str], root: Path = ROOT) -> list[str]:
+    """Round 589: like stale(), but a tracked file that .gitignore now covers (VM leftovers a blanket `git add -A` pushed before the ignore rule existed, such as
+    data/fno_real_probe/*) is a local leftover, not release code: it is not reported. Untrack it on the VM with `git rm -r --cached <folder>`."""
+    gone = stale(tracked, manifest)
+    if not gone:
+        return gone
+    ign = git_ignored(gone, root)
+    return [f for f in gone if f not in ign]
+
+
 def main(argv: list[str]) -> int:
     if "--verify" in argv:
         if not MANIFEST.exists():
@@ -132,7 +142,7 @@ def main(argv: list[str]) -> int:
         print("this folder is not a git checkout (or git is not installed); run this inside your repository")
         return 2
     known = {l.strip() for l in MANIFEST.read_text(encoding="utf-8").splitlines() if l.strip()}
-    gone = stale(tracked, known)
+    gone = stale_not_ignored(tracked, known)
     if not gone:
         print(f"no stale files: all {len(tracked)} tracked files are in this release")
         return 0

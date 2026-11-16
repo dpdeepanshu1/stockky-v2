@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import position_save, entry_stage_timer, candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import position_save, entry_stage_timer, candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, penny_gate, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels, widen_to_atr_floor
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -411,7 +411,7 @@ _SYMBOL_SPECIFIC_SKIP_PREFIXES = (
     "SYMBOL_HELD_BY_OTHER_SERVICE", "DEPTH_", "CIRCUIT_", "PREOPEN_GAP", "VWAP_", "LIQUIDITY_", "BOARD_CHASE", "COST_GATE",
     "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE", "STRUCTURE_", "TIME_MACHINE",
     # E249: per-symbol sizing / level rejects. They ended the cycle, so one high-priced rank-1 name (MIN_QTY) blocked every cheaper passer behind it each ~15 s.
-    "MIN_QTY", "RR_FLOOR", "STOP_ATR_FLOOR", "MIN_PRICE",
+    "MIN_QTY", "RR_FLOOR", "STOP_ATR_FLOOR", "MIN_PRICE", "PENNY_TICK", "MIN_NOTIONAL",   # round 590: cheap-stock friction / dust position, this symbol only
     # E251: spike-chase / gain-room refusals concern only the symbol just tried; the next shortlisted pick is still tried this cycle.
     "SPIKE_CHASE", "GAIN_ROOM",
     # E273 round 9: the total of the soft penalties reached the skip limit for this symbol only.
@@ -1129,6 +1129,20 @@ def _attempt_entry_impl(
         _log_candidate(db, candidate, "SKIPPED", _ns_reject, quality=quality)
         return None
 
+    # round 589 / 591: no long before 09:20, then (to 15:30) only a matched setup; was: before 09:30 a long with no setup is refused (16 Nov: both 09:20 no-setup longs hit the stop within minutes). Fails open; OPENING_NO_SETUP_REFUSE=false = off.
+    try:
+        from tz_utils import ist_now as _ist_now_ons
+        _ons_now = _ist_now_ons()
+    except Exception:  # noqa: BLE001
+        _ons_now = None
+    _ons_reject = setup_live.window_no_setup_refusal(
+        _setup_res, now=_ons_now, exempt=bool(rearm) or bool(_reclaim), enabled=bool(getattr(config, "OPENING_NO_SETUP_REFUSE", True)),
+        until=str(getattr(config, "OPENING_NO_SETUP_UNTIL_IST", "15:30")), since=str(getattr(config, "OPENING_NO_SETUP_SINCE_IST", "09:20")))
+    if _ons_reject:
+        _hold_unlock(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _ons_reject, quality=quality)
+        return None
+
     # E282 round 76: a stop learned from the setup's own winners (orders/learned_stop.py). Only ever TIGHTER than the stop above, never below the stock's noise floor, the plan's
     # stop until the cell has 30 closed trades. The SIZE below is still worked out from the plan's stop (`_budget_stop_pct`), so a tighter stop lowers the risk and never grows
     # the position. The note is stamped in flow_json["learned_stop"] (record only). Fails open (the levels stay as they were).
@@ -1470,6 +1484,14 @@ def _attempt_entry_impl(
             _hold_release(db, position_value=position_value, realized_pnl=0.0)
             _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", f"COST_GATE:{_cost_reject}", quality=quality)
+            return None
+
+        # round 590: cheap-stock friction (one tick vs the stop distance) and dust notional, judged on the final stop and quantity. See orders/penny_gate.py.
+        _penny_reject = penny_gate.reject_reason(candidate.current_ltp, levels.stop_pct, quantity)
+        if _penny_reject:
+            _hold_release(db, position_value=position_value, realized_pnl=0.0)
+            _hold_unlock(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", _penny_reject, quality=quality)
             return None
 
     # BUG FIX (this session): quantity is floored to at least 1 share above

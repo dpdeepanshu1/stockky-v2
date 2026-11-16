@@ -536,6 +536,14 @@ SETUP_S3_LIQUID_MIN_TURNOVER_CR = max(0.0, _og_float("SETUP_S3_LIQUID_MIN_TURNOV
 # E276 round 70: "no setup, no trade" for Real Trade longs. off | live; read at call time by setup_live.no_setup_refusal (anything but "live" = off). Ships OFF; the rule for turning it on
 # (10 sessions, 30 stamped entries, matched entries at least as good as unmatched) is in the plan. Only applies from the S3 start (09:45), when S1, S2 and S3 can all fire.
 NO_SETUP_MODE = ((os.getenv("NO_SETUP_MODE") or "").strip() or "off").lower()
+# round 591: 16 Nov Real Trade had 7 `Failed entry exit` trades (-Rs 126), all `BUY NOW (no setup)` shortlist entries. Between 09:20 and OPENING_NO_SETUP_UNTIL_IST (now 15:30, was 09:45 when S3 starts and
+# all three setups can fire) a long that matched no setup is WAITed (gate tag no_setup_window); it is looked at again next cycle, and from 09:45 it is as before (NO_SETUP_MODE decides).
+# Never for a pullback re-arm entry; an engine error or a missing walk lets the entry go on. false = old behaviour. The 09:45 end is a starting value: check the entry times of the 16 Nov failures.
+OPENING_NO_SETUP_REFUSE = ((os.getenv("OPENING_NO_SETUP_REFUSE") or "").strip() or "true").lower() == "true"
+OPENING_NO_SETUP_UNTIL_IST = (os.getenv("OPENING_NO_SETUP_UNTIL_IST") or "").strip() or "15:30"
+# widened the same day (owner decision): wait until OPENING_NO_SETUP_SINCE_IST (09:20, no entry at all before it), then only a setup that matched (S1 / S2 / S3) may enter, until
+# OPENING_NO_SETUP_UNTIL_IST (15:30). A plain shortlist entry is a WAIT (gate tag no_setup_window) and is looked at again next cycle, so a name that matches later is not lost.
+OPENING_NO_SETUP_SINCE_IST = (os.getenv("OPENING_NO_SETUP_SINCE_IST") or "").strip() or "09:20"
 OPENING_GATE_PENALTY_ENABLED = ((os.getenv("OPENING_GATE_PENALTY_ENABLED") or "").strip() or "true").lower() == "true"
 OPENING_GATE_HARD_RANGE_POS = _og_float("OPENING_GATE_HARD_RANGE_POS", 0.98)               # at or above this day-range position the candidate is still refused (buying the very high)
 OPENING_GATE_HARD_PREVDAY_CLOSE_POS = _og_float("OPENING_GATE_HARD_PREVDAY_CLOSE_POS", 0.10)   # a previous-day close in the bottom 10 % of its range is still refused

@@ -254,7 +254,7 @@ def test_every_tracked_file_of_this_checkout_is_in_the_manifest():
     if not tracked:
         return
     known = {l.strip() for l in csf.MANIFEST.read_text(encoding="utf-8").splitlines() if l.strip()}
-    gone = csf.stale(tracked, known)
+    gone = csf.stale_not_ignored(tracked, known, csf.ROOT)      # round 589: a tracked file .gitignore covers is a VM leftover, not release code
     assert not gone, f"tracked files missing from docs/FILE_MANIFEST.txt (run: python3 scripts/check_stale_files.py --write): {gone[:10]}"
 
 
@@ -420,3 +420,21 @@ def test_halfsell_run_refuses_before_any_prompt_outside_the_window():
         assert r.returncode == 0 and "NOT STARTED" in r.stdout and "admin user" not in r.stdout and "Type HALFSELL" not in r.stdout, (now, r.stdout, r.stderr)
     r = subprocess.run(["bash", "scripts/vm_all.sh", "halfsell", "run"], cwd=ROOT, input="", capture_output=True, text=True, timeout=30, env={**os.environ, "HALFSELL_NOW": "2 1000", "REPO": str(ROOT)})
     assert "NOT STARTED" not in r.stdout                                  # inside the window the old flow continues (it asks for the login)
+
+
+def test_tracked_file_that_gitignore_covers_is_not_stale(tmp_path):
+    """Round 589: data/fno_real_probe/* was pushed by a blanket `git add -A` before round 588 ignored it. Git keeps tracking it, so CI saw 'tracked files missing from the manifest'.
+    A tracked file that .gitignore covers is a VM leftover: not reported. A tracked live file the manifest lacks still is."""
+    import subprocess
+    import check_stale_files as csf
+    run = lambda *a: subprocess.run(a, cwd=tmp_path, capture_output=True, text=True)
+    run("git", "init", "-q")
+    (tmp_path / ".gitignore").write_text("data/fno_real_probe/\n", encoding="utf-8")
+    (tmp_path / "data" / "fno_real_probe").mkdir(parents=True)
+    (tmp_path / "data" / "fno_real_probe" / "probe_1.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "live.py").write_text("x", encoding="utf-8")
+    run("git", "add", "-f", "data/fno_real_probe/probe_1.json", "live.py", ".gitignore")
+    tracked = csf.tracked_files(tmp_path)
+    assert "data/fno_real_probe/probe_1.json" in tracked
+    gone = csf.stale_not_ignored(tracked, {".gitignore"}, tmp_path)
+    assert gone == ["live.py"], gone

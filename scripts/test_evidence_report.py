@@ -182,3 +182,16 @@ def test_round566_last_closed_is_the_newest_readable_close_among_usable_rows():
     assert c["last_closed"] == "2026-11-17T09:20:05" and c["n"] == 4 and c["n_ret"] == 3
     assert er.group_stats([])["last_closed"] is None
     assert er.stamp("2026-11-16") == "2026-11-16" and er.stamp(None) is None and er.stamp(5) is None
+
+
+def test_round593_strategy_by_version_group_only_when_a_stamp_exists():
+    recs = [rec(i + 1, 5.0, tab="swing", label="BUY NOW") for i in range(6)]
+    assert "strategy_by_version" not in er.build_report(recs, n_trials=1, min_n=3)["groups"]
+    for i, r in enumerate(recs):
+        if i < 4:
+            r["strategy_version"] = "sv-aaaa1111"
+    g = er.build_report(recs, n_trials=1, min_n=3)["groups"]["strategy_by_version"]
+    assert set(g) == {"swing | BUY NOW | sv-aaaa1111", "swing | BUY NOW | none"}
+    assert g["swing | BUY NOW | sv-aaaa1111"]["n"] == 4 and g["swing | BUY NOW | none"]["n"] == 2
+    one = er.build_report(recs, n_trials=1, min_n=3, groups=[("source_tab", "source_tab")])["groups"]
+    assert set(one) == {"source_tab"}

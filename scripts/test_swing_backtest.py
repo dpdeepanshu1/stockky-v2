@@ -1,6 +1,7 @@
 """Tests for scripts/swing_backtest.py. Plain asserts: python3 scripts/test_swing_backtest.py  or  pytest."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import random
 import sys
@@ -23,13 +24,33 @@ def _bars(closes, spread=0.005, vol=1e6):
     return out
 
 
+def _real_trade_cost_model():
+    """Round 594: the real-trade `cost_model` bound to the real-trade `config`, loaded by file path. `import cost_model` alone took whatever `config` an earlier test in the
+    same pytest process had left in sys.modules (another service's), so a full `pytest scripts` run died on a missing STT_DELIVERY_PCT_PER_LEG while the file alone passed.
+    sys.modules is put back afterwards. None when the files cannot be loaded (the parity half is then skipped, as before)."""
+    d = Path(__file__).resolve().parent.parent / "services" / "real-trade-service"
+    saved = {k: sys.modules.get(k) for k in ("config", "cost_model")}
+    try:
+        for name in ("config", "cost_model"):
+            spec = importlib.util.spec_from_file_location(name, str(d / f"{name}.py"))
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod
+            spec.loader.exec_module(mod)
+        return sys.modules["cost_model"]
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
 def test_cost_matches_the_real_cost_model_to_the_paisa_and_falls_with_size():
     c, src = sb.cost_constants()
     assert src == "real-trade config.py"
-    try:
-        import cost_model as cm
-    except Exception:                                                   # the real-trade modules are not importable in this image: skip the parity half
-        cm = None
+    cm = _real_trade_cost_model()                                       # None: the real-trade modules are not loadable in this image, skip the parity half
     for value in (3000.0, 10000.0, 20000.0, 50000.0):
         pct = sb.delivery_round_trip_pct(value, c)
         if cm is not None:

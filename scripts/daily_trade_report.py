@@ -11,6 +11,7 @@ Sources (read-only GETs):
 Rows: one per closed trade -> day (IST close date), service, symbol, entry HH:MM, exit HH:MM, held, P&L (NET of charges for both services; E231: position-stocks' realized P&L is before charges, so its row's own charges are subtracted),
 return %, exit reason. Then totals per day and, over the whole period, by entry hour, exit hour, hold length and exit reason, with the best and worst trades.
 A bucket under --min-n trades is marked "(few)": a negative hour with 3 trades is not a finding. Nothing here changes a setting or a trade.
+Round 595: a FAILED-ENTRY EXITS block (entry time against 09:20 / 09:45) and a NOTE line for records left out (origin / unbooked / no time).
 Exit 0 = report written; 1 = no trades found. Stdlib only.
 """
 from __future__ import annotations
@@ -68,7 +69,9 @@ def is_unbooked(r: Dict[str, Any]) -> bool:
     return num(pnl) == 0.0 and num(r.get("return_pct")) is None
 
 
-def rows_from_rt(doc: Any, origin: str = "all") -> List[Dict[str, Any]]:
+def rows_from_rt(doc: Any, origin: str = "all", drops: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
+    """`drops` (round 595, optional): filled with how many records were left out and why (origin filter, unbooked, no time / P&L), so a count that differs
+    from another screen can be explained instead of guessed."""
     recs = doc.get("records") if isinstance(doc, dict) else doc
     out = []
     for r in recs or []:
@@ -76,15 +79,36 @@ def rows_from_rt(doc: Any, origin: str = "all") -> List[Dict[str, Any]]:
             continue
         og = str(r.get("origin") or "system")
         if origin != "all" and og != origin:
+            if drops is not None:
+                drops["origin"] = drops.get("origin", 0) + 1
+                drops.setdefault("origin_names", {})
+                drops["origin_names"][og] = drops["origin_names"].get(og, 0) + 1
             continue
         if is_unbooked(r):
+            if drops is not None:
+                drops["unbooked"] = drops.get("unbooked", 0) + 1
             continue
         pnl = r.get("net_pnl") if r.get("net_pnl") is not None else r.get("gross_pnl")
         x = _row("real-trade", r.get("position_id"), r.get("symbol"), r.get("opened_at"), r.get("closed_at"), pnl, r.get("return_pct"), r.get("exit_reason"),
                  r.get("quantity"), og, r.get("return_basis"))
         if x:
             out.append(x)
+        elif drops is not None:
+            drops["no_time_or_pnl"] = drops.get("no_time_or_pnl", 0) + 1
     return out
+
+
+def drops_note(drops: Dict[str, Any]) -> Optional[str]:
+    """Round 595: one NOTE line for the records rows_from_rt left out (None when nothing was dropped)."""
+    parts = []
+    if drops.get("origin"):
+        names = ", ".join(f"{k} {v}" for k, v in sorted((drops.get("origin_names") or {}).items()))
+        parts.append(f"{drops['origin']} by --origin ({names})")
+    if drops.get("unbooked"):
+        parts.append(f"{drops['unbooked']} unbooked (P&L 0, no return %)")
+    if drops.get("no_time_or_pnl"):
+        parts.append(f"{drops['no_time_or_pnl']} with no open / close time or P&L")
+    return ("real-trade: records left out: " + "; ".join(parts) + " (rerun with --origin all to see the origin ones)") if parts else None
 
 
 _PS_BAD = ("ERROR", "REJECTED", "PENDING_RECONCILE", "OPEN", "PENDING")
@@ -191,6 +215,35 @@ def _table(title: str, g: Dict[Any, Dict[str, Any]], order, min_n: int, label: s
     return L + [""]
 
 
+def is_failed_entry(reason: Any) -> bool:
+    """Round 595: the failed-entry exit in any spelling (failed_entry_exit, Failed entry exit, FAILED_ENTRY)."""
+    t = str(reason or "").lower().replace("_", " ").replace("-", " ")
+    return "failed entry" in t
+
+
+def failed_entry_section(rows: List[Dict[str, Any]], cuts: tuple = ("09:20", "09:45")) -> List[str]:
+    """Round 595: every failed-entry exit with its entry time, then a count by entry time against the round 591 / 589 clock cuts (before 09:20 / 09:20 to 09:45 / after),
+    and what the other trades of the same service did in the same entry minute window (so one batch that mostly failed but partly won is visible). Empty list when none."""
+    fe = [r for r in rows if is_failed_entry(r["reason"])]
+    if not fe:
+        return []
+    def mins(r): return r["entry"].hour * 60 + r["entry"].minute
+    c1, c2 = (int(x[:2]) * 60 + int(x[3:5]) for x in cuts)
+    L = ["", "=" * 100, "FAILED-ENTRY EXITS (entry time against the 09:20 / 09:45 cuts)", "=" * 100]
+    L.append(f"  {'service':<16}{'symbol':<14}{'entry':>6}{'exit':>7}{'held':>7}{'P&L':>10}")
+    for r in sorted(fe, key=lambda r: r["entry"]):
+        L.append(f"  {r['service']:<16}{r['symbol']:<14}{r['entry'].strftime('%H:%M'):>6}{r['exit'].strftime('%H:%M'):>7}{fmt_hold(r['held_min']):>7}{money(r['pnl']):>10}")
+    buckets = (("before " + cuts[0], lambda m: m < c1), (f"{cuts[0]} to {cuts[1]}", lambda m: c1 <= m < c2), ("from " + cuts[1], lambda m: m >= c2))
+    L.append("")
+    for name, f in buckets:
+        b = [r for r in fe if f(mins(r))]
+        L.append(f"  entered {name:<14} {len(b):>3} failed entries  net {money(sum(r['pnl'] for r in b))}")
+    sibs = [r for r in rows if not is_failed_entry(r["reason"]) and any(r["service"] == x["service"] and abs(mins(r) - mins(x)) <= 5 for x in fe)]
+    if sibs:
+        L.append("  same service, entered within 5 min of a failed entry, did not fail: " + ", ".join(f"{r['symbol']} {r['entry'].strftime('%H:%M')} {money(r['pnl'])} ({r['reason']})" for r in sibs))
+    return L
+
+
 def build_report(rows: List[Dict[str, Any]], days: int, min_n: int = 8, header: Optional[List[str]] = None) -> str:
     rows = sorted(rows, key=lambda r: (r["exit"], r["entry"]))
     L: List[str] = ["DAILY TRADE REPORT - entry / exit time and profit / loss (IST)", f"generated {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}   window: last {days} day(s)"]
@@ -236,6 +289,7 @@ def build_report(rows: List[Dict[str, Any]], days: int, min_n: int = 8, header: 
         L += [f"Best : {best['symbol']} {best['entry'].strftime('%d %b %H:%M')} -> {best['exit'].strftime('%H:%M')}  {money(best['pnl'])}  ({best['reason']})",
               f"Worst: {worst['symbol']} {worst['entry'].strftime('%d %b %H:%M')} -> {worst['exit'].strftime('%H:%M')}  {money(worst['pnl'])}  ({worst['reason']})",
               f"Net without the best trade: {money(tot['net'] - best['pnl'])}", ""]
+    L += failed_entry_section(rows)
     # plain-words flags, only where there are enough trades
     flags: List[str] = []
     he = group(rows, lambda r: r["entry"].hour)
@@ -286,15 +340,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     rows: List[Dict[str, Any]] = []
     notes: List[str] = []
+    drops: Dict[str, Any] = {}
     if a.rt_file:
         for f in a.rt_file:
-            rows += rows_from_rt(json.load(open(f, encoding="utf-8")), a.origin)
+            rows += rows_from_rt(json.load(open(f, encoding="utf-8")), a.origin, drops)
     elif not a.no_rt:
         try:
             if not a.token:
                 notes.append("real-trade: no admin token given (TOKEN / --token), skipped")
             else:
-                rows += rows_from_rt(_get(f"{a.rt_url.rstrip('/')}/positions/REAL/records?days={max(1, min(a.days, 60))}&limit=1000&include_imported=true", a.token), a.origin)
+                rows += rows_from_rt(_get(f"{a.rt_url.rstrip('/')}/positions/REAL/records?days={max(1, min(a.days, 60))}&limit=1000&include_imported=true", a.token), a.origin, drops)
         except Exception as e:  # noqa: BLE001
             notes.append(f"real-trade: could not read ({type(e).__name__}: {e})")
     if a.ps_file:
@@ -305,6 +360,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             rows += rows_from_ps(_get(f"{a.ps_url.rstrip('/')}/trades/history?limit=1000"))
         except Exception as e:  # noqa: BLE001
             notes.append(f"position-stocks: could not read ({type(e).__name__}: {e})")
+    _dn = drops_note(drops)
+    if _dn:
+        notes.append(_dn)
     rows = dedupe(rows)
     now = (parse_ts(a.as_of) or datetime.now(IST)).astimezone(IST)
     cutoff = now - timedelta(days=max(1, a.days))

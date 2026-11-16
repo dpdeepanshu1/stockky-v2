@@ -174,3 +174,64 @@ def test_stop_flag_adds_up_the_spellings():
     assert "stop exits cost -320 over 8 trades" in txt                                        # no single spelling reaches 8 alone
     few = d.build_report(rows[:5], 10, min_n=8)
     assert "stop exits cost" not in few
+
+
+# ----------------------------------------------------------------------------------------------- E620 round 595: failed-entry section and the dropped-records note
+def _fe_rows():
+    """The 16 Nov real-trade rows (IST times given as UTC = IST - 5:30)."""
+    def u(hhmm):
+        h, m = int(hhmm[:2]), int(hhmm[3:])
+        t = h * 60 + m - 330
+        return f"2026-11-16T{t // 60:02d}:{t % 60:02d}:00Z"
+    spec = [("MEESHO", "09:35", "10:03", -18, "failed_entry_exit"), ("ASKAUTOLTD", "09:31", "10:21", -19, "failed_entry_exit"),
+            ("ASHAPURMIN", "09:35", "10:25", -12, "failed_entry_exit"), ("MOCAPITAL", "09:31", "10:27", -18, "failed_entry_exit"),
+            ("GHCL", "09:35", "10:54", 8, "stop_hit"), ("ETERNAL", "10:04", "15:00", -1, "eod_squareoff")]
+    return [d._row("real-trade", i, s, u(a), u(b), p, -0.5, r) for i, (s, a, b, p, r) in enumerate(spec)]
+
+
+def test_failed_entry_spellings():
+    for r in ("failed_entry_exit", "Failed entry exit", "FAILED_ENTRY", "failed-entry-exit"):
+        assert d.is_failed_entry(r), r
+    for r in ("stop_hit", "stagnation_exit:no_followthrough", None, "-", "entry_rejected"):
+        assert not d.is_failed_entry(r), r
+
+
+def test_failed_entry_section_buckets_and_siblings():
+    txt = d.build_report(_fe_rows(), 2)
+    assert "FAILED-ENTRY EXITS" in txt
+    assert "entered 09:20 to 09:45" in txt and "4 failed entries  net -67" in txt
+    assert "entered before 09:20" in txt and "entered from 09:45" in txt
+    assert "GHCL 09:35 +8 (stop_hit)" in txt                      # the winner of the same batch is named
+    assert "ETERNAL" not in txt.split("FAILED-ENTRY EXITS")[1].split("FLAGS")[0].split("same service")[-1]   # 10:04 is not within 5 minutes of a 09:35 entry
+
+
+def test_failed_entry_section_absent_without_failed_entries():
+    rows = [r for r in _fe_rows() if not d.is_failed_entry(r["reason"])]
+    assert "FAILED-ENTRY EXITS" not in d.build_report(rows, 2)
+    assert d.failed_entry_section([]) == []
+
+
+def test_failed_entry_cut_is_inclusive_at_0945():
+    r = d._row("real-trade", 1, "X", "2026-11-16T04:15:00Z", "2026-11-16T05:00:00Z", -10, -0.5, "failed_entry_exit")      # 09:45 IST
+    txt = d.build_report([r], 2)
+    assert "entered from 09:45" in txt and "entered from 09:45       1 failed entries" in txt
+
+
+def test_dropped_records_are_counted_and_named():
+    doc = {"records": [
+        _rt(1, "AAA", "2026-11-16T04:00:00Z", "2026-11-16T05:00:00Z", -5.0, -0.5, "failed_entry_exit"),
+        _rt(2, "BBB", "2026-11-16T04:00:00Z", "2026-11-16T05:00:00Z", -5.0, -0.5, "failed_entry_exit", origin="manual"),
+        _rt(3, "CCC", "2026-11-16T04:00:00Z", "2026-11-16T05:00:00Z", -5.0, -0.5, "failed_entry_exit", origin="manual"),
+        {"position_id": 4, "symbol": "GHOST", "opened_at": "2026-11-16T03:00:00Z", "closed_at": "2026-11-16T03:10:00Z", "net_pnl": 0.0, "exit_reason": "x"},
+        {"position_id": 5, "symbol": "BAD", "opened_at": None, "closed_at": "2026-11-16T05:00:00Z", "net_pnl": 1},
+    ]}
+    drops = {}
+    rows = d.rows_from_rt(doc, "system", drops)
+    assert [r["symbol"] for r in rows] == ["AAA"]
+    note = d.drops_note(drops)
+    assert "2 by --origin (manual 2)" in note and "1 unbooked" in note and "1 with no open / close time or P&L" in note
+    d2 = {}
+    d.rows_from_rt(doc, "all", d2)
+    assert "origin" not in d2 and d.drops_note({}) is None          # nothing dropped by origin with --origin all; empty = no note
+    assert d.rows_from_rt(doc, "system") == rows                    # the old two-argument call still works
+

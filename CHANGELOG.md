@@ -1,3 +1,12 @@
+## 17 Nov 2026 - Round 597 (E622): CI fix - `test_both_routes_are_fetched_at_the_same_time` no longer depends on the clock (test only; no service code, no env, no DB)
+
+ * **CI failure:** `services/real-trade-service/tests/test_group177_watchlist_tier1_reasons.py::test_both_routes_are_fetched_at_the_same_time` took 0.88 s against its 0.55 s limit on a loaded GitHub runner (6520 passed, 1 failed). The code under test (`asyncio.gather` of the two Tier 1 routes in `watchlist_engine/sources.py`) was correct; the test measured wall-clock time.
+ * **Fix:** the test now makes each GET wait until BOTH routes have started (2 s guard), then asserts both were in flight at once (`max_in_flight == 2`) and the Hot Picks answer arrived. It passes on any machine speed.
+ * **Checked here:** with the fetch made sequential (mutation) the new test FAILS; restored, it passes. Full real-trade suite: 6521 passed, 1 skipped (Python 3.12 here, the same as the CI runner). Removed the now-unused `import time` in that test file.
+ * **Files:** changed `services/real-trade-service/tests/test_group177_watchlist_tier1_reasons.py`, `CHANGELOG.md`. No file added; the manifest is unchanged.
+ * **Not changed (same pattern, wider margins):** other tests assert a wall-clock limit, for example `analysis-intelligence-service/tests/test_event_main.py` (< 0.9 s, sequential 1.8 s) and `market-data-service/tests/test_group270_dhan_core.py` (< 0.2 s). They have not failed in CI; if one does, fix it the same way.
+ * **Roll back:** restore the test file from round 596.
+
 ## 17 Nov 2026 - Round 596 (E621): `scripts/guard_log_summary.py`, a read-only count of the round 590 / 591 guard log tokens after a session (new script; no service code, no DB, no env change)
 
  * **Why:** the next evidence step after a session was four separate `grep` commands on two containers. This does them in one run and shows zero explicitly.

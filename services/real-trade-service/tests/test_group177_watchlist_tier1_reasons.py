@@ -6,7 +6,6 @@ import asyncio
 import logging
 import os
 import sys
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -160,10 +159,30 @@ def test_breaker_open_with_empty_cache_names_the_cache(caplog):
 
 
 def test_both_routes_are_fetched_at_the_same_time():
-    t0 = time.monotonic()
-    out = _fetch(_client(_Resp(HOT), _Resp([]), delay=0.3))
+    """Round 597: no wall-clock limit (it failed on a slow CI runner: 0.88 s against 0.55 s). Each GET waits until BOTH routes have started; a
+    sequential fetch would never see the second start, would hit the 2 s guard, and the Hot Picks answer would be lost."""
+    state = {"started": 0, "max_in_flight": 0, "in_flight": 0}
+    both = None
+
+    async def get(url, *a, **k):
+        nonlocal both
+        both = both or asyncio.Event()
+        state["started"] += 1
+        state["in_flight"] += 1
+        state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+        if state["started"] >= 2:
+            both.set()
+        try:
+            await asyncio.wait_for(both.wait(), 2.0)
+        finally:
+            state["in_flight"] -= 1
+        return _Resp(HOT) if url.endswith("/stockky-hot") else _Resp([])
+
+    c = _client(_Resp(HOT), _Resp([]))
+    c.get = get
+    out = _fetch(c)
     assert [r["symbol"] for r in out] == ["TCS"]
-    assert time.monotonic() - t0 < 0.55                        # sequential would be >= 0.6 s
+    assert state["started"] == 2 and state["max_in_flight"] == 2
 
 
 @pytest.mark.parametrize("raw,expected", [("", True), ("1", True), ("0", False), ("false", False), (" OFF ", False)])

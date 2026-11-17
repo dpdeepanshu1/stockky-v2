@@ -3,6 +3,7 @@
 Run INSIDE the real-trade container, from ~/stockky-v2, after the close (15:45 IST or later):
     docker compose exec -T real-trade-service python - --day 2026-11-17 < scripts/blocked_outcome.py
     ... --gate no_setup_window (default) | time_machine | structure | ...   --up 2.0 (percent)   --top 40
+    ... --gate soft_stack --shadow A      only the rows the round 599 shadow rule A would have let in (B: --gate no_setup_window --shadow B)
 
 Reads: trade_decisions (REAL, ENTRY, WAIT rows with that gate_tag, 09:15-15:30 IST of --day) and the 1-minute bars position-stocks records
 under /data/bars/<day>/<SYMBOL>.json. Writes nothing. A symbol with no recorded bars is counted as no_bars, never guessed.
@@ -99,16 +100,17 @@ def format_report(day, gate, up_pct, rows, counts, top):
     return "\n".join(L)
 
 
-def fetch_blocks(day: str, gate: str, mode: str):
+def fetch_blocks(day: str, gate: str, mode: str, shadow: str = ""):
     import db  # noqa: E402  (the service's own module; only present inside the container)
     from sqlalchemy import MetaData, Table, desc, func, select
     s = db.get_session_factory()()
     t = Table("trade_decisions", MetaData(), autoload_with=s.get_bind())
     lo, hi = window_utc(day)
+    conds = [t.c["mode"] == mode, t.c["decision_type"] == "ENTRY", t.c["gate_tag"] == gate, t.c["created_at"] >= lo, t.c["created_at"] < hi]
+    if shadow:                                   # round 599: only rows carrying flow_json["or_shadow"] with that rule
+        conds += [t.c["flow_json"].like('%"or_shadow"%'), t.c["flow_json"].like('%"rule":"' + shadow.upper()[:1] + '"%')]
     q = (select(t.c["symbol"], func.count().label("n"), func.min(t.c["created_at"]), func.max(t.c["created_at"]))
-         .where(t.c["mode"] == mode, t.c["decision_type"] == "ENTRY", t.c["gate_tag"] == gate,
-                t.c["created_at"] >= lo, t.c["created_at"] < hi)
-         .group_by(t.c["symbol"]).order_by(desc("n")))
+         .where(*conds).group_by(t.c["symbol"]).order_by(desc("n")))
     return [(r[0], int(r[1]), r[2], r[3]) for r in s.execute(q)]
 
 
@@ -117,11 +119,12 @@ def main(argv=None) -> int:
     ap.add_argument("--day", default=(datetime.now(timezone.utc) + IST).strftime("%Y-%m-%d"))
     ap.add_argument("--gate", default="no_setup_window")
     ap.add_argument("--mode", default="REAL")
+    ap.add_argument("--shadow", default="", help="A or B: only rows the round 599 shadow rule recorded")
     ap.add_argument("--up", type=float, default=2.0)
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--bars-dir", default="/data/bars")
     a = ap.parse_args(argv)
-    blocks = fetch_blocks(a.day, a.gate, a.mode)
+    blocks = fetch_blocks(a.day, a.gate, a.mode, a.shadow)
     if not blocks:
         print(f"no {a.gate} WAIT rows for {a.mode} on {a.day} (check --day / --gate)")
         return 0

@@ -54,6 +54,7 @@ from entry_engine import day_spike_gate, flow_gate, gap_rank, open_cues
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
+from entry_engine import or_shadow as _or_shadow   # round 599: shadow-only OR rules (record, never change an entry)
 from entry_engine import setup_inputs as _setup_inputs   # E276 round 68
 from entry_engine import conviction_size as _conviction_size   # E266
 
@@ -731,6 +732,18 @@ async def _rearm_requeue(db: Session, mode: str) -> int:
         except Exception as e2:  # noqa: BLE001
             logger.debug("pullback-rearm[%s]: rollback after failed requeue also failed: %s", mode, e2)
         return 0
+
+
+def _or_shadow_record(decision, mode: str, symbol: str, hit: Optional[dict]) -> None:
+    """Round 599: log one OR_SHADOW line and stamp flow_json["or_shadow"] for a rule that WOULD have let this refused entry in. Record only: the entry stays refused. Never raises."""
+    try:
+        if not hit or not _or_shadow.enabled(getattr(config, "OR_SHADOW_MODE", "log")):
+            return
+        decision.flow_json = _or_shadow.stamp(getattr(decision, "flow_json", None), hit)
+        logger.info("OR_SHADOW[%s/%s] rule %s would %s (%s) - recorded only, the entry stays refused", mode, symbol, hit.get("rule"), hit.get("would"),
+                    "; ".join(f"{k}={v}" for k, v in hit.items() if k not in ("rule", "would", "refused")))
+    except Exception:  # noqa: BLE001 - evidence only, never changes an entry
+        logger.debug("or_shadow record failed for %s", symbol, exc_info=True)
 
 
 def _preopen_gap_or_waive(symbol: str, db, waived: list, pen: Optional[dict] = None) -> Optional[str]:
@@ -1524,6 +1537,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # no match keeps the legacy stamp and full size. A candidate with no event only costs a cached bar read (non-blocking), and only from 09:30. Never raises, never blocks an entry.
         _setup_res, _setup_mult = None, None
         _stamp_event = None                       # E285 round 115: the fresh typed positive event this entry saw (record only: the stamp carries it)
+        _or_ctx = None                            # round 599: facts for the shadow OR rule B (set only when the setup walk ran)
         _ns_all_ran = False                       # E276 round 70: True only when the walk ran with S1, S2 and S3 all able to fire (NO_SETUP refusal below)
         _s1_on = bool(config.SETUP_S1_ENABLED)
         if config.SETUP_ENGINE_ENABLED and (_s1_on or config.SETUP_S2_ENABLED or config.SETUP_S3_ENABLED):
@@ -1575,6 +1589,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         now=_now_ist, penalties={k: v for k, v in (("opening_gate", 1.0 - _og_pen["mult"]), ("regime", 1.0 - _regime_pen_mult),
                                                                     (gap_event.LARGE_KEY, (gap_event.large_gap_penalty(_gap_now) or 0.0) if _gap_waived else 0.0),
                                                                     *((k, 1.0 - v) for k, v in _soft_pen.items())) if v > 0})
+                    try:                                                                                         # round 599: facts for shadow rule B (record only)
+                        _vw_or = _orb.get("vwap") if isinstance(_orb, dict) else None
+                        _or_ctx = {"event": _pev, "above_vwap": (bool(float(tick.price) > float(_vw_or)) if _vw_or else None),
+                                   "sector_third": (_inputs or {}).get("sector_third") if isinstance(_inputs, dict) else None,
+                                   "priced_in": (_inputs or {}).get("event_priced_in") if isinstance(_inputs, dict) else None}
+                    except Exception:  # noqa: BLE001
+                        _or_ctx = None
                     _ns_all_ran = bool(_s1_on and _s2_on and _s3_on)
                     if _setup_res.get("id"):
                         _setup_mult = float(_setup_res.get("size_mult") or 1.0)
@@ -1613,6 +1634,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             _setup_res, now=ist_now(), exempt=bool(_rearm.has_waiver(mode, cand.symbol)), enabled=bool(getattr(config, "OPENING_NO_SETUP_REFUSE", True)),
             until=str(getattr(config, "OPENING_NO_SETUP_UNTIL_IST", "15:30")), since=str(getattr(config, "OPENING_NO_SETUP_SINCE_IST", "09:20")))
         if _wns_reject:
+            if isinstance(_or_ctx, dict):          # round 599: shadow rule B (record only)
+                _or_shadow_record(decision, mode, cand.symbol, _or_shadow.rule_b(
+                    _wns_reject, _or_ctx.get("event"), _or_ctx.get("above_vwap"), _or_ctx.get("sector_third"), _or_ctx.get("priced_in"),
+                    float(getattr(config, "OR_SHADOW_MIN_EVENT_STRENGTH", 0.5))))
             _wait_with_preview(_wns_reject)
             decision.gate_tag = "no_setup_window"
             db.add(decision)
@@ -1621,6 +1646,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         adj_risk_pct, _floor_lifted = size_floor.floored_risk_pct(_risk_base_pct, adj_risk_pct)
         _stack_reject = size_floor.stacked_refusal(_soft_pen, _floor_lifted)      # E285 round 152 (plan item 7): stacked soft penalties skip, they are not lifted
         if _stack_reject:
+            _or_shadow_record(decision, mode, cand.symbol, _or_shadow.rule_a(_stack_reject, _setup_res))      # round 599: shadow rule A (record only)
             _wait_with_preview(_stack_reject)
             decision.gate_tag = "soft_stack"
             db.add(decision)

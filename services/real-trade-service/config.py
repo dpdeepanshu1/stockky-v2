@@ -544,6 +544,10 @@ OPENING_NO_SETUP_UNTIL_IST = (os.getenv("OPENING_NO_SETUP_UNTIL_IST") or "").str
 # widened the same day (owner decision): wait until OPENING_NO_SETUP_SINCE_IST (09:20, no entry at all before it), then only a setup that matched (S1 / S2 / S3) may enter, until
 # OPENING_NO_SETUP_UNTIL_IST (15:30). A plain shortlist entry is a WAIT (gate tag no_setup_window) and is looked at again next cycle, so a name that matches later is not lost.
 OPENING_NO_SETUP_SINCE_IST = (os.getenv("OPENING_NO_SETUP_SINCE_IST") or "").strip() or "09:20"
+# round 599: SHADOW only. Records what two looser "OR" entry rules would have done (A: matched setup at a soft_stack refusal; B: fresh typed positive event + above VWAP + sector top third
+# at a no_setup_window refusal). log (default) = one OR_SHADOW log line + flow_json["or_shadow"], never changes an entry; off = nothing. No live mode exists until the evidence says so.
+OR_SHADOW_MODE = ((os.getenv("OR_SHADOW_MODE") or "").strip() or "log").lower()
+OR_SHADOW_MIN_EVENT_STRENGTH = _og_float("OR_SHADOW_MIN_EVENT_STRENGTH", 0.5)      # rule B: the typed positive event's strength must be at least this (0..1)
 OPENING_GATE_PENALTY_ENABLED = ((os.getenv("OPENING_GATE_PENALTY_ENABLED") or "").strip() or "true").lower() == "true"
 OPENING_GATE_HARD_RANGE_POS = _og_float("OPENING_GATE_HARD_RANGE_POS", 0.98)               # at or above this day-range position the candidate is still refused (buying the very high)
 OPENING_GATE_HARD_PREVDAY_CLOSE_POS = _og_float("OPENING_GATE_HARD_PREVDAY_CLOSE_POS", 0.10)   # a previous-day close in the bottom 10 % of its range is still refused

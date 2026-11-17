@@ -1,9 +1,19 @@
+## 17 Nov 2026 - Round 596 (E621): `scripts/guard_log_summary.py`, a read-only count of the round 590 / 591 guard log tokens after a session (new script; no service code, no DB, no env change)
+
+ * **Why:** the next evidence step after a session was four separate `grep` commands on two containers. This does them in one run and shows zero explicitly.
+ * **What it does:** counts lines containing `WINDOW_WAIT`, `WINDOW_NO_SETUP`, `no_setup_window`, `PENNY_TICK`, `MIN_NOTIONAL` in the real-trade and position-stocks container logs (`docker logs --since 8h`, `--since` changeable) and prints up to 3 raw sample lines each. It does not parse symbols or times, so a changed log format cannot make it wrong. `--file` reads saved logs instead.
+ * **Does not:** change anything, gate anything (exit 0 always), or tell a line count from a trade count; the output says to compare with `daily_trade_report.py`.
+ * **Files:** added `scripts/guard_log_summary.py`, `scripts/test_guard_log_summary.py` (5 cases), `docs/FILE_MANIFEST.txt` (+2 lines, 3072 files), `README.md` (one table row), `CHANGELOG.md`.
+ * **Checked here:** real pytest (5 passed), a run against a sample log, `check_stale_files.py --verify`. **Not checked here:** `docker logs` against your containers (names `stockky-v2-real-trade-service-1`, `stockky-v2-position-stocks-service-1` as in your login command).
+ * **Use (VM, no rebuild):** `python3 scripts/guard_log_summary.py` after the session closes.
+ * **Roll back:** delete the two new files and the manifest / README lines.
+
 ## 16 Nov 2026 - Round 595 (E620): `daily_trade_report.py` shows failed-entry exits by entry time and says which records it left out (report script only; no trading code, no DB, no env change)
 
  * **Why (16 Nov evening run):** the owner's `grep -i "failed entry"` found nothing because the report prints the reason as `failed_entry_exit`; and the report listed 4 Real Trade failed entries while the round 591 note counted 7 (-Rs 126 against -Rs 67 shown). The report dropped records without saying so (`--origin` filter, unbooked P&L 0 rows, rows with no time / P&L), so the gap could not be explained from its output.
  * **Fix:** (1) new section `FAILED-ENTRY EXITS`, shown only when there is one: every failed-entry exit (any spelling: `failed_entry_exit`, `Failed entry exit`, `FAILED_ENTRY`) with entry, exit, hold and P&L, a count and net by entry time against the 09:20 / 09:45 cuts (before 09:20 / 09:20 to 09:45 / from 09:45), and the same-service trades entered within 5 minutes of a failed entry that did not fail (16 Nov: GHCL 09:35, +8). (2) a `NOTE:` line at the top counts the real-trade records left out and why (`--origin`, unbooked, no open / close time or P&L) and says to rerun with `--origin all` for the origin ones. `rows_from_rt(doc, origin)` keeps its two-argument call (new optional third argument `drops`).
  * **Does not:** change any total, flag or other table; the CSV is unchanged; nothing reads this report to decide anything.
- * **Files:** changed `scripts/daily_trade_report.py`, `scripts/test_daily_trade_report.py` (5 new cases, 20 in all; the 16 Nov rows are the fixture), `CHANGELOG.md`. No file added; the manifest is unchanged.
+ * **Files:** changed `scripts/daily_trade_report.py`, `scripts/test_daily_trade_report.py` (6 new cases, 21 in all; the 16 Nov rows are the fixture), `CHANGELOG.md`. No file added; the manifest is unchanged.
  * **Checked here:** real pytest on `test_daily_trade_report.py` + `test_e257_report_fixes.py` (26 passed); the 09:45 edge test fails when the cut is made exclusive and passes after restoring it; `check_stale_files.py --verify` (3070 files), `gen_env_reference.py --check`. **Not checked here:** the report against your live records.
  * **Use (VM, no rebuild: it is a script):** `python3 scripts/daily_trade_report.py --days 2 --origin all --out daily_trades.txt` (token as before), then read the `NOTE:` line and the `FAILED-ENTRY EXITS` block. Compare with `--origin system` if the counts differ.
  * **Roll back:** restore `daily_trade_report.py` and its test from round 594.

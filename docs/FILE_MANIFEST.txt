@@ -541,6 +541,7 @@ scripts/gen_env_reference.py
 scripts/gen_ms_golden.py
 scripts/gen_technical_baseline.py
 scripts/generate_secrets.py
+scripts/guard_log_summary.py
 scripts/healthcheck.sh
 scripts/hold_bucket_check.py
 scripts/intraday_gate_backtest.py
@@ -627,6 +628,7 @@ scripts/test_group467_performance.py
 scripts/test_group468_calibration_snapshot.py
 scripts/test_group468_entry_slippage_review.py
 scripts/test_group470_tooling.py
+scripts/test_guard_log_summary.py
 scripts/test_hold_bucket_check.py
 scripts/test_intraday_gate_backtest.py
 scripts/test_intraday_state_check.py

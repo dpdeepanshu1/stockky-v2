@@ -235,3 +235,8 @@ def test_dropped_records_are_counted_and_named():
     assert "origin" not in d2 and d.drops_note({}) is None          # nothing dropped by origin with --origin all; empty = no note
     assert d.rows_from_rt(doc, "system") == rows                    # the old two-argument call still works
 
+
+
+def test_failed_entry_block_is_followed_by_a_blank_line_before_flags():
+    txt = d.build_report(_fe_rows(), 2)
+    assert "\n\nFLAGS" in txt.split("FAILED-ENTRY EXITS")[1]

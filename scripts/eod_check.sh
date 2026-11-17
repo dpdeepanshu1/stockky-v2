@@ -40,3 +40,9 @@ for r in s.execute(q):
 E
 echo; echo "== blocked_outcome (no_setup_window) =="
 docker compose exec -T real-trade-service python - --day "$DAY" < scripts/blocked_outcome.py
+echo; echo "== OR_SHADOW rule A (soft_stack + matched setup) =="
+docker compose exec -T real-trade-service python - --day "$DAY" --gate soft_stack --shadow A < scripts/blocked_outcome.py
+echo; echo "== OR_SHADOW rule B (no_setup_window + typed event + above VWAP + sector top third) =="
+docker compose exec -T real-trade-service python - --day "$DAY" --gate no_setup_window --shadow B < scripts/blocked_outcome.py
+echo; echo "== OR_SHADOW log lines (all day) =="
+docker compose logs --since 14h real-trade-service 2>/dev/null | grep "OR_SHADOW" | sort -u | tail -20

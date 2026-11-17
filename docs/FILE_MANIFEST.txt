@@ -2425,6 +2425,7 @@ services/real-trade-service/entry_engine/open_cues.py
 services/real-trade-service/entry_engine/opening_gate.py
 services/real-trade-service/entry_engine/opening_guard.py
 services/real-trade-service/entry_engine/opening_protect.py
+services/real-trade-service/entry_engine/or_shadow.py
 services/real-trade-service/entry_engine/orb_bars.py
 services/real-trade-service/entry_engine/orb_shadow.py
 services/real-trade-service/entry_engine/order_flow.py
@@ -2946,6 +2947,7 @@ services/real-trade-service/tests/test_round323_atr_nan.py
 services/real-trade-service/tests/test_round512_market_research.py
 services/real-trade-service/tests/test_round557_strategy_version.py
 services/real-trade-service/tests/test_round591_window_no_setup.py
+services/real-trade-service/tests/test_round599_or_shadow.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

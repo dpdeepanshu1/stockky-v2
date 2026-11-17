@@ -289,7 +289,8 @@ def build_report(rows: List[Dict[str, Any]], days: int, min_n: int = 8, header: 
         L += [f"Best : {best['symbol']} {best['entry'].strftime('%d %b %H:%M')} -> {best['exit'].strftime('%H:%M')}  {money(best['pnl'])}  ({best['reason']})",
               f"Worst: {worst['symbol']} {worst['entry'].strftime('%d %b %H:%M')} -> {worst['exit'].strftime('%H:%M')}  {money(worst['pnl'])}  ({worst['reason']})",
               f"Net without the best trade: {money(tot['net'] - best['pnl'])}", ""]
-    L += failed_entry_section(rows)
+    _fe = failed_entry_section(rows)
+    L += _fe + ([""] if _fe else [])
     # plain-words flags, only where there are enough trades
     flags: List[str] = []
     he = group(rows, lambda r: r["entry"].hour)

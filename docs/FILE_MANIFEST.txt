@@ -469,6 +469,7 @@ scripts/audit_service_sheet.py
 scripts/audit_tabs.py
 scripts/audit_ui_coverage.py
 scripts/backup_state.sh
+scripts/blocked_outcome.py
 scripts/board_parity_check.py
 scripts/calibration_pack.py
 scripts/calibration_snapshot.py
@@ -516,6 +517,7 @@ scripts/entry_rules_backtest.py
 scripts/entry_slippage_review.py
 scripts/env_review_check.py
 scripts/env_structure_check.py
+scripts/eod_check.sh
 scripts/evidence_report.py
 scripts/exit_followup_study.py
 scripts/export_intraday.py
@@ -599,6 +601,7 @@ scripts/test_angelone_movers.py
 scripts/test_audit_live_fields.py
 scripts/test_audit_route_auth.py
 scripts/test_backup_state.py
+scripts/test_blocked_outcome.py
 scripts/test_board_parity_check.py
 scripts/test_calibration_pack.py
 scripts/test_calibration_status.py

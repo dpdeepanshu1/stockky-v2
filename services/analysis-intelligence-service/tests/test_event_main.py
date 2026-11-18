@@ -1170,6 +1170,63 @@ class TestFetchEventsSingleFlight:
         t2.join(5)
         assert len(calls) == 1 and len(out) == 2 and em._inflight == {}
 
+    def test_second_caller_gets_the_leaders_result_when_nothing_was_cached(self, monkeypatch):
+        """round 619: an empty answer is not cached on purpose; the follower must still not run a second full fetch."""
+        import threading
+        calls = []
+        gate = threading.Event()
+
+        def impl(symbol, force=False):
+            calls.append(symbol)
+            gate.wait(5)
+            return {"symbol": symbol, "recent_news": [], "marker": len(calls)}      # nothing written to the cache
+        monkeypatch.setattr(em, "_fetch_events_impl", impl)
+        out = []
+        t1 = threading.Thread(target=lambda: out.append(em._fetch_events("EMPTYQ.NS")))
+        t1.start()
+        while not calls:
+            time.sleep(0.01)
+        t2 = threading.Thread(target=lambda: out.append(em._fetch_events("EMPTYQ.NS")))
+        t2.start()
+        time.sleep(0.1)
+        gate.set()
+        t1.join(5)
+        t2.join(5)
+        assert len(calls) == 1 and len(out) == 2 and all(o["marker"] == 1 for o in out) and em._inflight == {}
+        em._fetch_events("EMPTYQ.NS")                      # a LATER caller is not served from memory: nothing was cached, so it fetches again
+        assert len(calls) == 2
+
+    def test_a_leader_that_raised_leaves_nothing_for_the_follower_to_reuse(self, monkeypatch):
+        import threading
+        calls = []
+        gate = threading.Event()
+
+        def impl(symbol, force=False):
+            calls.append(symbol)
+            if len(calls) == 1:
+                gate.wait(5)
+                raise RuntimeError("boom")
+            return {"symbol": symbol, "recent_news": [], "marker": 2}
+        monkeypatch.setattr(em, "_fetch_events_impl", impl)
+        out, errs = [], []
+
+        def lead():
+            try:
+                em._fetch_events("RAISEQ.NS")
+            except RuntimeError as e:
+                errs.append(e)
+        t1 = threading.Thread(target=lead)
+        t1.start()
+        while not calls:
+            time.sleep(0.01)
+        t2 = threading.Thread(target=lambda: out.append(em._fetch_events("RAISEQ.NS")))
+        t2.start()
+        time.sleep(0.1)
+        gate.set()
+        t1.join(5)
+        t2.join(5)
+        assert len(errs) == 1 and out and out[0]["marker"] == 2 and len(calls) == 2 and em._inflight == {}
+
 
 class TestFetchEventsData:
     def test_full_payload(self, monkeypatch):

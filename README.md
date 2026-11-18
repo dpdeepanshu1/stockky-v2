@@ -141,7 +141,7 @@ They are still in git history: `git log --diff-filter=D --name-only -- "docs/*.m
 | `vm_calibrate.sh`, `vm_review_evidence.sh`, `vm_structure_report.sh` | read-only evidence reports on the VM |
 | `dhan_sell_probe.py`, `dhan_swing_probe.py`, `dhan_half_sell_probe.py` | broker probes (market hours only; see CHANGELOG E242-E244 and E285 round 98 before running; the half-sell probe is started with `bash scripts/vm_all.sh halfsell run`) |
 | `daily_trade_report.py`, `charges_split.py`, `calibration_status.py` | trade / charges / calibration reports |
-| `guard_log_summary.py` | after a session: counts of the round 590 / 591 guard log tokens (read-only) |
+| `guard_log_summary.py` | after a session: counts of the round 590 / 591 guard tokens in the decisions tables (rows and distinct symbols) and in the container logs (read-only) |
 | `eod_check.sh`, `blocked_outcome.py` | after the close: login + guard / trade / gate reports, and what the names held by a gate did afterwards (read-only) |
 | `check_*.py`, `gen_env_reference.py`, `audit_*.py` | repo guards and audits (what CI runs) |
 | `*_backtest.py`, `ml_v2_walkforward.py`, `swing_*.py`, `robustness.py` | offline backtests (stdlib, deterministic) |

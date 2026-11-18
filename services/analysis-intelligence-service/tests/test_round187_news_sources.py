@@ -37,7 +37,7 @@ def _clean(monkeypatch):
 
 def test_query_names_company_and_all_default_sites():
     q = em._publisher_search_query("POKARNA.NS", "Pokarna Quartz Limited")
-    assert q.startswith('"Pokarna Quartz" (') and q.endswith(") when:7d")
+    assert q.startswith('"Pokarna Quartz" (') and q.endswith(") when:3d")   # round 600: the default is the 3-day news window (was 7)
     for site in ("moneycontrol.com", "economictimes.indiatimes.com", "cnbctv18.com", "business-standard.com", "livemint.com", "ndtvprofit.com"):
         assert f"site:{site}" in q
     assert " OR " in q
@@ -73,13 +73,18 @@ def test_fetch_uses_google_parse_with_the_query(monkeypatch):
     assert out[0]["publisher"] == "Moneycontrol" and seen["n"] == 8 and '"Pokarna Quartz"' in seen["query"]
 
 
+def _fresh(hours_ago):
+    """Round 600: an ISO publish time inside the 3-day news window (the rule drops fixed old dates and undated items)."""
+    return (em._utcnow() - timedelta(hours=hours_ago)).isoformat()
+
+
 def test_aggregator_includes_publisher_items_and_dedupes_against_google(monkeypatch):
     for n in ("_fetch_yf_news", "_fetch_moneycontrol_news", "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_market_feeds"):
         monkeypatch.setattr(em, n, lambda s, *a, **k: [])
-    monkeypatch.setattr(em, "_fetch_google_news", lambda s, *a, **k: [{"title": "Same story", "publisher": "G", "published": "2026-11-04T05:00:00"}])
+    monkeypatch.setattr(em, "_fetch_google_news", lambda s, *a, **k: [{"title": "Same story", "publisher": "G", "published": _fresh(7)}])
     monkeypatch.setattr(em, "_fetch_publisher_search", lambda s, *a, **k: [
-        {"title": "same story", "publisher": "P", "published": "2026-11-04T05:00:00"},
-        {"title": "Only on the publisher", "publisher": "Moneycontrol", "published": "2026-11-04T06:00:00"}])
+        {"title": "same story", "publisher": "P", "published": _fresh(7)},
+        {"title": "Only on the publisher", "publisher": "Moneycontrol", "published": _fresh(6)}])
     out = em._fetch_news_from_multiple_sources("A.NS")
     assert [n["title"] for n in out] == ["Only on the publisher", "Same story"]
 
@@ -103,7 +108,7 @@ def test_paused_yahoo_is_logged_as_paused_not_zero_items(monkeypatch, caplog):
 
 
 def test_tally_counts_asked_items_empty_and_paused(monkeypatch):
-    _quiet_sources(monkeypatch, _fetch_google_news=[{"title": "x"}])
+    _quiet_sources(monkeypatch, _fetch_google_news=[{"title": "x", "published": _fresh(3)}])
     em._fetch_news_from_multiple_sources("A.NS")
     em._YF_NEWS_STATE["pause_until"] = time.time() + 900
     em._fetch_news_from_multiple_sources("B.NS")

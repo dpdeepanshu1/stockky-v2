@@ -814,6 +814,9 @@ GAP_RANK_MIN_SESSIONS = max(5, _get_int("GAP_RANK_MIN_SESSIONS", 30))
 # E272: typed event fields on every quality check (event_type / polarity / strength / age / announce time) from the event feed, and the live veto: a fresh
 # NEGATIVE event of at least NEG_EVENT_VETO_MIN_STRENGTH refuses a long (NEG_EVENT:...). Feed down or polarity unknown = no veto, no trigger.
 TYPED_EVENT_ENABLED = _get_bool("TYPED_EVENT_ENABLED", True)
+# Round 608: the typed-event answer (GET /events/{symbol}/active) of a symbol is reused this many seconds by the quality gate (the 10 s cycle asked the same names again
+# every time when their fundamentals never completed a result). Failures are not kept. 0 = off (ask every time).
+TYPED_EVENT_CACHE_S = max(0.0, _get_float("TYPED_EVENT_CACHE_S", 45.0))
 NEG_EVENT_VETO_ENABLED = _get_bool("NEG_EVENT_VETO_ENABLED", True)
 NEG_EVENT_VETO_MIN_STRENGTH = max(0.0, min(1.0, _get_float("NEG_EVENT_VETO_MIN_STRENGTH", 0.3)))
 # E273 round 11: event-aware gap rule (orders/gap_event.py). A gap-up past its limit with a positive typed event of at least GAP_EVENT_MIN_STRENGTH is waived if S1 matches
@@ -925,6 +928,12 @@ OPENING_NO_SETUP_REFUSE = _get_bool("OPENING_NO_SETUP_REFUSE", True)
 # round 591 (widened): wait until OPENING_NO_SETUP_SINCE_IST (09:20), then until OPENING_NO_SETUP_UNTIL_IST (15:30) only a LONG that matched a setup enters (same switch as above).
 OPENING_NO_SETUP_SINCE_IST = _get_str("OPENING_NO_SETUP_SINCE_IST", "09:20")
 OPENING_NO_SETUP_UNTIL_IST = _get_str("OPENING_NO_SETUP_UNTIL_IST", "15:30")
+# round 612: LIVE "OR" rescue of the WINDOW_NO_SETUP wait (orders/or_live.py): above VWAP + 2 of (typed positive event, sector top third, order-flow tape up). live (default) / off.
+# Only from OR_LIVE_SINCE_IST, at most OR_LIVE_MAX_PER_DAY per IST day (0 = none); every hard gate still runs after it.
+OR_LIVE_MODE = _get_str("OR_LIVE_MODE", "live").strip().lower()
+OR_LIVE_SINCE_IST = _get_str("OR_LIVE_SINCE_IST", "09:45")
+OR_LIVE_MAX_PER_DAY = _get_int("OR_LIVE_MAX_PER_DAY", 4)
+OR_LIVE_MIN_CONFIRMS = _get_int("OR_LIVE_MIN_CONFIRMS", 2)
 
 # group 333 (2026-10-12): VWAP confirmation (orders/vwap_gate.py). No long below the day's VWAP (Dhan average_price on the /quote row, the same row the
 # depth and circuit gates read) by more than the tolerance; before ENTRY_VWAP_MIN_TIME_IST the average rests on too few trades to judge.

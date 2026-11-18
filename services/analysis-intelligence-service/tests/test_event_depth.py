@@ -266,7 +266,7 @@ class TestComputeEventScore:
         assert result["event_score"] < 50.0
 
     def test_dividend(self):
-        events = {"last_dividend": {"amount": 5.0, "date": "2026-09-20"}}
+        events = {"last_dividend": {"amount": 5.0, "date": "2026-09-26"}}   # round 600: inside the 3-day window
         result = ed.compute_event_score(events, _NOW)
         assert result["event_score"] > 50.0
 
@@ -335,7 +335,7 @@ class TestComputeEventScore:
 
     def test_regulatory_action(self):
         events = {"regulatory_actions": [
-            {"description": "SEBI probe", "date": "2026-09-20"}
+            {"description": "SEBI probe", "date": "2026-09-26"}
         ]}
         result = ed.compute_event_score(events, _NOW)
         assert result["event_risk"] is True

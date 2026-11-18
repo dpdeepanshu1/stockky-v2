@@ -18,7 +18,7 @@ import runpy
 import sys
 import time
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +116,11 @@ def _iso(days_from_now):
     return (em._utcnow() + timedelta(days=days_from_now)).date().isoformat()
 
 
+def _h(hours_ago):
+    """Round 600: an ISO publish time `hours_ago` hours before now (naive UTC), for the 3-day news rule."""
+    return (em._utcnow() - timedelta(hours=hours_ago)).isoformat()
+
+
 _UNSET = object()
 
 
@@ -174,7 +179,7 @@ class TestImport:
         assert em.app.version == "0.4.4"
         assert em.EVENT_CACHE_TTL == 4 * 3600
         assert em.EMPTY_NEWS_CACHE_TTL == 3600
-        assert em.EVENT_FALLBACK_TTL == 30 * 24 * 3600
+        assert em.EVENT_FALLBACK_TTL == 3 * 24 * 3600   # round 600: was 30 days
 
     def test_event_depth_missing_disables_enrichment(self, monkeypatch):
         mod = _reload_with(monkeypatch, block=("event_depth",))
@@ -967,6 +972,12 @@ class TestYfNews:
         assert len(em._fetch_yf_news("A.NS")) == 5
 
 
+@pytest.fixture(autouse=True)
+def _round604_ask_every_source(monkeypatch):
+    """Round 604 skips the dead Moneycontrol / CNBC TV18 feeds by default; the older cases here pin the full source list."""
+    monkeypatch.setenv("EVENT_SKIP_NEWS_SOURCES", "none")
+
+
 class TestMultiSource:
     SOURCES = ["_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news",
                "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search", "_fetch_market_feeds"]
@@ -983,18 +994,19 @@ class TestMultiSource:
     def test_merge_dedupe_sort_and_cap(self, monkeypatch):
         self._set(
             monkeypatch,
-            _fetch_yf_news=[{"title": "Alpha", "published": "2026-09-20T10:00:00"}],
+            _fetch_yf_news=[{"title": "Alpha", "published": _h(65)}],
             _fetch_google_news=[
-                {"title": "  ALPHA  ", "published": "2026-09-25T10:00:00"},  # dup (case/space)
-                {"title": "Beta", "published": "2026-09-27T10:00:00"},
+                {"title": "  ALPHA  ", "published": _h(10)},  # dup (case/space)
+                {"title": "Beta", "published": _h(2)},
             ],
-            _fetch_moneycontrol_news=[{"title": "Gamma", "published": None}],
-            _fetch_economic_times=[{"title": "Delta", "published": "2026-09-21T10:00:00"}],
-            _fetch_cnbc_tv18=[{"title": "Eps", "published": "2026-09-22T10:00:00"}],
+            _fetch_moneycontrol_news=[{"title": "Gamma", "published": None}],          # round 600: undated -> dropped
+            _fetch_economic_times=[{"title": "Delta", "published": _h(60)}],
+            _fetch_cnbc_tv18=[{"title": "Eps", "published": _h(50)}],
+            _fetch_publisher_search=[{"title": "Ancient", "published": _h(100)}],       # round 600: older than 3 days -> dropped
         )
         out = em._fetch_news_from_multiple_sources("A.NS")
-        # first occurrence of the duplicate wins; newest first; undated last
-        assert [n["title"] for n in out] == ["Beta", "Eps", "Delta", "Alpha", "Gamma"]
+        # first occurrence of the duplicate wins; newest first; undated and older-than-3-days items are dropped
+        assert [n["title"] for n in out] == ["Beta", "Eps", "Delta", "Alpha"]
         capped = em._fetch_news_from_multiple_sources("A.NS", max_total=2)
         assert [n["title"] for n in capped] == ["Beta", "Eps"]
 
@@ -1022,7 +1034,7 @@ class TestMultiSourceParallel:
                 time.sleep(delay)
                 if _n in raise_in:
                     raise RuntimeError("feed down")
-                return [{"title": f"T{_i}", "published": f"2026-09-2{_i}T10:00:00"}]
+                return [{"title": f"T{_i}", "published": _h(60 - 5 * _i)}]
             monkeypatch.setattr(em, name, fn)
 
     def test_runs_concurrently(self, monkeypatch):
@@ -1051,8 +1063,8 @@ class TestMultiSourceParallel:
         monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)
         for name in self.NAMES:
             monkeypatch.setattr(em, name, lambda s, *a, **k: [])
-        monkeypatch.setattr(em, "_fetch_economic_times", lambda s, *a, **k: [{"title": "Same", "publisher": "ET"}])
-        monkeypatch.setattr(em, "_fetch_google_news", lambda s, *a, **k: (time.sleep(0.2) or [{"title": "same", "publisher": "G"}]))
+        monkeypatch.setattr(em, "_fetch_economic_times", lambda s, *a, **k: [{"title": "Same", "publisher": "ET", "published": _h(3)}])
+        monkeypatch.setattr(em, "_fetch_google_news", lambda s, *a, **k: (time.sleep(0.2) or [{"title": "same", "publisher": "G", "published": _h(4)}]))
         out = em._fetch_news_from_multiple_sources("A.NS")
         assert len(out) == 1 and out[0]["publisher"] == "G"   # Google precedes ET in the fixed order, even if slower
 
@@ -1108,7 +1120,7 @@ def _eh_df(actual, estimate):
 
 class TestFetchEventsCache:
     def test_cache_hit_skips_all_sources(self, monkeypatch):
-        cached = {"symbol": "ZWID.NS", "recent_news": [{"title": "x"}], "cached": True}
+        cached = {"symbol": "ZWID.NS", "recent_news": [{"title": "x", "published": _h(2)}], "cached": True}
         em._redis_set(f"{em.EVENT_CACHE_PREFIX}ZWID.NS", cached, ttl=100)
         for name in ("_get_earnings_dates", "_get_dividends", "_fetch_news_from_multiple_sources"):
             monkeypatch.setattr(em, name, lambda *a, **k: pytest.fail("cache should short-circuit"))
@@ -1745,13 +1757,23 @@ class TestRawFeed:
         self._seed(["A.NS"], {"A.NS": [{"title": "stale", "published": old}]})
         assert em.raw_feed(hours=24)["items"] == []
 
-    def test_undated_and_unparseable_items_are_kept(self):
+    def test_undated_unreadable_and_old_items_are_dropped(self):
+        """Round 600: the 3-day rule cannot be shown to hold for an undated or unreadable stamp, so it no longer passes."""
+        fresh_epoch = str(int((em._utcnow() - timedelta(hours=1)).replace(tzinfo=timezone.utc).timestamp()))
         self._seed(["A.NS"], {"A.NS": [
             {"title": "undated", "published": None},
-            {"title": "epoch", "published": "1700000000"},
-            {"title": "aware", "published": "2020-01-01T00:00:00+05:30"},  # aware vs naive → TypeError
+            {"title": "junk", "published": "not a date"},
+            {"title": "old-epoch", "published": "1700000000"},
+            {"title": "aware-old", "published": "2020-01-01T00:00:00+05:30"},
+            {"title": "fresh-epoch", "published": fresh_epoch},
         ]})
-        assert [i["headline"] for i in em.raw_feed()["items"]] == ["undated", "epoch", "aware"]
+        assert [i["headline"] for i in em.raw_feed()["items"]] == ["fresh-epoch"]
+
+    def test_hours_is_capped_at_the_news_window(self):
+        old = (em._utcnow() - timedelta(hours=100)).isoformat()
+        self._seed(["A.NS"], {"A.NS": [{"title": "stale", "published": old}]})
+        out = em.raw_feed(hours=500)
+        assert out["hours"] == 72 and out["items"] == []
 
     def test_null_news_list(self):
         self._seed(["A.NS"], {"A.NS": None})

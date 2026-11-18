@@ -293,8 +293,15 @@ class TestParseFeedItems:
         assert nm._parse_feed_items(_parsed(e), "P", self.KW, 5, days=10) == []
 
     def test_days_param_controls_cutoff(self):
-        e = _entry(days_ago=12)
-        assert nm._parse_feed_items(_parsed(e), "P", self.KW, 5, days=14) != []
+        e = _entry(days_ago=2)
+        assert nm._parse_feed_items(_parsed(e), "P", self.KW, 5, days=3) != []
+        assert nm._parse_feed_items(_parsed(e), "P", self.KW, 5, days=1) == []
+
+    def test_days_param_never_widens_past_the_three_day_rule(self):
+        """Round 600: the Google News reader asks for 14 days; the shared news window caps it at 3."""
+        assert nm._parse_feed_items(_parsed(_entry(days_ago=12)), "P", self.KW, 5, days=14) == []
+        assert nm._parse_feed_items(_parsed(_entry(days_ago=4)), "P", self.KW, 5, days=14) == []
+        assert nm._parse_feed_items(_parsed(_entry(days_ago=2)), "P", self.KW, 5, days=14) != []
 
     def test_no_published_date_kept_with_none(self):
         items = nm._parse_feed_items(_parsed(_entry(days_ago=None)), "P", self.KW, 5)
@@ -627,6 +634,11 @@ _RETIRED = ("_fetch_moneycontrol", "_fetch_financial_express")
 _ACTIVE_SOURCE_NAMES = [n for n in _SOURCE_NAMES if n not in _RETIRED]
 
 
+def _ago(hours):
+    """Round 600: an ISO publish time `hours` hours before now (naive UTC) - the 3-day news rule rejects old fixed dates."""
+    return (nm._utcnow() - timedelta(hours=hours)).isoformat()
+
+
 class TestFetchHeadlines:
     def test_calls_all_seven_sources_without_newsapi_key(self, monkeypatch):
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
@@ -640,7 +652,7 @@ class TestFetchHeadlines:
         import logging
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
         _patch_sources(monkeypatch, {
-            "_fetch_google_news": [{"title": "a", "published": "2026-01-01"}],
+            "_fetch_google_news": [{"title": "a", "published": _ago(5)}],
             "_fetch_livemint": RuntimeError("boom"),
         })
         caplog.set_level(logging.INFO)
@@ -661,8 +673,8 @@ class TestFetchHeadlines:
     def test_dedupes_by_title_case_insensitive_and_drops_blank(self, monkeypatch):
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
         _patch_sources(monkeypatch, {
-            "_fetch_yahoo_news": [{"title": "Same Title", "published": "2026-01-01"}, {"title": ""}, {"title": None}],
-            "_fetch_google_news": [{"title": "same title ", "published": "2026-01-02"}],
+            "_fetch_yahoo_news": [{"title": "Same Title", "published": _ago(30)}, {"title": ""}, {"title": None}],
+            "_fetch_google_news": [{"title": "same title ", "published": _ago(20)}],
         })
         out = nm._fetch_headlines("INFY")
         assert len(out) == 1
@@ -671,17 +683,18 @@ class TestFetchHeadlines:
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
         _patch_sources(monkeypatch, {
             "_fetch_yahoo_news": [
-                {"title": "old", "published": "2026-01-01"},
-                {"title": "none", "published": None},
-                {"title": "new", "published": "2026-06-01"},
+                {"title": "old", "published": _ago(60)},
+                {"title": "none", "published": None},           # round 600: undated -> dropped
+                {"title": "ancient", "published": _ago(200)},    # round 600: older than 3 days -> dropped
+                {"title": "new", "published": _ago(3)},
             ],
         })
-        assert [h["title"] for h in nm._fetch_headlines("INFY")] == ["new", "old", "none"]
+        assert [h["title"] for h in nm._fetch_headlines("INFY")] == ["new", "old"]
 
     def test_max_items_limit(self, monkeypatch):
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
         _patch_sources(monkeypatch, {
-            "_fetch_yahoo_news": [{"title": f"t{i}", "published": f"2026-01-{i + 1:02d}"} for i in range(9)],
+            "_fetch_yahoo_news": [{"title": f"t{i}", "published": _ago(i + 1)} for i in range(9)],
         })
         assert len(nm._fetch_headlines("INFY", max_items=4)) == 4
 
@@ -689,7 +702,7 @@ class TestFetchHeadlines:
         monkeypatch.setattr(nm, "NEWSAPI_KEY", None)
         _patch_sources(monkeypatch, {
             "_fetch_yahoo_news": RuntimeError("boom"),
-            "_fetch_google_news": [{"title": "survivor", "published": "2026-01-01"}],
+            "_fetch_google_news": [{"title": "survivor", "published": _ago(7)}],
         })
         assert [h["title"] for h in nm._fetch_headlines("INFY")] == ["survivor"]
 
@@ -1183,7 +1196,7 @@ class TestYahooNewsBackoff:
         self._clock(monkeypatch)
         nm._yahoo_state["skip_until"] = 10 ** 9
         monkeypatch.setitem(sys.modules, "yfinance", _fake_yf([{"title": "never"}]))
-        called = _patch_sources(monkeypatch, {"_fetch_google_news": [{"title": "G", "published": "2026-10-01"}]})
+        called = _patch_sources(monkeypatch, {"_fetch_google_news": [{"title": "G", "published": _ago(4)}]})
         # _patch_sources replaced _fetch_yahoo_news with a stub; restore the real one to exercise the skip
         monkeypatch.setattr(nm, "_fetch_yahoo_news", _real_yahoo)
         out = nm._fetch_headlines("TCS")

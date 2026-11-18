@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import types
+from datetime import timedelta
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SERVICE = os.path.dirname(_HERE)
@@ -93,7 +94,7 @@ def test_max_items_caps_the_result(monkeypatch):
 def test_it_is_the_seventh_source_and_is_tallied(monkeypatch):
     for n in ("_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news", "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search"):
         monkeypatch.setattr(em, n, lambda s, *a, **k: [])
-    monkeypatch.setattr(em, "_fetch_market_feeds", lambda s, *a, **k: [{"title": "From the feeds", "publisher": "Mint", "published": None}])
+    monkeypatch.setattr(em, "_fetch_market_feeds", lambda s, *a, **k: [{"title": "From the feeds", "publisher": "Mint", "published": (em._utcnow() - timedelta(hours=2)).isoformat()}])   # round 600: an undated item is dropped
     out = em._fetch_news_from_multiple_sources("A.NS")
     assert [n["title"] for n in out] == ["From the feeds"]
     assert em._NEWS_SRC_STATS["Market feeds"]["items"] == 1

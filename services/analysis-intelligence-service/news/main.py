@@ -14,6 +14,10 @@ try:
     from news_quality import build_news_response
 except Exception:
     build_news_response = None  # type: ignore
+try:    # round 600: the shared 3-day news rule (NEWS_MAX_AGE_DAYS, 1..3, default 3)
+    import news_age as _na
+except ImportError:   # imported as a package module, the folder is not on sys.path
+    from . import news_age as _na
 import logging
 import re
 import threading
@@ -370,7 +374,7 @@ def _is_relevant(title: str, description: str, keywords: List[str]) -> bool:
 
 def _parse_feed_items(parsed, publisher: str, keywords: List[str], max_items: int, days: int = 10) -> List[Dict[str, Any]]:
     items = []
-    cutoff = _utcnow() - timedelta(days=days)
+    cutoff = _utcnow() - timedelta(days=min(float(days), _na.news_max_age_days()))   # round 600: the caller's window (10 / 14 days) is capped at 3
     for entry in getattr(parsed, "entries", [])[:50]:
         title = getattr(entry, "title", "") or ""
         desc = getattr(entry, "description", "") or getattr(entry, "summary", "") or ""
@@ -595,7 +599,7 @@ def _fetch_newsapi(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
                 return []
             data = resp.json()
             items = []
-            cutoff = _utcnow() - timedelta(days=10)
+            cutoff = _na.news_cutoff(_utcnow())     # round 600: was 10 days
             for article in data.get("articles", []):
                 title = article.get("title") or ""
                 desc = article.get("description") or ""
@@ -622,6 +626,17 @@ def _fetch_newsapi(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
         return []
 
 
+def _fresh_headlines(items: List[Dict[str, Any]], source: str = "") -> List[Dict[str, Any]]:
+    """Round 600: the headlines inside the news window, `published` rewritten as an ISO string (Yahoo sends an epoch number, the RSS readers an
+    ISO string - the newest-first sort compares them as text, so mixed formats used to sort wrongly)."""
+    out: List[Dict[str, Any]] = []
+    for it in _na.filter_fresh_news(items, "published", _utcnow(), source):
+        d = _na.parse_news_time(it.get("published"))
+        out.append({**it, "published": d.isoformat() if d else it.get("published")})
+    _na.maybe_log_age_drops(logger)
+    return out
+
+
 def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
     """Aggregate from 5–10 free sources, filter by relevance, dedupe, sort."""
     all_news = []
@@ -646,8 +661,10 @@ def _fetch_headlines(symbol: str, max_items: int = 15) -> List[dict]:
         short = source_func.__name__.replace("_fetch_", "")
         try:
             items = source_func(symbol, max_items=10)
+            n_raw = len(items)
+            items = _fresh_headlines(items, short)     # round 600: only the last 3 days; an undated item is dropped
             all_news.extend(items)
-            per_source.append(f"{short}={len(items)}")
+            per_source.append(f"{short}={len(items)}" + (f"(+{n_raw - len(items)} old)" if n_raw != len(items) else ""))
             logger.debug("Fetched %d items from %s", len(items), source_func.__name__)
         except Exception as e:
             per_source.append(f"{short}=failed")
@@ -969,7 +986,13 @@ def feed_health():
             from news import feed_fetch as _ff  # type: ignore
         except Exception as e:  # noqa: BLE001
             return {"feeds": [], "tally": {}, "error": str(e)[:160]}
-    return _ff.health_snapshot()
+    snap = _ff.health_snapshot()
+    try:   # round 600: per source, headlines kept / dropped as older than the news window / dropped as undated since this process started
+        if isinstance(snap, dict):
+            snap = {**snap, "age_rule": _na.age_drop_stats()}
+    except Exception:  # noqa: BLE001
+        pass
+    return snap
 
 
 @app.get("/analyze/{symbol}")

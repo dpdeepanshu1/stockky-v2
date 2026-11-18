@@ -282,13 +282,52 @@ def _check_background_timeout_s() -> float:
     return v if v == v and v > 0 else 600.0
 
 
+def _held_symbols_csv() -> str:
+    """Round 611: the symbols Real Trade holds (DEMO + REAL, open or part-closed), comma separated, for `/check?first=`. The event pass checks them
+    before the rest, so an open position's event is never stuck behind the tail of the 462-name rotation. '' when none, switched off
+    (DYNAMIC_UNIVERSE_CHECK_HELD_FIRST=0) or unreadable: /check then runs exactly as before. Round 614: Position Stocks' held names (shared symbol-lock table) follow ours."""
+    try:
+        if (os.getenv("DYNAMIC_UNIVERSE_CHECK_HELD_FIRST") or "").strip() == "0":
+            return ""
+        import models
+        from db import get_session_factory
+        db = get_session_factory()()
+        try:
+            rows = db.query(models.TradePosition.symbol).filter(
+                models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT"))).all()
+            seen = []
+            for (sym,) in rows:
+                if sym and sym not in seen:
+                    seen.append(sym)
+            # round 614: then the names Position Stocks holds, read from the shared symbol-lock table both services already use (same database, no new call). After
+            # ours, so Real Trade's own order is unchanged. Separate try: if this read fails the list above is still sent. DYNAMIC_UNIVERSE_CHECK_PS_HELD=0 = ours only.
+            if (os.getenv("DYNAMIC_UNIVERSE_CHECK_PS_HELD") or "").strip() != "0":
+                try:
+                    for (sym,) in db.query(models.SharedSymbolLock.symbol).filter(models.SharedSymbolLock.held_by_service == "position-stocks-service").all():
+                        if sym and sym not in seen:
+                            seen.append(sym)
+                except Exception as e2:  # noqa: BLE001 - an ordering hint must never stop the warm-up
+                    logger.debug("dynamic_universe: Position Stocks held symbols unreadable (%s); sending Real Trade's only", _err_text(e2))
+                    try:
+                        db.rollback()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("dynamic_universe: rollback after the failed Position Stocks read also failed")
+        finally:
+            db.close()
+        return ",".join(seen[:60])
+    except Exception as e:  # noqa: BLE001 - an ordering hint must never stop the warm-up
+        logger.debug("dynamic_universe: held symbols for /check?first= unreadable (%s)", _err_text(e))
+        return ""
+
+
 def _check_worker(timeout_s: float) -> None:
     """Thread body: GET {EVENT_URL}/check and log the real outcome. Always clears the running flag."""
     t0 = time.monotonic()
     ok = False
     try:
         with httpx.Client(timeout=timeout_s) as client:
-            r = client.get(f"{config.EVENT_URL}/check")
+            _first = _held_symbols_csv()
+            r = client.get(f"{config.EVENT_URL}/check", params={"first": _first} if _first else None)
             r.raise_for_status()
         ok = True
         logger.info("dynamic_universe: /check finished in %.0fs - event cache warmed", time.monotonic() - t0)

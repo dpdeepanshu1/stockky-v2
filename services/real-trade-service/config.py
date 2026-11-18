@@ -548,6 +548,13 @@ OPENING_NO_SETUP_SINCE_IST = (os.getenv("OPENING_NO_SETUP_SINCE_IST") or "").str
 # at a no_setup_window refusal). log (default) = one OR_SHADOW log line + flow_json["or_shadow"], never changes an entry; off = nothing. No live mode exists until the evidence says so.
 OR_SHADOW_MODE = ((os.getenv("OR_SHADOW_MODE") or "").strip() or "log").lower()
 OR_SHADOW_MIN_EVENT_STRENGTH = _og_float("OR_SHADOW_MIN_EVENT_STRENGTH", 0.5)      # rule B: the typed positive event's strength must be at least this (0..1)
+# round 612: LIVE "OR" rescue (entry_engine/or_live.py). live (default) = rule A (matched setup at a soft_stack refusal) and rule B (VWAP + 2 of event / sector top third / order flow at a
+# no_setup_window refusal) let the entry on to the hard gates; off = the old refusals. Only from OR_LIVE_SINCE_IST, at most OR_LIVE_MAX_PER_DAY per IST day (0 = none).
+OR_LIVE_MODE = ((os.getenv("OR_LIVE_MODE") or "").strip() or "live").lower()
+OR_LIVE_SINCE_IST = (os.getenv("OR_LIVE_SINCE_IST") or "").strip() or "09:45"
+OR_LIVE_MAX_PER_DAY = int(_og_float("OR_LIVE_MAX_PER_DAY", 4))
+OR_LIVE_MIN_CONFIRMS = int(_og_float("OR_LIVE_MIN_CONFIRMS", 2))                   # rule B: of event / sector_top / order_flow (VWAP is always required)
+OR_LIVE_MIN_IMBALANCE = _og_float("OR_LIVE_MIN_IMBALANCE", 0.1)                    # rule B: order-flow imbalance (5 levels) at or above this counts as positive
 OPENING_GATE_PENALTY_ENABLED = ((os.getenv("OPENING_GATE_PENALTY_ENABLED") or "").strip() or "true").lower() == "true"
 OPENING_GATE_HARD_RANGE_POS = _og_float("OPENING_GATE_HARD_RANGE_POS", 0.98)               # at or above this day-range position the candidate is still refused (buying the very high)
 OPENING_GATE_HARD_PREVDAY_CLOSE_POS = _og_float("OPENING_GATE_HARD_PREVDAY_CLOSE_POS", 0.10)   # a previous-day close in the bottom 10 % of its range is still refused
@@ -1279,11 +1286,10 @@ AFTERHOURS_SCAN_MIN_INJECT_SCORE = env_float_safe("AFTERHOURS_SCAN_MIN_INJECT_SC
 # deal bucket carries whatever the most recent underlying deal/insider
 # filing was, which isn't always today's. Without an age check, a stale
 # item could get pre-seeded into tomorrow's watchlist as if it were fresh
-# after-hours news. Bounded to 3–7 days per user instruction; default 5
-# (mid-range) balances "not so tight it drops a Friday-evening story
-# scanned before a long weekend" against "not so loose it lets week-old
-# news back in".
-AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS = min(7, max(3, env_int_safe("AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS", 5)))
+# after-hours news. Round 600 (user rule: news older than 3 days is never recorded or acted on): bounded to 1-3 days, default 3 (it was 3-7,
+# default 5). 3 days still holds a Friday-afternoon story scanned on Monday morning (about 65 h). NEWS_MAX_AGE_DAYS (the same setting the event
+# and news services read) sets the default; AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS can only lower it.
+AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS = min(3, max(1, env_int_safe("AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS", env_int_safe("NEWS_MAX_AGE_DAYS", 3))))
 
 # ── US sector overnight signal (2026-09-11, session23 — user request) ──────
 # "We can take some idea from the US stock market sector-wise, or on some

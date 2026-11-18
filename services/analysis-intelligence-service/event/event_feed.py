@@ -41,7 +41,8 @@ logger = logging.getLogger("event-feed")
 
 # (source name, url). Exchange filings are added only after scripts/check_event_sources.py proves one of these reads OK from the VM.
 FEEDS: List[Tuple[str, str]] = [
-    ("Moneycontrol", "https://www.moneycontrol.com/rss/latestnews.xml"),
+    # Round 604: ("Moneycontrol", "https://www.moneycontrol.com/rss/latestnews.xml") is frozen (no new items, 18 Nov log); "Moneycontrol-business"
+    # and the Google News search below read the same site. Put it back if a VM check shows it moving again.
     ("Moneycontrol-business", "https://www.moneycontrol.com/rss/business.xml"),
     ("Moneycontrol-google", "https://news.google.com/rss/search?q=site:moneycontrol.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en"),
     ("LiveMint", "https://www.livemint.com/rss/markets"),
@@ -548,6 +549,7 @@ def build_response(events: List[Dict[str, Any]], sources: Dict[str, Dict[str, An
     """The body of GET /events/active (all symbols) or /events/{symbol}/active. Ages are re-worked at read time. Never raises."""
     try:
         now = now or datetime.now(timezone.utc)
+        max_age_h = min(_f(max_age_h, 24.0), 72.0)   # round 600: never above the 3-day news rule
         healthy = [n for n, s in (sources or {}).items() if isinstance(s, dict) and s.get("ok")]
         out = []
         for e in events or []:
@@ -644,7 +646,7 @@ class FeedCollector:
         self.feeds = list(feeds if feeds is not None else FEEDS)
         self.now_fn = now_fn
         self.cooldown_s = _f(os.getenv("EVENT_FEED_BLOCK_COOLDOWN_S"), 1800.0) if cooldown_s is None else float(cooldown_s)
-        self.max_age_h = max_age_h
+        self.max_age_h = min(_f(max_age_h, 24.0), 72.0)   # round 600: never above the 3-day news rule
         self.snapshot_fn = snapshot_fn
         self.events: List[Dict[str, Any]] = []
         self.sources: Dict[str, Dict[str, Any]] = {}

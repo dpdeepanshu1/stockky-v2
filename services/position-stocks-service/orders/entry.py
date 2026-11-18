@@ -444,6 +444,26 @@ def _log_candidate(
     composite_score: Optional[float] = None,
     quality: Optional[QualitySignal] = None,
 ) -> None:
+    """Round 602: the same call as before; for a SKIPPED row it also closes two timer stages ("skip_gate_logic" = the gate work that ended in this skip, "skip_log_write" =
+    the audit-row write + commit), so a slow skip says whether the gate or the database was slow (orders/entry_stage_timer.py). Log only."""
+    _is_skip = decision == "SKIPPED"
+    if _is_skip:
+        entry_stage_timer.mark("skip_gate_logic")
+    try:
+        return _log_candidate_impl(db, candidate, decision, reason, composite_score=composite_score, quality=quality)
+    finally:
+        if _is_skip:
+            entry_stage_timer.mark("skip_log_write")
+
+
+def _log_candidate_impl(
+    db: Session,
+    candidate: Candidate,
+    decision: str,
+    reason: str,
+    composite_score: Optional[float] = None,
+    quality: Optional[QualitySignal] = None,
+) -> None:
     if decision == "SKIPPED":
         _skip_state.reason = str(reason)
     try:                                                   # E272: record this candidate's bars even when it is outside the turnover top list
@@ -648,9 +668,11 @@ def attempt_entry(
     """round 225: times the stages of one entry (log only, see orders/entry_stage_timer.py); the logic is _attempt_entry_impl."""
     entry_stage_timer.begin(getattr(candidate, "symbol", "?"))
     _outcome = "ok"
+    _res = None
     _hold_begin()
     try:
-        return _attempt_entry_impl(db, candidate, quality=quality, rearm=rearm)
+        _res = _attempt_entry_impl(db, candidate, quality=quality, rearm=rearm)
+        return _res
     except BaseException as _e:  # noqa: BLE001 - re-raised unchanged
         _outcome = type(_e).__name__
         if isinstance(_e, Exception):
@@ -658,6 +680,21 @@ def attempt_entry(
         raise
     finally:
         _hold_end()
+        try:   # round 614: a live OR rescue whose entry ended in a clean skip BEFORE any order attempt is given back to the day's budget; entered / error / order attempted = stays spent
+            from orders import or_live as _or_live_s
+            _sym = getattr(candidate, "symbol", None)
+            if _outcome == "ok" and _res is None:
+                if _or_live_s.give_back(_sym):
+                    logger.info("OR_LIVE[%s] rescue given back (the entry was skipped before any order); %d of %d used today", _sym, _or_live_s.used_today(), int(getattr(config, "OR_LIVE_MAX_PER_DAY", 4)))
+            else:
+                _or_live_s.keep(_sym)
+        except Exception:  # noqa: BLE001 - a budget note never changes an entry
+            logger.debug("entry: or_live settle failed (rescue stays spent)", exc_info=True)
+        if _outcome == "ok" and _res is None:       # round 602: a skip names its reason in the slow-entry line (it used to read "ok")
+            try:
+                _outcome = "skip " + str(last_skip_reason() or "no reason recorded")
+            except Exception:  # noqa: BLE001
+                _outcome = "skip"
         entry_stage_timer.end(_outcome)
 
 
@@ -701,6 +738,7 @@ def _attempt_entry_impl(
 
     # group392: after OPENING_PAUSE_STOPOUTS stop-outs since the bell, no new automatic entry until the opening window ends.
     _open_pause = opening_protect.pause_reason(db)
+    entry_stage_timer.mark("opening_protect")
     if _open_pause:
         _log_candidate(db, candidate, "SKIPPED", _open_pause, quality=quality)
         return None
@@ -713,12 +751,14 @@ def _attempt_entry_impl(
     if _reclaim:
         logger.info("entry: %s reclaim re-entry allowed - %s", candidate.symbol, _reclaim.get("why"))
     _so_reject = stopout_guard.entry_reason(db, candidate.symbol, allow_symbol=bool(_reclaim))
+    entry_stage_timer.mark("stopout_guard")
     if _so_reject:
         _log_candidate(db, candidate, "SKIPPED", _so_reject, quality=quality)
         return None
 
     # E39: real daily cap on new automatic entries (orders/entry_cap.py; counted from scalp_positions, fails open, 0 = off).
     _cap_reject = entry_cap.entry_reason(db)
+    entry_stage_timer.mark("entry_cap")
     if _cap_reject:
         _log_candidate(db, candidate, "SKIPPED", _cap_reject, quality=quality)
         return None
@@ -733,6 +773,7 @@ def _attempt_entry_impl(
 
     # Max concurrent positions
     open_count = _count_open_positions(db)
+    entry_stage_timer.mark("open_count_query")
     if open_count >= config.MAX_CONCURRENT_SCALP_POSITIONS:
         _log_candidate(db, candidate, "SKIPPED", f"MAX_POSITIONS:{open_count}", quality=quality)
         return None
@@ -747,6 +788,7 @@ def _attempt_entry_impl(
         .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
         .first()
     )
+    entry_stage_timer.mark("held_here_query")
     if _held_here is not None:
         _log_candidate(db, candidate, "SKIPPED", f"ALREADY_OPEN_HERE:id={_held_here.id},status={_held_here.status}",
                        quality=quality)
@@ -760,7 +802,9 @@ def _attempt_entry_impl(
     # skipped as early as possible, not discovered after capital's already
     # committed. See capital/shared_symbol_lock.py for full context
     # (confirmed cause of the AEGISVOPAK broker order-type mismatch).
-    if not _hold_claim(db, candidate.symbol):
+    _claimed_ok = _hold_claim(db, candidate.symbol)
+    entry_stage_timer.mark("symbol_claim")
+    if not _claimed_ok:
         _log_candidate(db, candidate, "SKIPPED", "SYMBOL_HELD_BY_OTHER_SERVICE", quality=quality)
         return None
 
@@ -1138,6 +1182,23 @@ def _attempt_entry_impl(
     _ons_reject = setup_live.window_no_setup_refusal(
         _setup_res, now=_ons_now, exempt=bool(rearm) or bool(_reclaim), enabled=bool(getattr(config, "OPENING_NO_SETUP_REFUSE", True)),
         until=str(getattr(config, "OPENING_NO_SETUP_UNTIL_IST", "15:30")), since=str(getattr(config, "OPENING_NO_SETUP_SINCE_IST", "09:20")))
+    if _ons_reject and not (isinstance(_setup_res, dict) and _setup_res.get("why") in ("error", "walk_error")):
+        # round 612: LIVE "OR" rescue (orders/or_live.py): no setup matched, but above VWAP + 2 of (typed positive event, sector top third, order-flow tape up). Fails closed;
+        # only from OR_LIVE_SINCE_IST, a few per day; every later hard gate (capital, price guard, depth, circuit, caps) still runs.
+        try:
+            from orders import or_live as _or_live
+            _vw_q = (_quote or {}).get("avg_price") if isinstance(_quote, dict) else None
+            _vw_q = float(_vw_q) if _vw_q is not None else None
+            _above = (bool(float(candidate.current_ltp) >= _vw_q) if _vw_q and _vw_q > 0 else None)
+            _hit_b = _or_live.rule_b(_ons_reject, getattr(quality, "event_polarity", None) if quality else None, _above,
+                                     (_inputs or {}).get("sector_third") if isinstance(_inputs, dict) else None, setup_live.tape_sign(_tape))
+            if _or_live.allow(_hit_b, _ons_now, key=candidate.symbol):
+                _flow_snap = _or_live.stamp(_flow_snap, _hit_b)
+                logger.info("OR_LIVE[%s] rule B let the entry through (%s); rescue %d of %d today (budget: %s)", candidate.symbol,
+                            "; ".join(f"{k}={v}" for k, v in _hit_b.items() if k != "refused"), _or_live.used_today(), int(getattr(config, "OR_LIVE_MAX_PER_DAY", 4)), _or_live.budget_source())
+                _ons_reject = None
+        except Exception:  # noqa: BLE001 - fails closed: the refusal stands
+            logger.debug("entry: or_live rescue failed (refusal stands)", exc_info=True)
     if _ons_reject:
         _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _ons_reject, quality=quality)
@@ -1564,6 +1625,11 @@ def _attempt_entry_impl(
 
     entry_stage_timer.mark("live_anchor")
     _hold_sent()   # E334: from here the order may exist at the broker
+    try:   # round 614: a live OR rescue for this symbol is now an order attempt: it stays spent (no refund after this point, whatever happens next)
+        from orders import or_live as _or_live_k
+        _or_live_k.keep(candidate.symbol)
+    except Exception:  # noqa: BLE001 - never stop an entry
+        logger.debug("entry: or_live keep failed (rescue stays pending, refunded only on a clean skip)", exc_info=True)
     # Place the order
     dhan_super_order_id = None
     plain_order_id = None

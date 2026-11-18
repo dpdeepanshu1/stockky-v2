@@ -1,7 +1,7 @@
 {
- "f1": 0.32498668087373467,
+ "f1": 0.2986580049576887,
  "lookahead_days": 10.0,
  "target_gain_pct": 4.0,
- "top_precision": 0.3711890243902439,
+ "top_precision": 0.3389248951582158,
  "top_slice": 0.1
 }

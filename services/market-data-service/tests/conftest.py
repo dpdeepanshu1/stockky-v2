@@ -90,3 +90,16 @@ def _g344_old_candle_base_and_clean_live_store(monkeypatch):
     if _l is not None:
         _l._last_sent.clear(); _l._latest.clear(); _l._prio.clear()
     yield
+
+
+@_pytest_g188.fixture(autouse=True)
+def _r607_reset_yf_bulk_gate():
+    """round 607: yf_bulk_gate's per-symbol stamps are per process. A test that sends OLD / TCS / A to Yahoo made the NEXT test with the same
+    symbol see it as "asked less than 30 s ago" and skip the yfinance call (the group193 / group256 / group487 tests failed in a full run only)."""
+    def _reset():
+        _g = sys.modules.get("yf_bulk_gate")
+        if _g is not None:
+            _g.reset()
+    _reset()
+    yield
+    _reset()

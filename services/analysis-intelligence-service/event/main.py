@@ -1405,10 +1405,20 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
         if cached:
             logger.info("Event fetch for %s joined the one already running", sym)
             return _apply_news_age(cached)
-        # the leader failed or timed out and left nothing cached: fetch it ourselves
+        # round 619: a symbol with NOTHING found (no news, no earnings date, no dividends ...) is deliberately not cached, because an empty answer
+        # can be an outage (Yahoo paused, Google 429) rather than the truth. The follower then fell through to its own full fetch, so every empty
+        # name was fetched twice at the same moment (18 Nov log: DATAPATTNS, EMMVEE, GVT&D, DELPHIFX, all "0 items" twice, while Google News
+        # answered 429). The leader's own result is handed over here instead; it is still not cached, so the next caller after this one retries.
+        shared = getattr(ev, "result", None)
+        if shared is not None:
+            logger.info("Event fetch for %s joined the one already running (its result was not cached)", sym)
+            return _apply_news_age(shared)
+        # the leader failed or timed out and left nothing: fetch it ourselves
         return _fetch_events_impl(symbol, force=force)
     try:
-        return _fetch_events_impl(symbol, force=force)
+        res = _fetch_events_impl(symbol, force=force)
+        ev.result = res
+        return res
     finally:
         with _inflight_lock:
             _inflight.pop(sym, None)

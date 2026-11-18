@@ -1,7 +1,7 @@
 """Round 607: a per-symbol gate in front of the /quotes/bulk yfinance download (Round C, step 8).
 
 Why: Dhan / AngelOne / the live feed already price 95-100% of a bulk request. The few names left over (not in Dhan's scrip map, held
-positions, indices) still went to yf.download on EVERY bulk call, and several bulk calls run at once. Each call paid one token of the shared
+positions, indices) still went to the yfinance download on EVERY bulk call, and several bulk calls run at once. Each call paid one token of the shared
 yfinance bucket, the bucket stayed empty, and the log filled with "yfinance rate-limit bucket saturated" while the same 3-7 names were asked again
 and again (and the ones Yahoo cannot price were asked again after every failure).
 

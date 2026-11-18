@@ -962,6 +962,7 @@ def _attempt_entry_impl(
             _log_candidate(db, candidate, "SKIPPED", _dr_reject, quality=quality)
             return None
         logger.info("position-stocks entry: %s price-guard soft reasons sized down instead of refused (%s)", candidate.symbol, "; ".join(f"{k}: {_soft_why[k]}" for k in _drift_soft))
+    entry_stage_timer.mark("price_guard")           # round 616: finer stage marks (log only) - the 18 Nov slow skips were one lump "skip_gate_logic"
 
     # AUDIT FIX (this session): same-symbol re-entry guard — reject buying
     # back into a symbol we just closed at/above the price we exited at,
@@ -973,6 +974,7 @@ def _attempt_entry_impl(
         _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", reentry_reject, quality=quality)
         return None
+    entry_stage_timer.mark("reentry_guard")
 
     # Compute adaptive levels — pass symbol so range-aware adjustment can
     # read today's intraday high/low from the live tick buffer (session41b).
@@ -1068,6 +1070,7 @@ def _attempt_entry_impl(
         _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _depth_reject, quality=quality)
         return None
+    entry_stage_timer.mark("depth_gate")           # round 616: /depth is asked with wait_s=1.0, so a full second here is the wait, not a fault
 
     # group427: order-flow numbers for the record (spread, best-5 imbalance, 20-level book). Record only; never raises, never blocks.
     _flow_snap = order_flow.snapshot_json(candidate.symbol, candidate.current_ltp, None)
@@ -1082,6 +1085,7 @@ def _attempt_entry_impl(
         _flow_snap = trade_odds.attach(_flow_snap, candidate.symbol, "LONG", levels.stop_pct, levels.target_pct)
     except Exception:  # noqa: BLE001
         logger.debug("entry: trade_odds.attach failed (record only, entry unaffected)", exc_info=True)
+    entry_stage_timer.mark("flow_orb_odds")
 
     # E272: the rule that took this entry, stamped into flow_json["setup"] (orders/setup_stamp.py). Until setup_engine exists (E273) every entry is the
     # legacy shortlist path. Record only; never raises, never blocks.
@@ -1113,14 +1117,18 @@ def _attempt_entry_impl(
         _allowed = setup_live.allowed_set(s1=_s1_on, s2=_s2_on, s3=_s3_on)
         if getattr(config, "SETUP_ENGINE_ENABLED", True) and _allowed:
             from screening import preopen as _preopen
+            entry_stage_timer.mark("pre_setup")
             _quote = depth_gate._fresh_quote(candidate.symbol)
             _gap = _preopen.gap_of(candidate.symbol)
+            entry_stage_timer.mark("setup_quote")
             _tape = flow_gate.fetch_verdict(candidate.symbol, "LONG")
+            entry_stage_timer.mark("setup_tape")
             # E273 round 5: S2 / S3 facts, S1's sector third and priced_in. Each source is read on its own; a missing fact is never true.
             _inputs = setup_inputs.gather_long(
                 symbol=candidate.symbol, price=candidate.current_ltp, now_ts=_now_ist.timestamp(), flow_json_orb=setup_live._load(_flow_snap).get("orb"),
                 quote=_quote, gap_pct=_gap, tape=_tape, want_s2=_s2_on, want_s3=_s3_on, top_n=int(getattr(config, "BOARD_LIQUID_TOP_N", 100)))
             # E273 round 35: the slot size ladder (orders/slot_ladder.py): cells with proven results are sized at full size (`promoted`, read by the engine), losing cells are cut below.
+            entry_stage_timer.mark("setup_inputs")
             _ladder = slot_ladder.get(db)
             if isinstance(_inputs, dict) and _ladder.get("promoted"):
                 _inputs["promoted"] = _ladder["promoted"]
@@ -1132,6 +1140,7 @@ def _attempt_entry_impl(
                 symbol=candidate.symbol, price=candidate.current_ltp, now=_now_ist,
                 event_polarity=getattr(quality, "event_polarity", None) if quality else None, flow_json=_flow_snap,
                 quote=_quote, gap_pct=_gap, tape=_tape, penalties=_penalties, allowed=_allowed, inputs=_inputs, penalty_skip=soft_gates.skip_limit())
+            entry_stage_timer.mark("setup_classify")
             if _setup_res and _setup_res.get("id") and _setup_res.get("size_mult") is not None:
                 _df = slot_ladder.demote_factor(_setup_res["id"], setup_stamp.time_slot(_now_ist), _ladder)
                 if _df < 1.0:

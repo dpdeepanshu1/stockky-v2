@@ -54,7 +54,7 @@ def test_entry_py_hooks_record_before_the_refusal_and_add_no_new_exit():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "entry_engine", "entry.py"), encoding="utf-8").read()
     a = re.search(r"        if _stack_reject:\n(.*?)            continue\n", src, re.S).group(1)
     assert a.index("_or_shadow.rule_a") < a.index("_wait_with_preview(_stack_reject)") and 'gate_tag = "soft_stack"' in a
-    b = re.search(r"        if _wns_reject:\n(.*?)            continue\n", src, re.S).group(1)
+    b = re.search(r"        if _wns_reject and isinstance\(_or_ctx, dict\).*?\n        if _wns_reject:\n(.*?)            continue\n", src, re.S).group(0)   # round 612 moved the shadow record just above the refusal block
     assert b.index("_or_shadow.rule_b") < b.index("_wait_with_preview(_wns_reject)") and 'gate_tag = "no_setup_window"' in b
     # the helper only records: it must not touch gate_tag, return a value or call continue
     h = re.search(r"def _or_shadow_record\(.*?\n\n\n", src, re.S).group(0)

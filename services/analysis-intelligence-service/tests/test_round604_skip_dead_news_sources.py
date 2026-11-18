@@ -71,7 +71,7 @@ def test_event_feed_list_has_no_frozen_latestnews_entry():
     urls = [u for _, u in ef.FEEDS]
     names = [n for n, _ in ef.FEEDS]
     assert not any(u.endswith("/rss/latestnews.xml") for u in urls), urls
-    assert "Moneycontrol" not in names and "Moneycontrol-business" in names and "Moneycontrol-google" in names
+    assert "Moneycontrol" not in names and "Moneycontrol-business" not in names and "Moneycontrol-google" in names   # round 616: business.xml was STALE on the VM
     assert len(names) == len(set(names)) and all(u.startswith("https://") for u in urls)
 
 

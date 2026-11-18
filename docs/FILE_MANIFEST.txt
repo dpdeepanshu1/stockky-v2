@@ -864,6 +864,8 @@ services/analysis-intelligence-service/tests/test_round603_check_priority.py
 services/analysis-intelligence-service/tests/test_round604_skip_dead_news_sources.py
 services/analysis-intelligence-service/tests/test_round605_google_backoff.py
 services/analysis-intelligence-service/tests/test_round611_check_held_first.py
+services/analysis-intelligence-service/tests/test_round616_stale_fallback_skipped.py
+services/analysis-intelligence-service/tests/test_round617_event_source_probe_extras.py
 services/analysis-intelligence-service/tests/test_sentiment_main.py
 services/analysis-intelligence-service/tests/test_sentiment_market_data.py
 services/analysis-intelligence-service/tests/test_service_main.py
@@ -2352,6 +2354,7 @@ services/position-stocks-service/tests/test_round608_typed_event_cache.py
 services/position-stocks-service/tests/test_round612_or_live.py
 services/position-stocks-service/tests/test_round613_shared_or_budget.py
 services/position-stocks-service/tests/test_round615_or_refund.py
+services/position-stocks-service/tests/test_round616_entry_stage_finer_marks.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py

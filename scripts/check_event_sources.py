@@ -7,7 +7,11 @@ one source here reads OK.
 
     python3 scripts/check_event_sources.py            # table
     python3 scripts/check_event_sources.py --json     # machine readable
-Exit code 0 when at least one source is OK, 1 when none is.
+    python3 scripts/check_event_sources.py --no-extra # only the FEEDS list
+Exit code 0 when at least one FEEDS source is OK, 1 when none is.
+Round 617: below the FEEDS rows the table also probes EXTRA feeds that the news service and the after-hours scan still use but FEEDS does not list
+(NDTV Profit's bloombergquint Atom feed, Moneycontrol latestnews.xml, CNBC TV18). They are information only: they never change the exit code or the
+"switch on" line, so a verdict there decides whether to drop or keep them in the news service / afterhours_scan.py.
 Uses only the standard library, so it runs anywhere (it does not need httpx or feedparser).
 """
 from __future__ import annotations
@@ -90,18 +94,31 @@ def probe(name, url, timeout=10.0):
     return row
 
 
+EXTRA = [
+    ("NDTVProfit-bloombergq", "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml"),
+    ("Moneycontrol-latest", "https://www.moneycontrol.com/rss/latestnews.xml"),
+    ("CNBCTV18", "https://www.cnbctv18.com/feed/"),
+]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-extra", action="store_true", help="probe only the FEEDS list")
     a = ap.parse_args(argv)
     rows = [probe(n, u) for n, u in _load_feeds()]
+    n_feeds = len(rows)
+    if not a.no_extra:
+        rows += [dict(probe(n, u), extra=True) for n, u in EXTRA]
     if a.json:
         print(json.dumps(rows, indent=2))
     else:
         print(f"{'SOURCE':<24}{'STATUS':<8}{'ITEMS':<7}{'DATED':<7}{'NEWEST(min)':<13}VERDICT")
-        for r in rows:
+        for i, r in enumerate(rows):
+            if i == n_feeds and not a.no_extra:
+                print("-- not in FEEDS (information only, never switched on here):")
             print(f"{r['source']:<24}{str(r['status']):<8}{r['items']:<7}{r['dated']:<7}{str(r['newest_age_min']):<13}{r['verdict']} {r['note']}")
-    ok = [r for r in rows if r["verdict"] == "OK"]
+    ok = [r for r in rows[:n_feeds] if r["verdict"] == "OK"]
     if not a.json:
         print("\nswitch on:", ", ".join(r["source"] for r in ok) if ok else "NONE reachable - the event feed will answer ok:false until one is")
     return 0 if ok else 1

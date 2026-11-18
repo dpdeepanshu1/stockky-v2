@@ -122,5 +122,6 @@ def test_breakdown_never_raises_on_junk():
 def test_rotation_and_response_shape_are_unchanged(monkeypatch):
     _setup(monkeypatch, ["a", "b", "c", "d", "e"], cost=3.0, budget="10")
     out = em.check_for_changes()
-    assert set(out) == {"checked", "total", "complete", "next_cursor", "changes", "checked_at"}
+    assert set(out) == {"checked", "total", "complete", "next_cursor", "changes", "checked_at", "held_first"}   # round 611 added held_first (0 when no first= list is sent)
+    assert out["held_first"] == 0
     assert out["checked"] == 3 and out["next_cursor"] == 3

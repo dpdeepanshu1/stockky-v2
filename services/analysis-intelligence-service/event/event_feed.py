@@ -41,9 +41,9 @@ logger = logging.getLogger("event-feed")
 
 # (source name, url). Exchange filings are added only after scripts/check_event_sources.py proves one of these reads OK from the VM.
 FEEDS: List[Tuple[str, str]] = [
-    # Round 604: ("Moneycontrol", "https://www.moneycontrol.com/rss/latestnews.xml") is frozen (no new items, 18 Nov log); "Moneycontrol-business"
-    # and the Google News search below read the same site. Put it back if a VM check shows it moving again.
-    ("Moneycontrol-business", "https://www.moneycontrol.com/rss/business.xml"),
+    # Round 604: ("Moneycontrol", "https://www.moneycontrol.com/rss/latestnews.xml") is frozen (no new items, 18 Nov log). Round 616: the VM check of
+    # 18 Nov showed ("Moneycontrol-business", ".../rss/business.xml") STALE too (newest item 938 days old), so it is gone; the Google News search
+    # below reads the same site and was OK (13 min). Put either back only if scripts/check_event_sources.py shows it moving again.
     ("Moneycontrol-google", "https://news.google.com/rss/search?q=site:moneycontrol.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en"),
     ("LiveMint", "https://www.livemint.com/rss/markets"),
     # Round 200: ("NDTVProfit", "https://www.ndtvprofit.com/rss/markets") answered HTTP 403 on every read (4 Nov log); the Google News search below

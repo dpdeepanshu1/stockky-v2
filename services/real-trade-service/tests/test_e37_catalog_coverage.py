@@ -12,6 +12,8 @@ EXEMPT = {
     "ADMIN_PASSWORD_CHANGE_ENABLED": "login security: never a one-click switch",
     "DHAN_TOTP_ENABLED": "broker login credential flow, set in .env only",
     "ENTRY_PRODUCT_MODE": "order product type (CNC / MIS) needs a restart and a broker check",
+    "OR_SHADOW_MODE": "round 599 record-only OR evidence line; set in .env, restart the service",
+    "OR_LIVE_MODE": "round 612 live OR entry rescue; the roll-back switch is set in .env and the service restarted, never a one-click toggle",
 }
 
 

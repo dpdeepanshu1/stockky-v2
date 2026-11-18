@@ -37,7 +37,7 @@ MAX_INFLIGHT = env_int_safe("ORB_BARS_MAX_INFLIGHT", 6, positive=True)          
 # round 610: fetch slots kept free for the names the entry walk, the swing entry and the exits ask for (priority=True). The record-only ORB recorder
 # (orb_shadow.record, run for EVERY candidate early in the decision) may only use MAX_INFLIGHT - RESERVE slots, so it can no longer fill them all.
 PRIORITY_RESERVE = min(env_int_safe("ORB_BARS_PRIORITY_RESERVE", 2, lo=0), max(0, MAX_INFLIGHT - 1))
-WANT_TTL_S = env_float_safe("ORB_BARS_WANT_TTL_S", 30.0, positive=True)             # a queued priority request older than this is dropped (the next decision asks again)
+WANT_TTL_S = env_float_safe("ORB_BARS_WANT_TTL_S", 30.0, positive=True, lo=1.0)             # a queued priority request older than this is dropped (the next decision asks again)
 MAX_WANTED = 300
 MAX_CACHE = 600
 

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Not on the calibration page on purpose. A secret, a login or an infrastructure link must never be a one-click switch there.
 EXEMPT = {
     "ADMIN_PASSWORD_CHANGE_ENABLED": "login security: never a one-click switch",
+    "OR_LIVE_MODE": "round 612 live OR entry rescue; the roll-back switch is set in .env and the service restarted, never a one-click toggle",
 }
 
 

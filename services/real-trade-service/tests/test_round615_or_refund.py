@@ -113,10 +113,9 @@ def test_settle_with_no_result_or_odd_result_gives_nothing_back():
     assert sb.used(DAY) == 2
 
 
-def test_evaluate_mode_wrapper_settles_after_the_cycle_and_after_an_error():
+def test_evaluate_mode_decorator_settles_after_the_cycle_and_after_an_error():
     e = _entry()
     _fresh(cap=4)
-    real_impl = e._evaluate_mode_impl
 
     async def ok_cycle(db, mode, armed):
         o.allow(HIT, T10, key=(mode, "AAA"))
@@ -127,18 +126,21 @@ def test_evaluate_mode_wrapper_settles_after_the_cycle_and_after_an_error():
         o.allow(HIT, T10, key=(mode, "CCC"))
         raise RuntimeError("boom")
 
+    res = asyncio.run(e._or_live_settled(ok_cycle)(None, "DEMO", True))
+    assert res["entry_details"][0]["symbol"] == "AAA" and sb.used(DAY) == 1              # BBB given back
     try:
-        e._evaluate_mode_impl = ok_cycle
-        res = asyncio.run(e.evaluate_mode(None, "DEMO", True))
-        assert res["entry_details"][0]["symbol"] == "AAA" and sb.used(DAY) == 1          # BBB given back
-        e._evaluate_mode_impl = bad_cycle
-        try:
-            asyncio.run(e.evaluate_mode(None, "DEMO", True))
-        except RuntimeError:
-            pass
-        assert sb.used(DAY) == 2 and o.pending_keys() == []                              # CCC stays spent after an error
-    finally:
-        e._evaluate_mode_impl = real_impl
+        asyncio.run(e._or_live_settled(bad_cycle)(None, "DEMO", True))
+    except RuntimeError:
+        pass
+    assert sb.used(DAY) == 2 and o.pending_keys() == []                                  # CCC stays spent after an error
+
+
+def test_evaluate_mode_keeps_its_name_and_source():
+    import inspect
+    e = _entry()
+    assert e.evaluate_mode.__name__ == "evaluate_mode"
+    assert "async def evaluate_mode" in inspect.getsource(e.evaluate_mode)
+    assert asyncio.iscoroutinefunction(e.evaluate_mode)
 
 
 if __name__ == "__main__":

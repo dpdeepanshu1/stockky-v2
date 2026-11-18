@@ -822,19 +822,26 @@ def _or_live_settle(mode: str, res: Any) -> None:
         logger.debug("or_live settle failed (rescues stay spent)", exc_info=True)
 
 
+def _or_live_settled(fn):
+    """Round 616: decorator for evaluate_mode. After the entry cycle it settles the live OR rescues (_or_live_settle): a rescue whose symbol got no ENTER is given back.
+    The decorated function body is untouched on purpose: several tests pin the source of evaluate_mode, and functools.wraps keeps its name and source."""
+    import functools
+
+    @functools.wraps(fn)
+    async def _wrapper(db, mode, gate_armed):
+        for _k in [k for k in _or_live.pending_keys() if isinstance(k, tuple) and len(k) == 2 and k[0] == mode]:
+            _or_live.keep(_k)      # left over from a cycle that never finished: stays spent
+        res = None
+        try:
+            res = await fn(db, mode, gate_armed)
+            return res
+        finally:
+            _or_live_settle(mode, res)
+    return _wrapper
+
+
+@_or_live_settled
 async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
-    """Round 614: the entry cycle (_evaluate_mode_impl) plus the settling of its live OR rescues (_or_live_settle)."""
-    for _k in [k for k in _or_live.pending_keys() if isinstance(k, tuple) and len(k) == 2 and k[0] == mode]:
-        _or_live.keep(_k)      # left over from a cycle that never finished: stays spent
-    res = None
-    try:
-        res = await _evaluate_mode_impl(db, mode, gate_armed)
-        return res
-    finally:
-        _or_live_settle(mode, res)
-
-
-async def _evaluate_mode_impl(db: Session, mode: str, gate_armed: bool) -> dict:
     await _rearm_requeue(db, mode)
     candidates = _fetch_candidates(db, mode)
     if not candidates:

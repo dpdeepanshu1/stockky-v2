@@ -81,8 +81,8 @@ class _Locked:
                     import fcntl
                     fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
                 self._fh.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 - a failed unlock/close never changes a count
+            logger.debug("or_live budget lock release failed", exc_info=True)
 
 
 def _load(day: str) -> Dict[str, Any]:

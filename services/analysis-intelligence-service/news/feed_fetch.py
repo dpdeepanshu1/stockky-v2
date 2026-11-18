@@ -296,6 +296,7 @@ def _try_fallbacks(url: str, info: Dict[str, Any]) -> Optional[Any]:
         return None
     publisher, urls = fb
     tried = []
+    stale_pick: Optional[Tuple[str, Any]] = None       # round 616: first fallback that answered with entries that are ALL old; used only if no later one is fresh
     for u in urls:
         raw, finfo = _download(u)
         if raw is None:
@@ -303,6 +304,14 @@ def _try_fallbacks(url: str, info: Dict[str, Any]) -> Optional[Any]:
             continue
         parsed = feedparser.parse(raw)
         if getattr(parsed, "entries", None):
+            # round 616: the VM check of 18 Nov showed moneycontrol.com/rss/business.xml answering 200 with items 938 days old. It is the FIRST fallback of the
+            # frozen latestnews.xml, so it used to win and the Google News search behind it was never asked. A fallback whose every item is older than
+            # NEWS_FEED_STALE_DAYS is now passed over for the next one (the same rule real-trade's after-hours scan already had).
+            if STALE_DAYS > 0 and _all_entries_stale(parsed, STALE_DAYS):
+                tried.append(f"{_short(u)}: all_stale")
+                if stale_pick is None:
+                    stale_pick = (u, parsed)
+                continue
             _strip_publisher(parsed, publisher)
             info["via"] = u
             info["error"] = None
@@ -310,6 +319,14 @@ def _try_fallbacks(url: str, info: Dict[str, Any]) -> Optional[Any]:
                         _short(url), info.get("status") or "failed", _short(u), len(parsed.entries))
             return parsed
         tried.append(f"{_short(u)}: zero_entries")
+    if stale_pick is not None:                          # no fresh fallback: same answer as before round 616 (the news window drops the old items later)
+        u, parsed = stale_pick
+        _strip_publisher(parsed, publisher)
+        info["via"] = u
+        info["error"] = None
+        logger.info("news feed %s unavailable (%s) - only a stale fallback %s answered: %d entries",
+                    _short(url), info.get("status") or "failed", _short(u), len(parsed.entries))
+        return parsed
     _warn_throttled("allfail:" + url, "news feed %s and all fallbacks failed: %s", _short(url), " | ".join(tried))
     return None
 

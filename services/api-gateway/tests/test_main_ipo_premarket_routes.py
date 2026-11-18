@@ -199,6 +199,7 @@ def ienv(monkeypatch):
     monkeypatch.setattr(gw, "NOTIFICATION_URL", NOTIF)
     # the proxy route caches "schema ready" in a module global; start every test unconfirmed
     monkeypatch.setattr(gw, "_SURPRISE_SCHEMA_CONFIRMED", False, raising=False)
+    monkeypatch.setattr(gw, "_surprise_premarket_starting", False, raising=False)   # round 629: a fake thread never clears the claim
     return env
 
 
@@ -764,6 +765,41 @@ class TestPremarketBackground:
         _premarket(_jbody(["A"]))
         threads[0].target()                              # must not raise out of the thread
         assert len(ienv.base_calls) == 1
+
+
+class TestPremarketDoubleStart:
+    # Round 629 (E655): between a background start and the job's own `is_running` flag the universe is being built.
+    def test_second_start_during_the_universe_build_is_already_running(self, ienv, threads):
+        first = _premarket()
+        second = _premarket()
+        assert first["accepted"] is True and len(threads) == 1
+        assert second["accepted"] is False and second["already_running"] is True
+        assert second["message"] == "Premarket already running — poll /surprise/premarket/status"
+        assert len(threads) == 1 and ienv.universe_calls == 0
+
+    def test_a_synchronous_call_during_the_start_window_is_refused_too(self, ienv, threads):
+        _premarket(_jbody(["A"]))
+        out = _premarket(_jbody(["A"]), background="false")
+        assert out["already_running"] is True and ienv.base_calls == []
+
+    def test_claim_released_when_the_job_ends_and_when_it_fails(self, ienv, threads):
+        _premarket(_jbody(["A"]))
+        assert gw._surprise_premarket_starting is True
+        threads[0].target()
+        assert gw._surprise_premarket_starting is False
+        assert _premarket(_jbody(["A"]))["accepted"] is True            # a later click starts again
+        ienv.base_raises = RuntimeError("yfinance down")
+        threads[1].target()
+        assert gw._surprise_premarket_starting is False
+
+    def test_claim_released_when_the_thread_cannot_start(self, ienv, monkeypatch):
+        class Boom:
+            def __init__(self, *a, **kw): pass
+            def start(self): raise RuntimeError("can't start new thread")
+        monkeypatch.setattr(threading, "Thread", Boom)
+        with pytest.raises(RuntimeError):
+            _premarket(_jbody(["A"]))
+        assert gw._surprise_premarket_starting is False
 
 
 class TestPremarketSynchronous:

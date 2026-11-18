@@ -446,3 +446,26 @@ class TestPremarketWorkerLive:
     def test_bulk_failure_skips_the_overlay_entirely(self, hp):
         run_worker(hp, phase="open", bulk_raises=RuntimeError("x"))
         assert hp.post_calls == [] and final(hp)["status"] == "error"
+
+
+# ── round 624 (E650): two simultaneous starts, one bulk feed ─────────────────────────────────────────────────────────────────────────────────
+def test_two_simultaneous_premarket_starts_queue_one_worker(hp):
+    b1, b2 = BackgroundTasks(), BackgroundTasks()
+
+    async def both():
+        return await asyncio.gather(gw.stockky_hot_premarket(b1), gw.stockky_hot_premarket(b2))
+    o1, o2 = _run(both())
+    assert o1.get("ok") is True and not o1.get("already_running")
+    assert o2.get("ok") is True and o2.get("already_running") is True
+    assert len(b1.tasks) == 1 and b2.tasks == []
+    assert [kw.get("status") for kw in hp.pm_sets].count("running") == 1
+
+
+def test_premarket_claim_is_released_after_success_and_after_failure(hp):
+    hp.universe_raises = RuntimeError("boom")
+    assert _run(gw.stockky_hot_premarket(BackgroundTasks())).get("ok") is False
+    hp.universe_raises = None
+    hp.universe = []
+    assert _run(gw.stockky_hot_premarket(BackgroundTasks())).get("ok") is False      # empty universe: also released
+    hp.universe = ["AAA"]
+    assert _run(gw.stockky_hot_premarket(BackgroundTasks())).get("started") is True  # a later start is not blocked

@@ -363,11 +363,22 @@ def _run_phase(phase: str) -> None:
 
 
 def start_phase_background(phase: str) -> dict:
-    current = get_status()
-    if current.get("status") == "running":
-        return {"ok": True, "already_running": True, "job": current}
-    thread = threading.Thread(target=_run_phase, args=(phase,), daemon=True)
-    thread.start()
+    # Round 631: the check and the claim are ONE step under _JOB_LOCK. Before, the job only turned
+    # "running" inside the new thread (_run_phase), so a manual "run now" arriving together with the
+    # scheduled trigger (or a double click) both read "idle" and ran two phases side by side, which
+    # this module promises never happens.
+    with _JOB_LOCK:
+        if _JOB.get("status") == "running":
+            return {"ok": True, "already_running": True, "job": dict(_JOB)}
+        _JOB.update(status="running", phase=phase, step=None, started_epoch=time.time(), steps_log=[])
+        _JOB["updated_epoch"] = time.time()
+    try:
+        thread = threading.Thread(target=_run_phase, args=(phase,), daemon=True)
+        thread.start()
+    except Exception as e:  # the claim must not outlive a thread that never ran
+        logger.exception("overnight_orchestrator: could not start %s phase", phase)
+        _set_job(status="error", message=f"could not start thread: {str(e)[:200]}")
+        return {"ok": False, "error": "could not start the phase thread", "job": get_status()}
     return {"ok": True, "started": True, "phase": phase, "job": get_status()}
 
 

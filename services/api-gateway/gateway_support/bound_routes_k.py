@@ -330,102 +330,115 @@ def build_bound_routes_k(ref):
         if job.get("status") == "running" and not force and not resume:
             return {"ok": True, "already_running": True, **job}
 
-        universe = (await ref.asyncio.to_thread(ref._build_scan_universe))
-        if not universe:
-            universe = list(await ref.asyncio.to_thread(ref._get_nifty_indices) or [])[:150]  # E398: 5 sequential NSE calls, off the loop
-        _df_max = ref._safe_int(ref.os.getenv("DATA_FEED_MAX_SYMBOLS"), 0)   # E444: a junk value is "no cap", not a 500
-        if _df_max > 0:
-            universe = universe[:_df_max]
-        universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
-        # Full universe by default. Only DATA_FEED_MAX_SYMBOLS>0 truncates (explicit opt-in).
+        # Round 627 (E653): same check-then-await gap as /stockky-hot/run (round 622). A plain start (no force, no resume) read the job row above,
+        # then awaited the universe build (and the only_new reads) before it wrote `running`, so two starts that arrived together both passed the
+        # check and each started a worker. A claim is taken here with no await after the check and released in the `finally` below, once the row
+        # is written (or the start returned / raised first). force / resume are deliberate restarts and are not blocked (E443 run ids handle them).
+        default_start = not force and not resume
+        if default_start and getattr(ref, "_data_feed_run_starting", False):    # lives on main.py's globals through MainRef.__setattr__
+            return {**job, "ok": True, "already_running": True, "status": "running", "message": "A data feed start is already in progress"}
+        if default_start:
+            ref._data_feed_run_starting = True
+        try:
+            universe = (await ref.asyncio.to_thread(ref._build_scan_universe))
+            if not universe:
+                universe = list(await ref.asyncio.to_thread(ref._get_nifty_indices) or [])[:150]  # E398: 5 sequential NSE calls, off the loop
+            _df_max = ref._safe_int(ref.os.getenv("DATA_FEED_MAX_SYMBOLS"), 0)   # E444: a junk value is "no cap", not a 500
+            if _df_max > 0:
+                universe = universe[:_df_max]
+            universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
+            # Full universe by default. Only DATA_FEED_MAX_SYMBOLS>0 truncates (explicit opt-in).
 
-        if not universe:
-            # Same guard as /data-feed/start-bulk-feed. Without it an empty universe reported `started: true`,
-            # wrote a "running" job with total 0 and queued a worker that had nothing to do.
-            raise ref.HTTPException(status_code=400, detail="No symbols available for data feed")
+            if not universe:
+                # Same guard as /data-feed/start-bulk-feed. Without it an empty universe reported `started: true`,
+                # wrote a "running" job with total 0 and queued a worker that had nothing to do.
+                raise ref.HTTPException(status_code=400, detail="No symbols available for data feed")
 
-        if only_new:
-            store = ref._feed_store()
-            fresh = []
-            for s in universe:
-                try:
-                    entry = await ref.asyncio.to_thread(store.get_symbol, s)  # group303
-                    if not entry:
+            if only_new:
+                store = ref._feed_store()
+                fresh = []
+                for s in universe:
+                    try:
+                        entry = await ref.asyncio.to_thread(store.get_symbol, s)  # group303
+                        if not entry:
+                            fresh.append(s)
+                    except Exception:
                         fresh.append(s)
-                except Exception:
-                    fresh.append(s)
-            if not fresh:
-                return {
-                    "ok": True,
-                    "started": False,
-                    "mode": "only_new",
-                    "total": 0,
-                    "message": "No new symbols — all universe members already have feed data. Use full feed only if you need a refresh.",
-                }
-            universe = fresh
-            ref.logger.info("data-feed only_new: %s symbols without feed entry", len(universe))
+                if not fresh:
+                    return {
+                        "ok": True,
+                        "started": False,
+                        "mode": "only_new",
+                        "total": 0,
+                        "message": "No new symbols — all universe members already have feed data. Use full feed only if you need a refresh.",
+                    }
+                universe = fresh
+                ref.logger.info("data-feed only_new: %s symbols without feed entry", len(universe))
 
 
-        # E443: every launch gets its own run id, written into the job row. A Resume (which stops the running job first), or a force
-        # run, used to start a SECOND worker while the first was still inside its current symbol: the new run cleared the process stop
-        # flag and wrote stop_requested=False / status "running", so the old worker saw no stop and kept feeding. Two workers then
-        # wrote interleaved progress and checkpoints. The worker now exits quietly once the job row carries another run's id.
-        run_id = ref.uuid.uuid4().hex[:12]
+            # E443: every launch gets its own run id, written into the job row. A Resume (which stops the running job first), or a force
+            # run, used to start a SECOND worker while the first was still inside its current symbol: the new run cleared the process stop
+            # flag and wrote stop_requested=False / status "running", so the old worker saw no stop and kept feeding. Two workers then
+            # wrote interleaved progress and checkpoints. The worker now exits quietly once the job row carries another run's id.
+            run_id = ref.uuid.uuid4().hex[:12]
 
-        # Checkpoint: list of already-fed symbols + cursor
-        checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-        done_set = set(checkpoint.get("done") or [])
-        start_idx = 0
-        ok_n = max(0, ref._safe_int(job.get("ok_count")))        # E444: tolerant parse of stored counters
-        err_n = max(0, ref._safe_int(job.get("error_count")))
+            # Checkpoint: list of already-fed symbols + cursor
+            checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+            done_set = set(checkpoint.get("done") or [])
+            start_idx = 0
+            ok_n = max(0, ref._safe_int(job.get("ok_count")))        # E444: tolerant parse of stored counters
+            err_n = max(0, ref._safe_int(job.get("error_count")))
 
-        if resume and not force:
-            # Prefer explicit cursor; else skip symbols already in done
-            start_idx = ref._safe_int(checkpoint.get("cursor")) or ref._safe_int(job.get("processed"))
-            start_idx = max(0, min(start_idx, len(universe)))
-            # If job was stopped mid-way, resume from there
-            if job.get("status") in ("stopped", "error", "idle", "done") and start_idx >= len(universe):
-                start_idx = 0
+            if resume and not force:
+                # Prefer explicit cursor; else skip symbols already in done
+                start_idx = ref._safe_int(checkpoint.get("cursor")) or ref._safe_int(job.get("processed"))
+                start_idx = max(0, min(start_idx, len(universe)))
+                # If job was stopped mid-way, resume from there
+                if job.get("status") in ("stopped", "error", "idle", "done") and start_idx >= len(universe):
+                    start_idx = 0
+                    done_set = set()
+                    ok_n = 0
+                    err_n = 0
+                store.set_job(
+                    status="running",
+                    processed=start_idx,
+                    total=len(universe),
+                    started_at=job.get("started_at") or ref.datetime.now(ref.IST).isoformat(),
+                    resumed_at=ref.datetime.now(ref.IST).isoformat(),
+                    message=f"Resuming from {start_idx}/{len(universe)}…",
+                    errors=err_n,
+                    ok_count=ok_n,
+                    error_count=err_n,
+                    stop_requested=False,
+                    run_id=run_id,
+                    checkpoint={"cursor": start_idx, "done": list(done_set), "universe": universe},
+                )
+                mode = "resume"
+            else:
+                # Full refresh / new run
                 done_set = set()
+                start_idx = 0
                 ok_n = 0
                 err_n = 0
-            store.set_job(
-                status="running",
-                processed=start_idx,
-                total=len(universe),
-                started_at=job.get("started_at") or ref.datetime.now(ref.IST).isoformat(),
-                resumed_at=ref.datetime.now(ref.IST).isoformat(),
-                message=f"Resuming from {start_idx}/{len(universe)}…",
-                errors=err_n,
-                ok_count=ok_n,
-                error_count=err_n,
-                stop_requested=False,
-                run_id=run_id,
-                checkpoint={"cursor": start_idx, "done": list(done_set), "universe": universe},
-            )
-            mode = "resume"
-        else:
-            # Full refresh / new run
-            done_set = set()
-            start_idx = 0
-            ok_n = 0
-            err_n = 0
-            store.set_job(
-                status="running",
-                processed=0,
-                total=len(universe),
-                started_at=ref.datetime.now(ref.IST).isoformat(),
-                elapsed_sec=0,
-                estimated_remaining_sec=None,
-                message=f"Feeding {len(universe)} symbols…",
-                errors=0,
-                ok_count=0,
-                error_count=0,
-                stop_requested=False,
-                run_id=run_id,
-                checkpoint={"cursor": 0, "done": [], "universe": universe},
-            )
-            mode = "refresh" if force else "start"
+                store.set_job(
+                    status="running",
+                    processed=0,
+                    total=len(universe),
+                    started_at=ref.datetime.now(ref.IST).isoformat(),
+                    elapsed_sec=0,
+                    estimated_remaining_sec=None,
+                    message=f"Feeding {len(universe)} symbols…",
+                    errors=0,
+                    ok_count=0,
+                    error_count=0,
+                    stop_requested=False,
+                    run_id=run_id,
+                    checkpoint={"cursor": 0, "done": [], "universe": universe},
+                )
+                mode = "refresh" if force else "start"
+        finally:
+            if default_start:
+                ref._data_feed_run_starting = False
 
         def _superseded() -> bool:
             """E443: True when the job row now belongs to a different run (a newer launch replaced this one). A row with no run id
@@ -835,8 +848,12 @@ def build_bound_routes_k(ref):
             return out
 
         # Already-running check BEFORE any (slow, NSE-backed) universe build.
+        # Round 629 (E655): `is_running` only turns true once precalculate_surprise_baselines starts, but a background start resolves its
+        # universe (a slow NSE call) in the thread BEFORE that. A second click in that window saw is_running False, answered `accepted`
+        # and spawned a second thread that built the universe again. The claim below is set with no await after this check and cleared
+        # when the job ends, so that window now answers `already_running` too.
         prog = get_premarket_progress()
-        if prog.get("is_running"):
+        if prog.get("is_running") or getattr(ref, "_surprise_premarket_starting", False):
             return {
                 "ok": True,
                 "accepted": False,
@@ -877,8 +894,15 @@ def build_bound_routes_k(ref):
                     precalculate_surprise_baselines(syms, force=force)
                 except Exception as e:
                     ref.logger.exception("gateway premarket job: %s", e)
+                finally:
+                    ref._surprise_premarket_starting = False
 
-            threading.Thread(target=_job, daemon=True, name="gw-surprise-premarket").start()
+            ref._surprise_premarket_starting = True
+            try:
+                threading.Thread(target=_job, daemon=True, name="gw-surprise-premarket").start()
+            except BaseException:
+                ref._surprise_premarket_starting = False
+                raise
             return {
                 "ok": True,
                 "accepted": True,

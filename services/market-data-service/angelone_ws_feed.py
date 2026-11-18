@@ -350,7 +350,12 @@ def _queue_db_rows(rows: list) -> None:
             _db_writer_busy = True
             start = True
     if start:
-        threading.Thread(target=_db_writer_drain, name="live-quotes-writer", daemon=True).start()
+        try:
+            threading.Thread(target=_db_writer_drain, name="live-quotes-writer", daemon=True).start()
+        except Exception as e:  # noqa: BLE001 - round 635: the claim above is only cleared by the thread, which never existed
+            with _DB_PENDING_LOCK:
+                _db_writer_busy = False
+            logger.warning("live_quotes writer: could not start the thread (%s); the rows stay queued and the next batch retries", e)
 
 
 # In-memory dict — same pattern as yahoo_ws_feed.py

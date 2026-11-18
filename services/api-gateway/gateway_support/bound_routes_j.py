@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter
 
 
+
 def build_bound_routes_j(ref):
     ops_wake_db_all_router = APIRouter()
     system_health_router = APIRouter()
@@ -1371,6 +1372,11 @@ def build_bound_routes_j(ref):
             return cur
 
         existing = await ref.asyncio.to_thread(ref._redis_get, job_key) or {}
+        # Round 626 (E652): same check-then-await gap as /stockky-hot/run (round 622) and /stockky-hot/premarket (round 624). The `running` row is
+        # written through an awaited thread call, so two requests that arrive together both read "not running" and both started a full sweep.
+        # The claim is read here, right after this request's own await, and taken below with no await in between.
+        if getattr(ref, "_catalyst_starting", False) and not restart:       # lives on main.py's globals through MainRef.__setattr__
+            return {"ok": True, "already_running": True, **(existing if isinstance(existing, dict) else {})}
         # ``force`` only bypasses the hot-stocks cache. It used to also bypass this
         # already-running guard, and it defaults to True, so a plain call always
         # started a second sweep. Only an explicit ``restart=true`` overrides it.
@@ -1385,20 +1391,24 @@ def build_bound_routes_j(ref):
             except Exception:
                 pass
 
-        await ref.asyncio.to_thread(
-            _set_job,
-            status="running",
-            started_at=ref.datetime.now(ref.IST).isoformat(),
-            message="Catalyst sweep started (full universe, batched)",
-            force=force,
-            notify=notify,
-            actionable_count=0,
-            processed=0,
-            total=0,
-            batch_size=batch_size,
-            batch_index=0,
-            error=None,
-        )
+        ref._catalyst_starting = True
+        try:
+            await ref.asyncio.to_thread(
+                _set_job,
+                status="running",
+                started_at=ref.datetime.now(ref.IST).isoformat(),
+                message="Catalyst sweep started (full universe, batched)",
+                force=force,
+                notify=notify,
+                actionable_count=0,
+                processed=0,
+                total=0,
+                batch_size=batch_size,
+                batch_index=0,
+                error=None,
+            )
+        finally:
+            ref._catalyst_starting = False
 
         async def _work():
             ka_task = None
@@ -1590,24 +1600,33 @@ def build_bound_routes_j(ref):
         if job.get("status") == "running":
             return {"ok": True, "already_running": True, **job}
 
+        # Round 624 (E650): same check-then-await gap as /stockky-hot/run (round 622). The `running` row needs the universe size, so it can only be
+        # written after the awaited universe build; two requests that arrive together both passed the check above and each started a bulk
+        # feed. A claim taken with no await after the check closes the gap; it is released as soon as the row is written (or the build fails).
+        if getattr(ref, "_hot_premarket_starting", False):           # lives on main.py's globals through MainRef.__setattr__
+            return {"ok": True, "already_running": True, **job}
+        ref._hot_premarket_starting = True
         try:
-            universe = (await ref.asyncio.to_thread(ref._build_scan_universe))
-        except Exception as e:
-            return {"ok": False, "error": f"could not build universe: {str(e)[:160]}"}
+            try:
+                universe = (await ref.asyncio.to_thread(ref._build_scan_universe))
+            except Exception as e:
+                return {"ok": False, "error": f"could not build universe: {str(e)[:160]}"}
 
-        if not universe:
-            return {"ok": False, "error": "scan universe is empty — nothing to pre-feed"}
+            if not universe:
+                return {"ok": False, "error": "scan universe is empty — nothing to pre-feed"}
 
-        ref.hot_premarket_job_set(
-            ref._redis_set,
-            ref._redis_get,
-            status="running",
-            processed=0,
-            total=len(universe),
-            started_at=ref.datetime.now(ref.IST).isoformat(),
-            message=f"Pre-feeding {len(universe)} eligible stocks (bulk)…",
-            finished_at=None,
-        )
+            ref.hot_premarket_job_set(
+                ref._redis_set,
+                ref._redis_get,
+                status="running",
+                processed=0,
+                total=len(universe),
+                started_at=ref.datetime.now(ref.IST).isoformat(),
+                message=f"Pre-feeding {len(universe)} eligible stocks (bulk)…",
+                finished_at=None,
+            )
+        finally:
+            ref._hot_premarket_starting = False
 
         def _run_premarket(syms: list):
             """Runs entirely outside the HTTP request — a full-universe bulk
@@ -1759,16 +1778,11 @@ def build_bound_routes_j(ref):
         if job.get("status") == "running":
             return {"ok": True, "already_running": True, **job}
 
-        # Fresh run: drop any stop request left over from a previous scan, and make
-        # sure the durable table exists before we have rows to write into it.
-        try:
-            from hotpicks_store import clear_hotpicks_stop, ensure_hotpicks_schema
-
-            await ref.asyncio.to_thread(clear_hotpicks_stop)      # group356: durable-key write + schema DDL, off the event loop
-            await ref.asyncio.to_thread(ensure_hotpicks_schema)
-        except Exception as e:
-            ref.logger.debug("hotpicks pre-run setup skipped: %s", e)
-
+        # Round 622 (E647): the job row is marked "running" BEFORE the first await. The check above and this write used to be separated by
+        # two `await asyncio.to_thread(...)` calls (stop-flag clear, schema DDL), so two requests that arrived together on a cold cache
+        # (your 18 Nov 14:27 log: every "batch boundary", "persisted 20 row(s)" and "stockky-hot refreshed" line twice) both saw "not
+        # running" and each started a full-universe scan. Check and write now run with no await between them, so the second request
+        # gets `already_running`. A queued worker has not started yet, so the stop-flag clear below still happens before it runs.
         ref.hot_job_set(
             ref._redis_set,
             ref._redis_get,
@@ -1782,6 +1796,16 @@ def build_bound_routes_j(ref):
             current_symbol=None,
             stopped=False,
         )
+
+        # Fresh run: drop any stop request left over from a previous scan, and make
+        # sure the durable table exists before we have rows to write into it.
+        try:
+            from hotpicks_store import clear_hotpicks_stop, ensure_hotpicks_schema
+
+            await ref.asyncio.to_thread(clear_hotpicks_stop)      # group356: durable-key write + schema DDL, off the event loop
+            await ref.asyncio.to_thread(ensure_hotpicks_schema)
+        except Exception as e:
+            ref.logger.debug("hotpicks pre-run setup skipped: %s", e)
 
         async def _run_hot():
             # Throttle: the scan can call back hundreds of times and each write is a

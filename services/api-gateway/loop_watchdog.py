@@ -115,10 +115,25 @@ def start(loop: Optional[asyncio.AbstractEventLoop] = None) -> bool:
         if _state["started"]:
             return True
         _state["started"] = True
-    lp = loop or asyncio.get_running_loop()
-    lp.create_task(_heartbeat())
-    t = threading.Thread(target=_watch, name="loop-watchdog", daemon=True)
-    t.start()
+    # Round 638 (E664): "started" is claimed above and nothing else gives it back, so a start that failed part-way (no running loop,
+    # "can't start new thread") used to leave it True for good: no later call tried again and /ops/loop-lag said running with no
+    # watchdog. A failure now frees the claim (and cancels a heartbeat task already created), logs one warning and returns False.
+    task = None
+    try:
+        lp = loop or asyncio.get_running_loop()
+        task = lp.create_task(_heartbeat())
+        t = threading.Thread(target=_watch, name="loop-watchdog", daemon=True)
+        t.start()
+    except Exception as e:  # noqa: BLE001
+        if task is not None:
+            try:
+                task.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        with _lock:
+            _state["started"] = False
+        logger.warning("loop watchdog: could not start (%s) - a later start() tries again", e)
+        return False
     return True
 
 

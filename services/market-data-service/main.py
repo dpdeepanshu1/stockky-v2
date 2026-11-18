@@ -5832,6 +5832,13 @@ class SurprisePremarketRequest(BaseModel):
     symbols: Optional[list] = None
 
 
+# Round 630 (E656): `is_running` only turns true once the baseline job is inside precalculate_surprise_baselines, but the thread is
+# spawned (and may lag) before that. This route is a plain `def`, so two clicks really do run on two worker threads: both read
+# is_running False and both spawned a job. The claim is taken under a lock, so exactly one of them wins; the job clears it when it ends.
+_premarket_start_lock = threading.Lock()
+_premarket_starting = False
+
+
 @app.post("/surprise/premarket")
 def surprise_premarket_run(
     body: Optional[SurprisePremarketRequest] = None,
@@ -5869,13 +5876,32 @@ def surprise_premarket_run(
         }
 
     if background:
+        global _premarket_starting
+
         def _job():
+            global _premarket_starting
             try:
                 precalculate_surprise_baselines(syms)
             except Exception as e:
                 logger.exception("background premarket: %s", e)
+            finally:
+                _premarket_starting = False
 
-        threading.Thread(target=_job, daemon=True, name="surprise-premarket").start()
+        with _premarket_start_lock:
+            if _premarket_starting:
+                return {
+                    "ok": True,
+                    "accepted": False,
+                    "already_running": True,
+                    "message": "Premarket already running — poll /surprise/premarket/status",
+                    "progress": get_premarket_progress(),
+                }
+            _premarket_starting = True
+            try:
+                threading.Thread(target=_job, daemon=True, name="surprise-premarket").start()
+            except BaseException:
+                _premarket_starting = False
+                raise
         return {
             "ok": True,
             "accepted": True,

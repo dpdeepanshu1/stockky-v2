@@ -555,7 +555,13 @@ def backtest_run(body: BacktestBody, admin=Depends(require_admin)) -> Dict[str, 
             raise HTTPException(status_code=409, detail="a backtest is already running")
         job_id = f"{body.kind}-{int(time.time())}-{len(_jobs)}"        # round 16: kind + second alone repeated when a job ended and the next of the same kind started within the same second, and the new record overwrote the old one
         _jobs[job_id] = {"id": job_id, "kind": body.kind, "state": "running", "started": time.time()}
-    threading.Thread(target=_run_job, args=(job_id, body), daemon=True).start()
+    try:
+        threading.Thread(target=_run_job, args=(job_id, body), daemon=True).start()
+    except Exception as e:  # noqa: BLE001  round 632 (E658): without this the job stays "running" and every later run answers 409
+        log.warning("backtest thread could not start: %s: %s", type(e).__name__, str(e)[:120])
+        with _jobs_lock:
+            _jobs[job_id].update(state="failed", error=f"thread could not start: {type(e).__name__}: {str(e)[:120]}")
+        raise HTTPException(status_code=503, detail="the backtest could not be started (no thread); try again")
     return {"job": job_id}
 
 

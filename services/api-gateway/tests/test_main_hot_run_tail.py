@@ -208,6 +208,29 @@ class TestHotRunRoute:
         assert out == {"ok": True, "already_running": True, "status": "running", "processed": 4}
         assert bt.tasks == [] and hh.job_sets == [] and hh.store_calls == []
 
+    def test_two_simultaneous_starts_queue_one_worker(self, hh):
+        """Round 622 (E647): the job row says "running" before the first await, so a second request that arrives while the first is still
+        in its stop-flag / schema setup gets already_running instead of starting a second full-universe scan."""
+        b1, b2 = BackgroundTasks(), BackgroundTasks()
+
+        async def both():
+            return await asyncio.gather(gw.stockky_hot_run(b1), gw.stockky_hot_run(b2))
+        o1, o2 = _run(both())
+        assert o1 == {"ok": True, "started": True, "message": "Hot Picks search started"}
+        assert o2.get("already_running") is True and o2.get("status") == "running"
+        assert len(b1.tasks) == 1 and b2.tasks == []
+        assert [kw.get("status") for kw in hh.job_sets].count("running") == 1
+
+    def test_running_row_is_written_before_the_stop_flag_clear(self, hh):
+        order = []
+        orig = gw.hot_job_set
+        gw.hot_job_set = lambda *a, **kw: (order.append("job"), orig(*a, **kw))[1]
+        try:
+            start(hh)
+        finally:
+            gw.hot_job_set = orig
+        assert order[0] == "job"
+
     @pytest.mark.parametrize("status", ["idle", "done", "stopped", "error", None])
     def test_non_running_status_starts(self, hh, status):
         hh.job = {"status": status}

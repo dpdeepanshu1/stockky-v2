@@ -356,6 +356,7 @@ _HYDRATE_JOB: dict[str, Any] = {
     "updated_epoch": None,
 }
 _HYDRATE_LOCK = threading.Lock()
+_START_LOCK = threading.Lock()  # round 631: serialises check-and-claim in start_hydrate_background (never held with _HYDRATE_LOCK taken first)
 _STALE_AFTER_SEC = env_float_safe("HYDRATOR_STALE_AFTER_SEC", 1800, lo=0)
 
 
@@ -410,11 +411,22 @@ def start_hydrate_background(hour_idx: Optional[int] = None, full: bool = False)
     the previous run has gone stale) so concurrent triggers don't double up
     on rate-limited upstream calls.
     """
-    current = get_hydrate_job()
-    if current.get("status") == "running":
-        return {"ok": True, "already_running": True, "job": current}
-    thread = threading.Thread(target=_run_job, args=(hour_idx, full), daemon=True)
-    thread.start()
+    # Round 631: check and claim are one step under _START_LOCK. Before, the job only turned "running"
+    # inside the new thread, so two triggers arriving together (double click, GitHub cron plus a manual
+    # run) both passed the check and doubled the rate-limited upstream calls. A stalled job (no progress
+    # for _STALE_AFTER_SEC) still counts as startable, exactly as before.
+    with _START_LOCK:
+        current = get_hydrate_job()
+        if current.get("status") == "running":
+            return {"ok": True, "already_running": True, "job": current}
+        _set_job(status="running", message="Starting…", full=full, hour_idx=hour_idx, started_epoch=time.time())
+        try:
+            thread = threading.Thread(target=_run_job, args=(hour_idx, full), daemon=True)
+            thread.start()
+        except Exception as e:  # the claim must not outlive a thread that never ran
+            logger.exception("hydrate background job could not start")
+            _set_job(status="error", message=f"could not start thread: {str(e)[:200]}")
+            return {"ok": False, "error": "could not start the hydrate thread", "job": get_hydrate_job()}
     return {"ok": True, "started": True, "job": get_hydrate_job()}
 
 

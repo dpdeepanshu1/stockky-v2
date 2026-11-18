@@ -11,6 +11,7 @@ Off with SESSION_PROOF_CLIENT_ENABLED=false. Never refreshes under pytest or whe
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import threading
@@ -92,7 +93,15 @@ def closed_for_day(day_ist: str, refresh: bool = True) -> bool:
                 start = True
             hit = bool(_cache["closed"]) and _cache["day"] == day_ist
         if start:
-            threading.Thread(target=_fetch, daemon=True, name="session-proof-refresh").start()
+            try:
+                threading.Thread(target=_fetch, daemon=True, name="session-proof-refresh").start()
+            except BaseException as e:  # round 639: only _fetch gives the claim back, and it never ran
+                with _lock:
+                    _cache["inflight"] = False
+                    _cache["at"] = time.time()   # back off one TTL, like a failed fetch
+                logging.getLogger(__name__).warning("session proof: could not start the refresh thread (%s); retrying after the next TTL", e)
+                if not isinstance(e, Exception):
+                    raise
         return hit
     except Exception:
         return False

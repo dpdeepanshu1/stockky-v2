@@ -554,12 +554,22 @@ def build_bound_routes_d(ref):
         If a previous run is stuck as 'running' (worker died), force-stop/commit first
         so resume can start a new background task from the cursor.
         """
-        store = ref._feed_store()
-        job = store.job()
-        if job.get("status") == "running":
-            # Force-commit current checkpoint so a new worker can continue
-            await ref.data_feed_stop(force=True)
-        return await ref.data_feed_run(background_tasks, force=False, resume=True)
+        # Round 628 (E654): a double click on Resume (or the UI's retry) used to start two resumes. The job row stays "stopped" until the
+        # first one has stopped the old job and resolved its universe (both awaited), so the second passed the same check and called
+        # data_feed_run(resume=True) too; the first worker then exited as superseded (E443), but a universe build and a stop were wasted and
+        # the log showed two starts. A claim taken with no await after the check makes the second click answer `already_running`.
+        if getattr(ref, "_data_feed_resume_starting", False):    # lives on main.py's globals through MainRef.__setattr__
+            return {"ok": True, "already_running": True, "status": "running", "message": "A data feed resume is already in progress"}
+        ref._data_feed_resume_starting = True
+        try:
+            store = ref._feed_store()
+            job = store.job()
+            if job.get("status") == "running":
+                # Force-commit current checkpoint so a new worker can continue
+                await ref.data_feed_stop(force=True)
+            return await ref.data_feed_run(background_tasks, force=False, resume=True)
+        finally:
+            ref._data_feed_resume_starting = False
 
     @stockky_hot_repair_batch_router.post("/stockky-hot/repair-batch")
     def stockky_hot_repair_batch(limit: int = ref.Query(15, ge=1, le=100), symbol: ref.Optional[str] = ref.Query(None)):

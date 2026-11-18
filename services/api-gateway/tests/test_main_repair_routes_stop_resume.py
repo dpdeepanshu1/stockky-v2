@@ -652,6 +652,44 @@ class TestDataFeedResume:
             assert tc.post(path).json() == {"ok": True, "status": "started"}
         assert len(resume.run_calls) == 2
 
+    # Round 628 (E654): a second Resume while the first is still stopping the old job / resolving its universe answers already_running.
+    def test_two_simultaneous_resumes_start_one_run(self, resume, monkeypatch):
+        resume.store.job_val = {"status": "running"}
+
+        async def slow_run(background_tasks, **kw):
+            resume.run_calls.append((background_tasks, kw))
+            await asyncio.sleep(0)          # the universe build: the other request runs here
+            return {"ok": True, "status": "started"}
+
+        monkeypatch.setattr(gw, "data_feed_run", slow_run)
+
+        async def both():
+            return await asyncio.gather(gw.data_feed_resume(BackgroundTasks()), gw.data_feed_resume(BackgroundTasks()))
+
+        first, second = _run(both())
+        assert first == {"ok": True, "status": "started"}
+        assert second["already_running"] is True and second["status"] == "running"
+        assert len(resume.run_calls) == 1 and resume.stop_calls == [True]
+
+    def test_claim_released_after_success_and_after_a_failure(self, resume, monkeypatch):
+        resume.store.job_val = {"status": "stopped"}
+        _run(gw.data_feed_resume(BackgroundTasks()))
+        assert gw._data_feed_resume_starting is False
+
+        async def boom(background_tasks, **kw):
+            raise RuntimeError("universe build failed")
+
+        monkeypatch.setattr(gw, "data_feed_run", boom)
+        with pytest.raises(RuntimeError):
+            _run(gw.data_feed_resume(BackgroundTasks()))
+        assert gw._data_feed_resume_starting is False
+
+    def test_a_resume_after_the_first_finished_starts_again(self, resume):
+        resume.store.job_val = {"status": "stopped"}
+        _run(gw.data_feed_resume(BackgroundTasks()))
+        _run(gw.data_feed_resume(BackgroundTasks()))
+        assert len(resume.run_calls) == 2
+
 
 class TestPass82FeedStop:
     def test_reread_failure_after_the_marker_keeps_the_original_job(self, stopenv):

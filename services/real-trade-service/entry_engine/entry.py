@@ -874,6 +874,14 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         return {"evaluated": 0, "entered": 0, "waited": len(candidates), "rejected": 0,
                 "entry_details": [], "opening_protect": _protect_reason}
 
+    # Round 624 (E649): past the day's entry cut-off (ENTRY_LAST_TIME_IST, or the expiry / pre-holiday / Friday one) nothing can be bought, and gate 4d
+    # would WAIT every candidate. Until now each cycle still priced, sized (`intraday width cap` lines) and ran gates 1-4c on all of them first (your
+    # 18 Nov 14:27 log: 20 queued symbols, MEESHO ... AMBUJACEM, every 3 minutes). Same shape as the three guards around it: return BEFORE the loop,
+    # candidates stay queued (not consumed, not rejected, no decision rows), one INFO line per mode per day. Gate 4d stays as the last word.
+    if _wl_late_cutoff_hold(mode, who="entry_engine", note="%d candidate(s) left queued, none priced or sized" % len(candidates)):
+        return {"evaluated": 0, "entered": 0, "waited": len(candidates), "rejected": 0,
+                "entry_details": [], "late_cutoff": 1}
+
     # group 471: whole-day stop-out guard. After STOPOUT_DAY_PAUSE_N losing stop-outs today, no automatic entry is evaluated (candidates stay
     # queued); a symbol stopped out today is WAITed below (Gate 4d). Off with STOPOUT_GUARD_ENABLED=false. See entry_engine/stopout_guard.py.
     _so_syms: set = set()
@@ -3399,6 +3407,30 @@ def _wl_is_parked(row_id, now_mono: float) -> bool:
     return True
 
 
+_LATE_CUTOFF_LOGGED: dict = {}     # round 620: (who, mode) -> IST date of the last "late cut-off" line (one INFO line per mode per day)
+
+
+def _wl_late_cutoff_hold(mode: str, now: Optional[datetime] = None, who: str = "watchlist trigger", note: str = "rows stay active and are not queued today") -> Optional[str]:
+    """Round 620 (E645): the watchlist trigger used to keep QUEUEING rows after ENTRY_LAST_TIME_IST (14:00 IST). Your 18 Nov log (14:03 IST)
+    shows 28 `watchlist trigger[REAL/...]: QUEUED` lines and the entry engine sizing each one (`intraday width cap`), every one then
+    refused by gate 4d `late_day` (calendar_gate.late_entry_block_reason). No order went out, but each cycle paid for quotes, candidate
+    and decision rows and printed QUEUED lines that read like trades about to happen. The trigger now follows the same cut-off: once it
+    has passed, no row is priced or queued (rows stay active; nothing is expired or missed). Blank ENTRY_LAST_TIME_IST = no cut-off,
+    same as the gate. Round 621 (E646): the calendar cut-offs (CALENDAR_EXPIRY / PRE_HOLIDAY / FRIDAY_ENTRY_CUTOFF_IST, gate 4d `calendar`) hold the trigger the same way. Returns the reason text or None. Never raises (an error means 'not late', the gate still decides)."""
+    try:
+        why = calendar_gate.late_entry_block_reason(now) or calendar_gate.entry_block_reason(now)     # round 621: + expiry / pre-holiday / Friday cut-offs
+        if not why:
+            return None
+        from tz_utils import ist_now as _ist_now
+        day = _ist_now(now).date()
+        if _LATE_CUTOFF_LOGGED.get((who, mode)) != day:
+            _LATE_CUTOFF_LOGGED[(who, mode)] = day
+            logger.info("%s[%s]: HELD — %s; %s", who, mode, why, note)
+        return why
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
     """
     Trigger pass over active WatchlistEntry rows.
@@ -3418,6 +3450,9 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
 
     Returns a tally dict for logs / dashboard.
     """
+    if _wl_late_cutoff_hold(mode):       # round 620: past ENTRY_LAST_TIME_IST nothing can be bought, so nothing is queued
+        return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0, "late_cutoff": 1}
+
     active = (
         db.query(models.WatchlistEntry)
         .filter_by(mode=mode, status="active")

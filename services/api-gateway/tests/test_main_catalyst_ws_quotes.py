@@ -903,3 +903,37 @@ class TestPass82StatusGuard:
         monkeypatch.setattr(gw, "_redis_get", lambda key: BadDict(status="running"))
         out = gw.catalyst_alert_status()
         assert out["ok"] is True and out["status"] == "running"
+
+
+# ── round 626 (E652): two simultaneous catalyst sweep starts, one sweep ──────────────────────────────────────────────────────────────────────
+
+def test_two_simultaneous_catalyst_starts_queue_one_worker(cenv, kv):
+    b1, b2 = BackgroundTasks(), BackgroundTasks()
+
+    async def both():
+        return await asyncio.gather(gw.catalyst_alert_scan(b1, force=False), gw.catalyst_alert_scan(b2, force=False))
+    o1, o2 = _run(both())
+    assert o1.get("accepted") is True and not o1.get("already_running")
+    assert o2.get("ok") is True and o2.get("already_running") is True
+    assert len(b1.tasks) == 1 and b2.tasks == []
+    assert [v.get("status") for _k, v, _t in kv.sets].count("running") == 1
+
+
+def test_catalyst_start_claim_is_released_after_the_row_is_written_and_after_a_failure(cenv, kv):
+    assert _run(gw.catalyst_alert_scan(BackgroundTasks(), force=False))["accepted"] is True
+    assert gw._catalyst_starting is False
+    kv.store.pop(JOB_KEY, None)
+    kv.set_raises = True
+    with pytest.raises(RuntimeError):
+        _run(gw.catalyst_alert_scan(BackgroundTasks(), force=False))
+    assert gw._catalyst_starting is False                    # a failed row write must not block every later start
+    kv.set_raises = False
+    kv.store.pop(JOB_KEY, None)
+    assert _run(gw.catalyst_alert_scan(BackgroundTasks(), force=False))["accepted"] is True
+
+
+def test_restart_true_still_overrides_a_start_in_progress(cenv, kv, monkeypatch):
+    monkeypatch.setattr(gw, "_catalyst_starting", True)
+    bt = BackgroundTasks()
+    assert _run(gw.catalyst_alert_scan(bt, restart=True))["accepted"] is True
+    assert len(bt.tasks) == 1

@@ -873,6 +873,17 @@ _PROGRESS_PATH = os.getenv(
     "/tmp/surprise_premarket_progress.json",
 )
 _job_lock = False
+_job_guard = threading.Lock()  # E660: makes "is a job running? / now it is" one step
+
+
+def _claim_job() -> bool:
+    """True for exactly one caller at a time; the caller must clear _job_lock in a finally."""
+    global _job_lock
+    with _job_guard:
+        if _job_lock:
+            return False
+        _job_lock = True
+        return True
 
 # ── Stop support — Surprise tab's Stop button ───────────────────────────────
 _PREMARKET_STOP_FLAG = threading.Event()
@@ -1006,9 +1017,8 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
     """
     global _job_lock
     t0 = time.time()
-    if _job_lock:
+    if not _claim_job():
         return {"ok": False, "error": "already_running", "progress": get_premarket_progress()}
-    _job_lock = True
     clear_premarket_stop()
 
     def _stopped_result(processed: int, computed: int, errors: int) -> Dict[str, Any]:

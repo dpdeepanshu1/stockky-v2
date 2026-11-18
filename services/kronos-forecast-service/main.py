@@ -103,10 +103,20 @@ def _fetch_candles(symbol: str) -> list:
     return (body.get("candles") or body.get("data") or []) if isinstance(body, dict) else (body if isinstance(body, list) else [])
 
 
+def _preload() -> None:
+    """Load the model at start (KRONOS_PRELOAD=true). Round 633 (E659): the lock is released in `finally`; before, a failed load (no weights,
+    torch missing, out of memory) skipped the release and every /forecast then waited on the lock for ever."""
+    with _lock:
+        try:
+            _get_forecaster()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("kronos preload failed (%s: %s); the model will be tried again on the first forecast", type(e).__name__, str(e)[:160])
+
+
 @_on_startup
 def _startup() -> None:
     if (os.getenv("KRONOS_PRELOAD") or "").strip().lower() in ("1", "true", "yes"):
-        threading.Thread(target=lambda: (_lock.acquire(), _get_forecaster(), _lock.release()), daemon=True).start()
+        threading.Thread(target=_preload, daemon=True).start()
 
 
 @app.get("/health")

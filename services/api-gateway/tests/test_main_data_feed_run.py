@@ -228,6 +228,47 @@ class TestLauncherGuard:
         assert start(fr)[0]["started"] is True
 
 
+    # round 627 (E653): two simultaneous plain starts, one worker
+    def test_two_simultaneous_plain_starts_queue_one_worker(self, fr):
+        b1, b2 = BackgroundTasks(), BackgroundTasks()
+
+        async def both():
+            return await asyncio.gather(gw.data_feed_run(b1), gw.data_feed_run(b2))
+        o1, o2 = _run(both())
+        assert o1["started"] is True and not o1.get("already_running")
+        assert o2["ok"] is True and o2["already_running"] is True and o2["status"] == "running"
+        assert len(b1.tasks) == 1 and b2.tasks == []
+        assert [kw.get("status") for kw in fr.store.set_jobs].count("running") == 1
+        assert fr.universe_calls == 1
+
+    def test_the_start_claim_is_released_on_success_400_and_only_new_nothing_to_do(self, fr):
+        assert start(fr)[0]["started"] is True
+        assert gw._data_feed_run_starting is False
+        fr.store.job_val = {"status": "idle"}
+        fr.universe, fr.nifty = [], []
+        with pytest.raises(HTTPException):
+            _run(gw.data_feed_run(BackgroundTasks()))
+        assert gw._data_feed_run_starting is False
+        fr.universe = ["AAA"]
+        fr.store.rows = {"AAA": {"x": 1}}
+        assert start(fr, only_new=True)[0]["started"] is False
+        assert gw._data_feed_run_starting is False
+        fr.universe_raises = True
+        with pytest.raises(RuntimeError):
+            _run(gw.data_feed_run(BackgroundTasks()))
+        assert gw._data_feed_run_starting is False            # a failed universe build must not block every later start
+        fr.universe_raises = False
+        fr.store.job_val = {"status": "idle"}
+        assert start(fr)[0]["started"] is True
+
+    def test_force_and_resume_are_not_blocked_by_a_plain_start_in_progress(self, fr, monkeypatch):
+        monkeypatch.setattr(gw, "_data_feed_run_starting", True)
+        assert start(fr, force=True)[0]["mode"] == "refresh"
+        assert start(fr, resume=True)[0]["mode"] == "resume"
+        fr.store.job_val = {"status": "idle"}
+        assert start(fr)[0]["already_running"] is True       # the plain start is still refused while the claim is held
+
+
 class TestUniverse:
     def test_scan_universe_is_cleaned_and_uppercased(self, fr):
         fr.universe = ["tcs.ns", "INFY.BO", "Reliance"]

@@ -33,6 +33,7 @@ PRIOR = 300
 MAX_DAYS_READ = 20
 BAND = 0.25
 TTL_S = 6 * 3600.0
+START_WARN_EVERY_S = 300.0          # round 638: one warning per 5 minutes when the build thread cannot start (the check runs on every liquidity test)
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _IST = 19800
 
@@ -145,7 +146,15 @@ def _profile() -> Optional[Dict[str, Any]]:
         stale = (time.time() - _state["built_at"]) > TTL_S
         if stale and not _state["building"]:
             _state["building"] = True
-            threading.Thread(target=_bg_build, name="volume-profile", daemon=True).start()
+            try:
+                threading.Thread(target=_bg_build, name="volume-profile", daemon=True).start()
+            except Exception as e:  # noqa: BLE001 - round 638 (E664): only _bg_build clears "building", so a thread that cannot start must give the claim back
+                _state["building"] = False
+                _state["error"] = ("thread could not start: %s" % e)[:120]
+                _now = time.time()
+                if _now - float(_state.get("start_warned_at") or 0.0) > START_WARN_EVERY_S:
+                    _state["start_warned_at"] = _now
+                    logger.warning("volume profile: could not start the build thread (%s) - the old curve is used and the next call tries again", e)
         return _state["profile"]
 
 

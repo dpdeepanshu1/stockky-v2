@@ -10,6 +10,7 @@ Everything here is called from market-data-service/main.py and every failure fal
 """
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Callable, List
 
@@ -17,6 +18,8 @@ from . import (client, config, creds, depth20, history, live_poller, live_store,
                ws_feed)
 from .errors import (DhanApiError, DhanAuthError, DhanError, DhanNoDataError, DhanNotConfigured,  # noqa: F401
                      DhanRateLimitError, DhanSubscriptionError)
+
+logger = logging.getLogger("dhan-data")
 
 _started = False
 _start_lock = threading.Lock()
@@ -35,11 +38,21 @@ def start_background(get_universe: Callable[[], List[str]]) -> None:
         _started = True
     if not config.enabled():
         return
-    scrip_master.ensure_loaded(block=False)
+    steps = [("scrip master load", lambda: scrip_master.ensure_loaded(block=False))]
     if config.live_poller_enabled():
-        live_poller.start(get_universe)
-    ws_feed.start(get_universe)
-    depth20.start()
+        steps.append(("live poller", lambda: live_poller.start(get_universe)))
+    steps.append(("websocket feed", lambda: ws_feed.start(get_universe)))
+    steps.append(("depth20 feed", depth20.start))
+    failed = []
+    for name, step in steps:                            # one step that cannot start (for example "can't start new thread") must not skip the others
+        try:
+            step()
+        except Exception as e:  # noqa: BLE001
+            failed.append(name)
+            logger.warning("dhan_data: %s could not start (%s: %s) - the other parts still start", name, type(e).__name__, e)
+    if failed:
+        with _start_lock:                               # leave the claim free so a later call finishes the job (every step is idempotent)
+            _started = False
 
 
 def status() -> dict:

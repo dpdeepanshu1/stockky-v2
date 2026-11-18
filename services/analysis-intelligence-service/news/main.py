@@ -18,6 +18,7 @@ try:    # round 600: the shared 3-day news rule (NEWS_MAX_AGE_DAYS, 1..3, defaul
     import news_age as _na
 except ImportError:   # imported as a package module, the folder is not on sys.path
     from . import news_age as _na
+import copy
 import logging
 import re
 import threading
@@ -995,8 +996,43 @@ def feed_health():
     return snap
 
 
+# Round 623 (E648; the event service got the same in group345 / round 619). Your 18 Nov 14:28 log: GET /news/analyze/CONFIPET and /FIBERWEB
+# each arrived twice at the same moment from the same caller, and each ran the whole multi-source fetch (eight publisher feeds, three of them
+# "HTTP 200 but 0 entries"): "news sources for CONFIPET: ... total 0" printed twice. There is no result cache here, so the repeat was never
+# served from anywhere. One analysis per symbol at a time: a later caller waits for the one in flight and gets a copy of its answer. Nothing
+# is kept afterwards (the next caller after the leader finishes fetches fresh, as before), and a leader that fails leaves nothing behind, so
+# the follower then runs its own.
+_ANALYZE_INFLIGHT_WAIT_S = 45.0
+_analyze_inflight_lock = threading.Lock()
+_analyze_inflight: Dict[str, "threading.Event"] = {}
+
+
 @app.get("/analyze/{symbol}")
 def analyze(symbol: str, company_name: str | None = None, force: bool = False):
+    key = _base_symbol(symbol)
+    with _analyze_inflight_lock:
+        ev = _analyze_inflight.get(key)
+        leader = ev is None
+        if leader:
+            ev = _analyze_inflight[key] = threading.Event()
+    if not leader:
+        ev.wait(_ANALYZE_INFLIGHT_WAIT_S)
+        shared = getattr(ev, "result", None)
+        if shared is not None:
+            logger.info("News analyze for %s joined the one already running", key)
+            return copy.deepcopy(shared)
+        return _analyze_impl(symbol, company_name, force)       # the leader failed or timed out and left nothing
+    try:
+        res = _analyze_impl(symbol, company_name, force)
+        ev.result = res
+        return res
+    finally:
+        with _analyze_inflight_lock:
+            _analyze_inflight.pop(key, None)
+        ev.set()
+
+
+def _analyze_impl(symbol: str, company_name: str | None = None, force: bool = False):
     # INTEGRATION: news_quality multi-source + better summary (fallback to legacy below)
     # 2026-10-04 (item 9): without a company name the quality path only matched the bare ticker ("tcs"), so a
     # headline saying "Tata Consultancy Services ..." was never found. Use the known display name when we have one.

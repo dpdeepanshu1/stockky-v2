@@ -299,9 +299,23 @@ def start_sync_background() -> dict:
     full sync makes ~14 rate-limited NSE calls (1s apart) plus a DB pass,
     comfortably past a synchronous HTTP client's patience. Poll
     get_sync_job() for status/result, same pattern as weekend_hydrator."""
+    # Round 631: the claim is taken inside the same lock as the check. Before, the job only turned
+    # "running" inside the new thread, so two starts arriving together each ran the ~14 NSE calls.
     with _SYNC_LOCK:
         if _SYNC_JOB["status"] == "running":
             return {"status": "already_running", "job": dict(_SYNC_JOB)}
-    thread = threading.Thread(target=_run_job, daemon=True)
-    thread.start()
+        _SYNC_JOB["status"] = "running"
+        _SYNC_JOB["started_at"] = datetime.now(timezone.utc).isoformat()
+        _SYNC_JOB["finished_at"] = None
+        _SYNC_JOB["result"] = None
+    try:
+        thread = threading.Thread(target=_run_job, daemon=True)
+        thread.start()
+    except Exception as e:  # the claim must not outlive a thread that never ran
+        logger.exception("symbol_master_sync: could not start thread")
+        with _SYNC_LOCK:
+            _SYNC_JOB["status"] = "error"
+            _SYNC_JOB["result"] = {"error": f"could not start thread: {str(e)[:200]}"}
+            _SYNC_JOB["finished_at"] = datetime.now(timezone.utc).isoformat()
+        return {"status": "error", "error": "could not start the sync thread"}
     return {"status": "started"}

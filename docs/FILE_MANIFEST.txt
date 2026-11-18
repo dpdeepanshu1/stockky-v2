@@ -460,6 +460,7 @@ scripts/_intraday_data.py
 scripts/_progress.py
 scripts/_repo_walk.py
 scripts/_robust.py
+scripts/add_nse_holidays.py
 scripts/agent_round3.sh
 scripts/analyze_latency_check.py
 scripts/audit_functions.py
@@ -596,6 +597,7 @@ scripts/swing_shadow_report.py
 scripts/swing_snapshot.py
 scripts/swing_universe.py
 scripts/sync_market_structure.py
+scripts/test_add_nse_holidays.py
 scripts/test_analyze_latency_check.py
 scripts/test_angelone_movers.py
 scripts/test_audit_live_fields.py
@@ -866,6 +868,8 @@ services/analysis-intelligence-service/tests/test_round605_google_backoff.py
 services/analysis-intelligence-service/tests/test_round611_check_held_first.py
 services/analysis-intelligence-service/tests/test_round616_stale_fallback_skipped.py
 services/analysis-intelligence-service/tests/test_round617_event_source_probe_extras.py
+services/analysis-intelligence-service/tests/test_round623_news_analyze_single_flight.py
+services/analysis-intelligence-service/tests/test_round639_session_proof_start_claim.py
 services/analysis-intelligence-service/tests/test_sentiment_main.py
 services/analysis-intelligence-service/tests/test_sentiment_market_data.py
 services/analysis-intelligence-service/tests/test_service_main.py
@@ -1209,6 +1213,9 @@ services/api-gateway/tests/test_round539_notifications_history_routes.py
 services/api-gateway/tests/test_round539_sparklines.py
 services/api-gateway/tests/test_round553_global_cues.py
 services/api-gateway/tests/test_round554_fo_eod.py
+services/api-gateway/tests/test_round634_job_claim.py
+services/api-gateway/tests/test_round638_loop_watchdog_start_claim.py
+services/api-gateway/tests/test_round639_session_proof_start_claim.py
 services/api-gateway/tests/test_searched_list_selfclean.py
 services/api-gateway/tests/test_surprise_last_result_expiry_real_kv.py
 services/api-gateway/tests/test_surprise_premarket.py
@@ -1325,6 +1332,7 @@ services/decision-prediction-service/decision/tests/test_group424_rr_floor_off.p
 services/decision-prediction-service/decision/tests/test_group434_rejection_counters.py
 services/decision-prediction-service/decision/tests/test_horizons.py
 services/decision-prediction-service/decision/tests/test_market_open_holiday.py
+services/decision-prediction-service/decision/tests/test_round639_session_proof_start_claim.py
 services/decision-prediction-service/decision/tests/test_session_proof_closed.py
 services/decision-prediction-service/decision/tests/test_wake_pings_gated.py
 services/decision-prediction-service/env.database.example
@@ -1624,6 +1632,7 @@ services/fno-options-service/tests/test_round552_chain_fields.py
 services/fno-options-service/tests/test_round559_view_only_chain.py
 services/fno-options-service/tests/test_round585_true_median_range.py
 services/fno-options-service/tests/test_round587_lifespan.py
+services/fno-options-service/tests/test_round632_backtest_start_claim.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile
@@ -1642,6 +1651,7 @@ services/kronos-forecast-service/tests/conftest.py
 services/kronos-forecast-service/tests/run_plain.py
 services/kronos-forecast-service/tests/test_e506_range_checked_env_settings.py
 services/kronos-forecast-service/tests/test_forecast_stats.py
+services/kronos-forecast-service/tests/test_round633_preload_lock.py
 services/market-data-service/.dockerignore
 services/market-data-service/.python-version
 services/market-data-service/Dockerfile
@@ -1787,6 +1797,9 @@ services/market-data-service/tests/test_round554_fo_eod.py
 services/market-data-service/tests/test_round559_view_only_index.py
 services/market-data-service/tests/test_round606_quote_skip.py
 services/market-data-service/tests/test_round607_yf_bulk_gate.py
+services/market-data-service/tests/test_round634_job_claim.py
+services/market-data-service/tests/test_round635_writer_start_claim.py
+services/market-data-service/tests/test_round637_dhan_start_steps.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -1842,6 +1855,8 @@ services/notification-scheduler-service/tests/test_rate_limiter_oversized_weight
 services/notification-scheduler-service/tests/test_regime_constants_drift.py
 services/notification-scheduler-service/tests/test_round206_stale_muted.py
 services/notification-scheduler-service/tests/test_round539_history.py
+services/notification-scheduler-service/tests/test_round631_start_claims.py
+services/notification-scheduler-service/tests/test_round639_session_proof_start_claim.py
 services/notification-scheduler-service/tests/test_session_proof_is_holiday.py
 services/notification-scheduler-service/tests/test_telegram_long_message_split.py
 services/notification-scheduler-service/tests/test_telegram_token_redaction.py
@@ -2355,6 +2370,9 @@ services/position-stocks-service/tests/test_round612_or_live.py
 services/position-stocks-service/tests/test_round613_shared_or_budget.py
 services/position-stocks-service/tests/test_round615_or_refund.py
 services/position-stocks-service/tests/test_round616_entry_stage_finer_marks.py
+services/position-stocks-service/tests/test_round636_own_norms_start_claim.py
+services/position-stocks-service/tests/test_round638_volume_profile_start_claim.py
+services/position-stocks-service/tests/test_round639_session_proof_start_claim.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -2978,6 +2996,10 @@ services/real-trade-service/tests/test_round612_or_live.py
 services/real-trade-service/tests/test_round613_shared_or_budget.py
 services/real-trade-service/tests/test_round614_check_ps_held.py
 services/real-trade-service/tests/test_round615_or_refund.py
+services/real-trade-service/tests/test_round620_watchlist_late_cutoff.py
+services/real-trade-service/tests/test_round632_swing_scan_claim.py
+services/real-trade-service/tests/test_round636_own_norms_start_claim.py
+services/real-trade-service/tests/test_round639_session_proof_start_claim.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

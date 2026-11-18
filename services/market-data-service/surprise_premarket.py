@@ -21,6 +21,7 @@ import logging
 import os
 from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
@@ -651,6 +652,17 @@ _PROGRESS_PATH = os.getenv(
     "/tmp/surprise_premarket_progress.json",
 )
 _job_lock = False
+_job_guard = threading.Lock()  # E660: makes "is a job running? / now it is" one step
+
+
+def _claim_job() -> bool:
+    """True for exactly one caller at a time; the caller must clear _job_lock in a finally."""
+    global _job_lock
+    with _job_guard:
+        if _job_lock:
+            return False
+        _job_lock = True
+        return True
 
 
 def _write_progress(data: Dict[str, Any]) -> None:
@@ -696,9 +708,8 @@ def precalculate_surprise_baselines(symbols: List[str]) -> Dict[str, Any]:
     """
     global _job_lock
     t0 = time.time()
-    if _job_lock:
+    if not _claim_job():
         return {"ok": False, "error": "already_running", "progress": get_premarket_progress()}
-    _job_lock = True
 
     try:
         if not ensure_schema():

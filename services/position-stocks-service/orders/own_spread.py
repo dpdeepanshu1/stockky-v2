@@ -152,7 +152,11 @@ def _norms(symbol: Any) -> Optional[Dict[str, Any]]:
                 _pending.append(k)
             if not _running:
                 _running = True
-                threading.Thread(target=_worker, name="own-spread", daemon=True).start()
+                try:
+                    threading.Thread(target=_worker, name="own-spread", daemon=True).start()
+                except Exception as e:  # noqa: BLE001 - a thread that cannot start must not leave the claim set (round 636)
+                    _running = False
+                    logger.warning("own spread: could not start the loader thread (%s: %s) - will retry on the next lookup", type(e).__name__, e)
         return None
     except Exception as e:  # noqa: BLE001
         logger.debug("own spread: lookup %s failed: %s", symbol, e)

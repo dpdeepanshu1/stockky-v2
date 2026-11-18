@@ -396,7 +396,14 @@ def scan_in_thread(session_factory: Callable[[], Any], held_symbols_fn: Optional
             with _state_lock:
                 _state["running"] = False
 
-    threading.Thread(target=work, name="swing-scan", daemon=True).start()
+    try:
+        threading.Thread(target=work, name="swing-scan", daemon=True).start()
+    except Exception as e:  # noqa: BLE001  round 632 (E658): the claim above was taken, but no thread will ever release it
+        logger.warning("swing scan: could not start the thread (%s: %s)", type(e).__name__, str(e)[:120])
+        with _state_lock:
+            _state["running"] = False
+            _state["last_result"] = {"ok": False, "status": "error", "detail": f"thread could not start: {type(e).__name__}: {str(e)[:120]}"}
+        return False
     return True
 
 

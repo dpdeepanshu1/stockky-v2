@@ -5783,6 +5783,11 @@ _bound_routes_g = _build_bound_routes_g(_MainRef(globals()))
 # E85: batch J (gateway_support/bound_routes_j.py); built once here, before its first include below.
 from gateway_support import MainRef as _MainRef  # noqa: E402
 from gateway_support.bound_routes_j import build_bound_routes_j as _build_bound_routes_j  # noqa: E402
+_hot_premarket_starting = False      # round 624 (E650): True only while POST /stockky-hot/premarket builds its universe (bound_routes_j sets / clears it through ref)
+_catalyst_starting = False          # round 626 (E652): True only while POST/GET /catalysts/alert writes its `running` row (bound_routes_j sets / clears it through ref)
+_data_feed_run_starting = False      # round 627 (E653): True only while a plain POST /data-feed/run resolves its universe, before it writes the `running` row (bound_routes_k sets / clears it through ref)
+_data_feed_resume_starting = False   # round 628 (E654): True only while POST /data-feed/resume stops the old job and starts the resumed run (bound_routes_d sets / clears it through ref)
+_surprise_premarket_starting = False   # round 629 (E655): True from a background POST/GET /surprise/premarket until its job ends (bound_routes_k sets / clears it through ref)
 _bound_routes_j = _build_bound_routes_j(_MainRef(globals()))
 # E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
 ops_wake_db_all = _bound_routes_j.ops_wake_db_all

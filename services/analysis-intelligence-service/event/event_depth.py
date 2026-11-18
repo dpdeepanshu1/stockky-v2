@@ -17,6 +17,24 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("event_depth")
 
+try:    # round 600: the shared 3-day news rule (the mounted sub-apps hide sibling folders from sys.path, hence the two import forms)
+    from news_age import news_max_age_days as _news_max_age_days
+except Exception:  # noqa: BLE001
+    try:
+        from .news_age import news_max_age_days as _news_max_age_days
+    except Exception:  # noqa: BLE001
+        def _news_max_age_days() -> float:  # the rule still holds when the helper cannot be imported
+            return 3.0
+
+
+def _too_old(age_days: Optional[float]) -> bool:
+    """Round 600: True when a dated event is older than the news window (3 days). Unknown age (no date) is NOT too old: an undated field is a
+    snapshot (e.g. the FII/DII flow), not a stale story."""
+    try:
+        return age_days is not None and float(age_days) > _news_max_age_days()
+    except (TypeError, ValueError):
+        return False
+
 
 def _utcnow() -> datetime:
     """Current UTC time as a *naive* datetime.
@@ -77,7 +95,7 @@ def summarize_event_block(events: Dict[str, Any], symbol: str = "") -> str:
         parts.append(f"Next results/earnings date: {next_earn}")
 
     es = events.get("earnings_surprise") or {}
-    if isinstance(es, dict) and es.get("surprise_pct") is not None:
+    if isinstance(es, dict) and es.get("surprise_pct") is not None and not _too_old(_age_days(es.get("date") or es.get("report_date"))):
         try:
             pct = float(es["surprise_pct"])
             direction = "beat" if pct > 0 else "missed"
@@ -86,6 +104,7 @@ def summarize_event_block(events: Dict[str, Any], symbol: str = "") -> str:
             pass
 
     ins = events.get("recent_insider_transactions") or events.get("insider_transactions") or []
+    ins = [x for x in ins if not (isinstance(x, dict) and _too_old(_age_days(x.get("date"))))]   # round 600: only the last 3 days are "recent"
     if ins:
         buys = [x for x in ins if str(x.get("side") or x.get("transaction") or "").lower() in ("buy", "purchase", "p")]
         sells = [x for x in ins if str(x.get("side") or x.get("transaction") or "").lower() in ("sell", "sale", "s")]
@@ -97,6 +116,7 @@ def summarize_event_block(events: Dict[str, Any], symbol: str = "") -> str:
             parts.append(f"{len(ins)} recent insider/promoter transaction(s)")
 
     bulk = events.get("bulk_deals") or events.get("block_deals") or []
+    bulk = [x for x in bulk if not (isinstance(x, dict) and _too_old(_age_days(x.get("date") or x.get("published"))))]
     if bulk:
         parts.append(f"{len(bulk)} bulk/block deal(s) noted")
 
@@ -152,11 +172,15 @@ def compute_event_score(events: Dict[str, Any], now: Optional[datetime] = None) 
     events = events or {}
     now = _naive_utc(now)
     breakdown: List[Dict[str, Any]] = []
+    ignored_old: List[str] = []
     raw = 0.0
 
     def _add(label: str, impact: float, age_days: Optional[float] = None,
              half_life: float = 10.0, meta: Optional[dict] = None) -> None:
         nonlocal raw
+        if _too_old(age_days):       # round 600: nothing older than the news window moves the score (it used to keep 15% of its weight for ever)
+            ignored_old.append(label)
+            return
         w = _decay(age_days, half_life)
         decayed = impact * w
         raw += decayed
@@ -250,7 +274,7 @@ def compute_event_score(events: Dict[str, Any], now: Optional[datetime] = None) 
     bulk = events.get("bulk_deals") or events.get("block_deals") or []
     for d in (bulk if isinstance(bulk, list) else [])[:5]:
         side = str(d.get("buy_sell") or d.get("side") or d.get("transaction") or "").lower()
-        age = _age_days(d.get("date"), now)
+        age = _age_days(d.get("date") or d.get("published"), now)   # round 600: news-derived deals carry `published`, not `date` (they were never aged)
         if "buy" in side or side in ("b", "purchase"):
             _add("bulk_block_buy", 9, age, half_life=7)
         elif "sell" in side or side in ("s",):
@@ -298,6 +322,7 @@ def compute_event_score(events: Dict[str, Any], now: Optional[datetime] = None) 
         "event_risk": risk_flag,
         "earnings_days_out": earnings_days_out,
         "event_score_breakdown": breakdown,
+        "event_score_ignored_old": ignored_old,
     }
 
 
@@ -325,6 +350,7 @@ def enrich_events(events: Dict[str, Any], symbol: str = "") -> Dict[str, Any]:
     out["event_score_raw_delta"] = scored["event_score_raw_delta"]
     out["event_score_breakdown"] = scored["event_score_breakdown"]
     out["event_risk"] = scored["event_risk"]
+    out["event_score_ignored_old"] = scored.get("event_score_ignored_old", [])
     if scored.get("earnings_days_out") is not None:
         out["earnings_days_out"] = scored["earnings_days_out"]
 

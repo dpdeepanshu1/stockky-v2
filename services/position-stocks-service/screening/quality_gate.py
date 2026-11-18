@@ -142,13 +142,37 @@ def _typed_event_from(body) -> Optional[dict]:
         return None
 
 
+# Round 608: symbol -> (monotonic ts, body) of the last GOOD GET /events/{symbol}/active answer. A shortlisted name whose fundamentals / technicals
+# never come back is never put in _result_cache (only complete live results are), so every 10 s cycle asked the event feed for the same names again,
+# twice for a results-day name (typed event + results time use the same URL). Reused for TYPED_EVENT_CACHE_S seconds (default 45, 0 = off).
+_active_cache: dict = {}
+
+
+async def _active_body(symbol: str):
+    """The parsed GET {EVENT_URL}/events/{symbol}/active body, or None on a non-200 answer. Only an `ok: true` dict is kept, so a failure or a feed with
+    no healthy source is asked again at once. Raises on a transport error (the two callers swallow it). Cached TYPED_EVENT_CACHE_S seconds."""
+    ttl = float(getattr(config, "TYPED_EVENT_CACHE_S", 0.0) or 0.0)
+    if ttl > 0:
+        _hit = _active_cache.get(symbol)
+        if _hit is not None and _time.monotonic() - _hit[0] < ttl:
+            return _hit[1]
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/active", timeout=config.QUALITY_GATE_TIMEOUT_S)
+    if r.status_code != 200:
+        return None
+    body = r.json()
+    if ttl > 0 and isinstance(body, dict) and body.get("ok"):
+        if len(_active_cache) > 2000:
+            _active_cache.clear()
+        _active_cache[symbol] = (_time.monotonic(), body)
+    return body
+
+
 async def _fetch_typed_event(symbol: str) -> Optional[dict]:
     """E272: the symbol's strongest typed event from the feed (analysis-intelligence GET /events/{symbol}/active). None on any failure: the feed being down
     never vetoes and never triggers (fail-safe direction in the plan)."""
     try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/active", timeout=config.QUALITY_GATE_TIMEOUT_S)
-        return _typed_event_from(r.json()) if r.status_code == 200 else None
+        return _typed_event_from(await _active_body(symbol))
     except Exception:  # noqa: BLE001
         return None
 
@@ -157,9 +181,7 @@ async def _fetch_result_out_at(symbol: str) -> Optional[str]:
     """E272: ask the typed event feed (analysis-intelligence GET /events/{symbol}/active) when today's results were first published. Only called for a
     symbol whose results are dated today. None on any failure (the block stays)."""
     try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/active", timeout=config.QUALITY_GATE_TIMEOUT_S)
-        return _result_out_from(r.json()) if r.status_code == 200 else None
+        return _result_out_from(await _active_body(symbol))
     except Exception:  # noqa: BLE001
         return None
 
@@ -374,6 +396,7 @@ def reset_runtime_state() -> None:
     """group341: forget the result cache, event memory and failure marks (tests / manual reset)."""
     _event_failed.clear()
     _result_cache.clear()
+    _active_cache.clear()
     _event_memory.clear()
     _typed_neg_seen.clear()
     _preopen_warm.update(day=None, pending=None, started=0)

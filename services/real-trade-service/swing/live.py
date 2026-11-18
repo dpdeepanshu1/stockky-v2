@@ -244,7 +244,7 @@ def _open_check(symbol: str) -> Dict[str, Any]:
     background cache is not enough); no bars / stale bars / too few range bars = {"ok": None}, i.e. buy as before. Never raises."""
     try:
         from entry_engine import orb_bars
-        bars = orb_bars.fetch_now(symbol) or orb_bars.get_bars(symbol)
+        bars = orb_bars.fetch_now(symbol) or orb_bars.get_bars(symbol, priority=True)
         return orb_bars.open_check(bars, max_drop_pct=float(_cfg("SWING_OPEN_MAX_DROP_PCT", 0.15)), min_bars=int(_cfg("SWING_OPEN_MIN_BARS", 3)))
     except Exception:  # noqa: BLE001
         return {"ok": None, "why": "error"}

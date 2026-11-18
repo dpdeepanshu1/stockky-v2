@@ -17,6 +17,10 @@ try:
     from event_depth import enrich_events
 except Exception:
     enrich_events = None  # type: ignore
+try:    # round 600: the shared 3-day news rule (NEWS_MAX_AGE_DAYS, 1..3, default 3)
+    import news_age as _na
+except ImportError:   # imported as a package module, the folder is not on sys.path
+    from . import news_age as _na
 import json
 import math
 import re
@@ -54,7 +58,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 EVENT_CACHE_TTL = 4 * 3600
 EMPTY_NEWS_CACHE_TTL = 3600
-EVENT_FALLBACK_TTL = 30 * 24 * 3600
+EVENT_FALLBACK_TTL = 3 * 24 * 3600   # round 600: was 30 days; the fallback copy is also age-filtered on every read (see _apply_news_age)
 STATE_KEY = "stockky:event_state"
 EVENT_CACHE_PREFIX = "stockky:event:"
 EVENT_FALLBACK_PREFIX = "stockky:event:fallback:"
@@ -652,18 +656,104 @@ def _summarize_events(events: dict) -> str:
 
 # ── News sources ──
 
+# Round 605: ONE back-off and ONE empty-answer memory for every Google News search (company name, the widening query and the publisher
+# search all go through _google_news_parse). 18 Nov log: Google answered 429 and the same symbols with no stories (CREATIVEYE, HBESD,
+# CRYSTALCP) were asked again on every pass, so each pass spent calls that could not help and fed the 429s.
+#   - after a 429 no Google search is made for EVENT_GN_BACKOFF_S seconds (default 60; 0 = no back-off); those lookups answer "could not
+#     read" at once (ok False, so the widening search is not tried either);
+#   - a search that WORKED but gave no usable story is not repeated for EVENT_GN_EMPTY_TTL_S seconds (default 1800 = 30 min; 0 = off).
+#     A failed search is never remembered. The remembered answer is "nothing found", so a story that breaks on a quiet name can show up
+#     up to that long late; the default event cache of the symbol is not changed.
+import threading as _gn_threading
+
+_GN_LOCK = _gn_threading.Lock()
+_GN_BACKOFF = {"until": 0.0}            # time.monotonic() value until which no Google search is made
+_GN_EMPTY_CACHE: Dict[str, float] = {}  # query text -> time.monotonic() value until which "nothing found" is remembered
+_GN_STATS = {"searches": 0, "rate_limited": 0, "skipped_backoff": 0, "skipped_empty_cached": 0}
+_GN_EMPTY_CACHE_MAX = 5000
+
+
+def _gn_backoff_s() -> float:
+    return env_float_safe("EVENT_GN_BACKOFF_S", 60, lo=0, hi=3600)
+
+
+def _gn_empty_ttl_s() -> float:
+    return env_float_safe("EVENT_GN_EMPTY_TTL_S", 1800, lo=0, hi=86400)
+
+
+def _gn_rate_limited(parsed=None, exc=None) -> bool:
+    """True when the answer (or the exception) says Google refused because of the request rate."""
+    try:
+        if parsed is not None and getattr(parsed, "status", None) == 429:
+            return True
+        text = str(exc if exc is not None else getattr(parsed, "bozo_exception", "") or "")
+        return re.search(r"\b429\b", text) is not None or "too many requests" in text.lower()
+    except Exception:  # noqa: BLE001 - only decides whether to back off
+        return False
+
+
+def _gn_note_rate_limited(symbol: str) -> None:
+    secs = _gn_backoff_s()
+    with _GN_LOCK:
+        _GN_STATS["rate_limited"] += 1
+        if secs <= 0:
+            return
+        starting = time.monotonic() >= _GN_BACKOFF["until"]
+        _GN_BACKOFF["until"] = time.monotonic() + secs
+    if starting:
+        logger.warning("Google News answered 429 (first seen on %s): no Google search for the next %.0fs (EVENT_GN_BACKOFF_S=0 turns this off)", symbol, secs)
+
+
+def _gn_gate(query_text: str):
+    """None = go ahead and search. Otherwise the (items, ok) answer to give without a network call."""
+    now = time.monotonic()
+    with _GN_LOCK:
+        if now < _GN_BACKOFF["until"]:
+            _GN_STATS["skipped_backoff"] += 1
+            return [], False
+        exp = _GN_EMPTY_CACHE.get(query_text)
+        if exp is not None:
+            if now < exp:
+                _GN_STATS["skipped_empty_cached"] += 1
+                return [], True
+            _GN_EMPTY_CACHE.pop(query_text, None)
+    return None
+
+
+def _gn_note_empty(query_text: str) -> None:
+    ttl = _gn_empty_ttl_s()
+    if ttl <= 0:
+        return
+    now = time.monotonic()
+    with _GN_LOCK:
+        if len(_GN_EMPTY_CACHE) >= _GN_EMPTY_CACHE_MAX:
+            for k in [k for k, v in _GN_EMPTY_CACHE.items() if v <= now]:
+                _GN_EMPTY_CACHE.pop(k, None)
+            if len(_GN_EMPTY_CACHE) >= _GN_EMPTY_CACHE_MAX:
+                _GN_EMPTY_CACHE.clear()
+        _GN_EMPTY_CACHE[query_text] = now + ttl
+
+
 def _google_news_parse(symbol: str, query_text: str, max_items: int):
     """One Google News RSS search. Returns (items, ok); ok is False when the feed could not be read at all."""
+    gate = _gn_gate(query_text)
+    if gate is not None:
+        return gate
     query = quote(query_text)
     feed_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
     try:
+        with _GN_LOCK:
+            _GN_STATS["searches"] += 1
         parsed = feedparser.parse(feed_url)
         logger.info(f"Google News feed entries for {symbol}: {len(parsed.entries)}")
+        if _gn_rate_limited(parsed=parsed) and not parsed.entries:
+            _gn_note_rate_limited(symbol)
+            return [], False
         if getattr(parsed, "bozo", False) and not parsed.entries:
             logger.warning("Google News RSS feed returned empty for %s", symbol)
             return [], False
         items = []
-        cutoff = _utcnow() - timedelta(days=30)
+        cutoff = _na.news_cutoff(_utcnow())
         for entry in parsed.entries[:max_items]:
             published = None
             if getattr(entry, "published_parsed", None):
@@ -676,8 +766,12 @@ def _google_news_parse(symbol: str, query_text: str, max_items: int):
                 "published": published.isoformat() if published else None,
                 "url": entry.link,
             })
+        if not items:
+            _gn_note_empty(query_text)     # round 605: the search worked and found nothing usable; do not repeat it for a while
         return items, True
     except Exception as e:
+        if _gn_rate_limited(exc=e):
+            _gn_note_rate_limited(symbol)
         logger.warning("Failed to fetch Google News for %s: %s", symbol, e)
         return [], False
 
@@ -733,7 +827,7 @@ def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]
 # search asks for the company by name restricted to the big Indian business publishers (site: filters; Google is not bot-gated and its entries
 # carry the real publisher), so the symbol's own Moneycontrol / ET / CNBC TV18 / Business Standard / LiveMint / NDTV Profit stories are found
 # whatever the feeds do. EVENT_PUBLISHER_SITES = comma list of domains (blank = default list, "off" = no publisher search);
-# EVENT_PUBLISHER_SEARCH_DAYS (default 7) = how far back.
+# EVENT_PUBLISHER_SEARCH_DAYS (default 3, never above NEWS_MAX_AGE_DAYS) = how far back.
 _PUBLISHER_SITES_DEFAULT = ("moneycontrol.com", "economictimes.indiatimes.com", "cnbctv18.com", "business-standard.com",
                             "livemint.com", "ndtvprofit.com")
 
@@ -753,10 +847,12 @@ def _publisher_search_query(symbol: str, company: str) -> str:
     for _ in range(2):  # "Foo Private Limited" -> "Foo"
         short = _LEGAL_SUFFIX_RE.sub("", short).strip()
     sites = _publisher_sites()
+    cap = max(1, int(_na.news_max_age_days()))      # round 600: never wider than the news window (3 days)
     try:
-        days = max(1, int(float((os.getenv("EVENT_PUBLISHER_SEARCH_DAYS") or "").strip() or "7")))
+        days = max(1, int(float((os.getenv("EVENT_PUBLISHER_SEARCH_DAYS") or "").strip() or str(cap))))
     except ValueError:
-        days = 7
+        days = cap
+    days = min(days, cap)
     name = f'"{short}"' if short and short.lower() != base.lower() else f'"{base}" NSE'
     return f"{name} ({' OR '.join('site:' + x for x in sites)}) when:{days}d"
 
@@ -913,7 +1009,7 @@ def _fetch_moneycontrol_news(symbol: str, max_items: int = 5) -> List[Dict[str, 
         parsed = _parse_site_feed(feed_url)
         logger.info(f"Moneycontrol feed entries for {symbol}: {len(parsed.entries)}")
         items = []
-        cutoff = _utcnow() - timedelta(days=30)
+        cutoff = _na.news_cutoff(_utcnow())
         for entry in parsed.entries[:50]:
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
@@ -945,7 +1041,7 @@ def _fetch_economic_times(symbol: str, max_items: int = 5) -> List[Dict[str, Any
         parsed = _parse_site_feed(feed_url)
         logger.info(f"Economic Times feed entries for {symbol}: {len(parsed.entries)}")
         items = []
-        cutoff = _utcnow() - timedelta(days=30)
+        cutoff = _na.news_cutoff(_utcnow())
         for entry in parsed.entries[:50]:
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
@@ -977,7 +1073,7 @@ def _fetch_cnbc_tv18(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
         parsed = _parse_site_feed(feed_url)
         logger.info(f"CNBC TV18 feed entries for {symbol}: {len(parsed.entries)}")
         items = []
-        cutoff = _utcnow() - timedelta(days=30)
+        cutoff = _na.news_cutoff(_utcnow())
         for entry in parsed.entries[:50]:
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
@@ -1049,7 +1145,7 @@ def _fetch_market_feeds(symbol: str, max_items: int = 8) -> List[Dict[str, Any]]
     if not urls:
         return []
     keywords = _get_keywords(symbol)
-    cutoff = _utcnow() - timedelta(days=30)
+    cutoff = _na.news_cutoff(_utcnow())
 
     def _one(feed_url: str) -> List[Dict[str, Any]]:
         try:
@@ -1160,6 +1256,63 @@ def _news_parallel_enabled() -> bool:
     return (os.getenv("EVENT_NEWS_PARALLEL") or "").strip().lower() not in ("0", "false", "no", "off")
 
 
+# Round 604: sources the per-symbol news fetch does not ask. 18 Nov log: the Moneycontrol latestnews.xml feed is frozen (no new items) and the
+# CNBC TV18 feed answers 404, so every symbol's fetch spent two network calls on them for nothing; Google News and the other feeds already read
+# the same sites. EVENT_SKIP_NEWS_SOURCES is a comma list of source names (case ignored); blank / "none" skips nothing, which restores the old
+# behaviour once a VM check (scripts/check_event_sources.py) shows a feed answering again.
+_SKIP_NEWS_SOURCES_DEFAULT = "Moneycontrol,CNBC TV18"
+
+
+def _skipped_news_sources() -> set:
+    raw = os.getenv("EVENT_SKIP_NEWS_SOURCES")
+    if raw is None:
+        raw = _SKIP_NEWS_SOURCES_DEFAULT
+    raw = raw.strip()
+    if raw.lower() in ("", "none", "off", "0"):
+        return set()
+    return {p.strip().lower() for p in raw.split(",") if p.strip()}
+
+
+def _fresh_news_items(items: List[Dict[str, Any]], source: str = "") -> List[Dict[str, Any]]:
+    """Round 600: the items inside the news window, each with `published` rewritten as an ISO string (Yahoo sends an epoch number, the RSS readers
+    an ISO string - the newest-first sort below compares them as text, so mixed formats used to sort wrongly)."""
+    out: List[Dict[str, Any]] = []
+    for it in _na.filter_fresh_news(items, "published", _utcnow(), source):
+        d = _na.parse_news_time(it.get("published"))
+        out.append({**it, "published": d.isoformat() if d else it.get("published")})
+    _na.maybe_log_age_drops(logger)
+    return out
+
+
+def _apply_news_age(result: Optional[dict]) -> Optional[dict]:
+    """Round 600: a cached or fallback event record may hold news that has aged past the window since it was stored (the cache keeps a record up
+    to 4 h, the fallback up to 3 days). Drops those items from recent_news / classified_events / bulk_deals and, only when something was dropped,
+    rebuilds the summary and the event score so nothing still describes the old story. Never raises; returns the record unchanged on any problem."""
+    if not isinstance(result, dict):
+        return result
+    try:
+        now = _utcnow()
+        changed = False
+        out = dict(result)
+        for key in ("recent_news", "classified_events", "bulk_deals"):
+            lst = result.get(key)
+            if not isinstance(lst, list) or not lst:
+                continue
+            kept = [x for x in lst if isinstance(x, dict) and _na.is_fresh_news(x.get("published"), now)]
+            if len(kept) != len(lst):
+                out[key] = kept
+                changed = True
+        if changed:
+            out["summary"] = _summarize_events(out)
+            if enrich_events is not None:
+                out = enrich_events(out, symbol=out.get("symbol") or "")
+            return out
+        return result      # nothing aged out: the stored record itself (no copy)
+    except Exception as e:  # noqa: BLE001 - the age rule must never break a read
+        logger.warning("news age filter failed (%s); record served as stored", e)
+        return result
+
+
 def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[Dict[str, Any]]:
     all_news = []
 
@@ -1177,6 +1330,9 @@ def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[
         ("Publisher search", lambda: _fetch_publisher_search(symbol, max_items=8)),   # round 187: this symbol's own stories, no 50-entry feed limit
         ("Market feeds", lambda: _fetch_market_feeds(symbol, max_items=8)),           # round 198: nine live Business Standard / BusinessLine / ET / Mint feeds
     )
+    _skip = _skipped_news_sources()
+    if _skip:
+        sources = tuple(src for src in sources if src[0].lower() not in _skip)    # round 604: dead feeds are not asked at all
     _yahoo_paused = _yf_news_paused()   # round 187: read BEFORE the lookups so a paused source is not logged as "0 items"
 
     def _safe(fn, name):
@@ -1196,6 +1352,10 @@ def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[
 
     for (name, _), items in zip(sources, results):
         _was_paused = name == "Yahoo Finance" and _yahoo_paused
+        n_raw = len(items)
+        items = _fresh_news_items(items, name)      # round 600: only the last 3 days; an undated item is dropped; `published` becomes ISO for every source
+        if n_raw and not items:
+            logger.info("%s for %s: %d item(s), all older than %.0f days or undated - dropped", name, symbol, n_raw, _na.news_max_age_days())
         _note_news_source(name, len(items), _was_paused)
         if _was_paused:
             logger.info("%s for %s: PAUSED (%.0fs left), not asked", name, symbol, _yf_news_pause_left())
@@ -1244,7 +1404,7 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
         cached = _redis_get(f"{EVENT_CACHE_PREFIX}{sym}")
         if cached:
             logger.info("Event fetch for %s joined the one already running", sym)
-            return cached
+            return _apply_news_age(cached)
         # the leader failed or timed out and left nothing cached: fetch it ourselves
         return _fetch_events_impl(symbol, force=force)
     try:
@@ -1264,8 +1424,8 @@ def _fetch_events_impl(symbol: str, force: bool = False) -> dict:
         # Honor Redis TTL only. Empty-news entries use EMPTY_NEWS_CACHE_TTL (1h);
         # requiring recent_news non-empty used to bypass that and re-hit Yahoo all day.
         if cached:
-            n = len(cached.get("recent_news") or [])
-            logger.info(f"Event cache hit for {sym} (news={n})")
+            cached = _apply_news_age(cached)      # round 600: news that aged past the window since it was cached is dropped on read
+            logger.info(f"Event cache hit for {sym} (news={len(cached.get('recent_news') or [])})")
             return cached
 
     logger.info(f"=== Fetching fresh events for {sym} ===")
@@ -1429,7 +1589,7 @@ def _fetch_events_impl(symbol: str, force: bool = False) -> dict:
     stale = _redis_get(fallback_key)
     if stale:
         logger.info(f"Live fetch for {sym} empty; serving fallback")
-        stale = {**stale, "cached": True, "stale": True}
+        stale = {**(_apply_news_age(stale) or stale), "cached": True, "stale": True}   # round 600: the fallback is age-filtered too
         _redis_set(cache_key, stale, ttl=900)
         return stale
 
@@ -1548,7 +1708,10 @@ def news_sources():
     return {"sources": sources,
             "yahoo": {"paused": _yf_news_paused(), "seconds_left": round(_yf_news_pause_left(), 0)},
             "feeds": {u: {k: v for k, v in d.items() if k != "warned_at"} for u, d in _FEED_AGE.items()},
-            "publisher_sites": _publisher_sites()}
+            "publisher_sites": _publisher_sites(),
+            "google": {**dict(_GN_STATS), "backoff_left_s": round(max(0.0, _GN_BACKOFF["until"] - time.monotonic()), 0),
+                       "empty_remembered": len(_GN_EMPTY_CACHE)},      # round 605
+            "age_rule": _na.age_drop_stats()}      # round 600: per source, items kept / dropped as old / dropped as undated since start
 
 
 @app.get("/lite-stats")
@@ -1591,6 +1754,10 @@ def raw_feed(hours: int = 24):
     """
     state = _load_state()
     subscriptions = state.get("subscriptions", [])
+    try:
+        hours = max(1, min(int(hours), int(_na.news_max_age_days() * 24)))   # round 600: never asks for more than the news window (72 h)
+    except (TypeError, ValueError):
+        hours = 24
     cutoff = _utcnow() - timedelta(hours=hours)
 
     items: list[dict] = []
@@ -1601,13 +1768,10 @@ def raw_feed(hours: int = 24):
             continue
         for n in (cached.get("recent_news") or []):
             published = n.get("published")
-            if published:
-                try:
-                    pub_dt = datetime.fromisoformat(published.replace("Z", ""))
-                    if pub_dt < cutoff:
-                        continue
-                except (ValueError, TypeError):
-                    pass  # unparseable date — don't silently drop it
+            # round 600: an unreadable or missing date no longer passes (the 3-day rule cannot be shown to hold for it)
+            pub_dt = _na.parse_news_time(published)
+            if pub_dt is None or pub_dt < cutoff or not _na.is_fresh_news(published, _utcnow()):
+                continue
             items.append({
                 "symbol": symbol,
                 "headline": n.get("title"),
@@ -1860,8 +2024,31 @@ def _check_breakdown(tm: dict) -> str:
         return "Breakdown: unavailable"
 
 
+def _held_first(first, subs) -> list:
+    """Round 611: the subscribed symbols named in the `first` query value, in the order given, de-duplicated, at most CHECK_HELD_MAX."""
+    try:
+        if not first or (os.getenv("CHECK_HELD_FIRST") or "").strip() == "0":
+            return []
+        cap = int(env_float_safe("CHECK_HELD_MAX", 30, lo=0))
+        have = set(subs)
+        out = []
+        for raw in str(first).split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            sym = raw.upper() if raw.upper() in have else _normalize(raw)
+            if sym in have and sym not in out:
+                out.append(sym)
+            if len(out) >= cap:
+                break
+        return out
+    except Exception:  # noqa: BLE001 - an ordering hint must never break the pass
+        logger.debug("check_for_changes: could not read the first= list", exc_info=True)
+        return []
+
+
 @app.get("/check")
-def check_for_changes():
+def check_for_changes(first: Optional[str] = None):
     """Diff each subscribed symbol against last known snapshot.
     Staggered with 1s delay between symbols to avoid Yahoo rate limits.
     Uses the shared _diff_events function.
@@ -1875,11 +2062,38 @@ def check_for_changes():
     changes = []
     subs = list(state["subscriptions"])
     total = len(subs)
+    # Round 603: the user / notification-watchlist names (source "user") are checked FIRST on every pass; only the dynamic-universe
+    # names (source "auto") rotate behind them. 18 Nov log: the pass stopped at 260 of 462, so the tail waited a whole extra pass,
+    # watchlist names included. When every symbol is "user" (or none is) there is nothing to put behind, so the old plain rotation runs.
+    # CHECK_PRIORITY_MAX caps the front group (default 40) so a huge watchlist cannot use the whole budget; CHECK_PRIORITY_FIRST=0 turns it off.
+    _meta = state.get("subscription_meta", {})
+    _prio_max = int(env_float_safe("CHECK_PRIORITY_MAX", 40, lo=0))
+    if (os.getenv("CHECK_PRIORITY_FIRST") or "").strip() == "0":
+        _prio_max = 0
+    prio = [s for s in subs if _meta.get(s, {}).get("source") == "user"][:_prio_max]
+    # Round 611: `?first=A,B,C` (comma list, sent by Real Trade: the symbols it HOLDS) goes before everything else, so an open position's
+    # event is looked at on every pass even though it is only an "auto" name. Only symbols that are subscribed count; at most
+    # CHECK_HELD_MAX (default 30); CHECK_HELD_FIRST=0 ignores the parameter. A pass called without it behaves exactly as in round 603.
+    held = _held_first(first, subs)
+    prio = held + [s for s in prio if s not in set(held)]
+    _prio_set = set(prio)
+    rest = [s for s in subs if s not in _prio_set]
+    if not rest:                      # nothing to rotate behind the front group: plain rotation over everything
+        prio, rest = [], subs
+    n_prio, n_rest = len(prio), len(rest)
     try:
-        start = int(state.get("check_cursor") or 0) % total if total else 0
+        start = int(state.get("check_cursor") or 0) % n_rest if n_rest else 0
     except (TypeError, ValueError):
         start = 0
-    order = subs[start:] + subs[:start]
+    order = prio + rest[start:] + rest[:start]
+
+    def _cursor_after(n_done: int) -> int:
+        """Cursor over the rotating part after n_done symbols of `order` are finished (the front group does not move it)."""
+        return (start + max(0, n_done - n_prio)) % n_rest if n_rest else 0
+
+    # Round 603: the gap between two fresh-fetch STARTS (Yahoo protection). Default 1.0 s = unchanged; CHECK_STAGGER_S=0.5 doubles
+    # the fresh fetches that fit in CHECK_MAX_SECONDS. Capped at 5 s, 0 = no spacing.
+    _stagger = min(5.0, env_float_safe("CHECK_STAGGER_S", 1.0, lo=0))
 
     # group345: this warm-up is background work. It yields to live requests (the quality gate's per-entry news check) and stops after
     # CHECK_MAX_SECONDS so one pass cannot hold the event service for 300 s (13 Oct: dynamic_universe /check ran 300 s, 7 gate calls timed out).
@@ -1928,14 +2142,14 @@ def check_for_changes():
                     _tm["yield_s"] += time.monotonic() - _ty
                 if _budget > 0 and time.monotonic() - _t0 > _budget:
                     logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f, %d workers); the rest are next pass (resumes at index %d). %s",
-                                   time.monotonic() - _t0, done + len(inflight), total, _budget, _workers, (start + done + len(inflight)) % total, _check_breakdown(_tm))
+                                   time.monotonic() - _t0, done + len(inflight), total, _budget, _workers, _cursor_after(done + len(inflight)), _check_breakdown(_tm))
                     break
                 try:
                     _was_cached = bool(_redis_get(f"{EVENT_CACHE_PREFIX}{_normalize(symbol)}"))
                 except Exception:  # noqa: BLE001 - only decides whether to stagger
                     _was_cached = False
                 if not _was_cached:
-                    _gap = 1.0 - (time.monotonic() - _last_fresh_start)
+                    _gap = _stagger - (time.monotonic() - _last_fresh_start)
                     if _gap > 0:
                         time.sleep(_gap)
                         _tm["stagger_s"] += _gap
@@ -1955,7 +2169,7 @@ def check_for_changes():
         for symbol in order:
             if _need_sleep:
                 _ts = time.monotonic()
-                time.sleep(1)
+                time.sleep(_stagger)
                 _tm["stagger_s"] += time.monotonic() - _ts
             _y = 0
             _ty = time.monotonic()
@@ -1967,7 +2181,7 @@ def check_for_changes():
                 _tm["yield_s"] += time.monotonic() - _ty
             if _budget > 0 and time.monotonic() - _t0 > _budget:
                 logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass (resumes at index %d). %s",
-                               time.monotonic() - _t0, done, total, _budget, (start + done) % total, _check_breakdown(_tm))
+                               time.monotonic() - _t0, done, total, _budget, _cursor_after(done), _check_breakdown(_tm))
                 break
 
             try:
@@ -1989,13 +2203,14 @@ def check_for_changes():
             state["last_known"][symbol] = current
             done += 1
 
-    state["check_cursor"] = (start + done) % total if total else 0
+    state["check_cursor"] = _cursor_after(done)
     _save_state(state)
     return {
         "checked": done,
         "total": total,
         "complete": done >= total,
         "next_cursor": state["check_cursor"],
+        "held_first": len(held),
         "changes": changes,
         "checked_at": _utcnow().isoformat(),
     }

@@ -674,6 +674,8 @@ _last_dropped_dead: list = []
 
 
 from instrument_filter import is_etf_or_fund, drop_etfs  # group 188 (item 9)
+import quote_skip as _quote_skip  # round 606: QUOTE_SKIP_SYMBOLS and the once-a-day log note
+import yf_bulk_gate as _yf_gate  # round 607: one Yahoo ask per symbol per QUOTE_BULK_YF_MIN_INTERVAL_S from /quotes/bulk
 
 
 def _clean_feed_universe(raw):
@@ -1521,7 +1523,9 @@ KNOWN_DELISTED_SYMBOLS = {
 
 def is_known_delisted(symbol: str) -> bool:
     base = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    return base in KNOWN_DELISTED_SYMBOLS
+    # round 606: QUOTE_SKIP_SYMBOLS (quote_skip.py) adds the operator's own "no provider can price this" names to the fast-404 path. The 404 text
+    # still says "delisted/merged" for them.
+    return base in KNOWN_DELISTED_SYMBOLS or base in _quote_skip.skip_symbols()
 
 
 def sanitize_symbol(raw_symbol: str) -> str:
@@ -3071,6 +3075,10 @@ def _dhan_quote_stage(sym: str, cache_key: str):
         return None
 
 
+_DHAN_UNMAPPED_NOTE = _quote_skip.DailyNote("DHAN_UNMAPPED_LOG_EVERY_S", 86400.0)    # round 606
+_YF_GATE_NOTE = _quote_skip.DailyNote("YF_GATE_LOG_EVERY_S", 60.0)    # round 607: the yfinance-gate line is logged once a minute, not on every bulk call
+
+
 def _dhan_bulk_stage(tickers: list, symbol_map: dict, results: list) -> list:
     """Bulk Dhan stage for /quotes/bulk: prices what it can in ONE shared Dhan call, appends the rows to `results`,
     returns the tickers it could not price. Never raises (on any error every ticker is returned untouched)."""
@@ -3097,9 +3105,19 @@ def _dhan_bulk_stage(tickers: list, symbol_map: dict, results: list) -> list:
             _bd = ""
             try:
                 _b = _dq.last_call_breakdown()
-                _bd = (" (fresh %s, not in Dhan's scrip map %s, unanswered when the wait ended %s%s)"
-                       % (_b.get("fresh"), _b.get("unmapped"), _b.get("waited_out"),
-                          ", Dhan paused" if _b.get("paused_or_no_map") else ""))
+                # round 606: the names Dhan has no scrip id for do not change from call to call, so they are listed once a day
+                # (DHAN_UNMAPPED_LOG_EVERY_S, default 86400; 0 = in every call's line, the old text) and each call's line keeps the rest.
+                _per_call_unmapped = _DHAN_UNMAPPED_NOTE.every_s() <= 0
+                _bd = (" (fresh %s, %sunanswered when the wait ended %s%s)"
+                       % (_b.get("fresh"), ("not in Dhan's scrip map %s, " % _b.get("unmapped")) if _per_call_unmapped else "",
+                          _b.get("waited_out"), ", Dhan paused" if _b.get("paused_or_no_map") else ""))
+                if not _per_call_unmapped and _DHAN_UNMAPPED_NOTE.allow():
+                    _st = _dq.status()
+                    if _st.get("empty_no_scrip_distinct"):
+                        logger.info("quotes/bulk: %d symbol(s) are not in Dhan's scrip map and only other providers can price them "
+                                    "(this line comes once a day; the newest %d): %s",
+                                    _st["empty_no_scrip_distinct"], len(_st.get("empty_no_scrip_sample") or []),
+                                    ", ".join(_st.get("empty_no_scrip_sample") or []))
             except Exception:  # noqa: BLE001
                 pass
             logger.info("quotes/bulk: Dhan priced %d/%d symbols, %d left for the next provider%s",
@@ -4444,6 +4462,35 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                 yf_tickers = _left_sl
         except Exception as _sle:  # noqa: BLE001
             logger.debug("quotes/bulk: small-leftover gate failed (non-fatal): %s", _sle)
+
+    if yf_tickers:
+        # round 607: the same few leftovers (not in Dhan's map, held, indices) were sent to yf.download on EVERY bulk call and several calls run
+        # at once, which emptied the shared yfinance bucket ("rate-limit bucket saturated"). A symbol goes to Yahoo at most once per
+        # QUOTE_BULK_YF_MIN_INTERVAL_S (default 30 s, 0 = off); in between it gets a recent cached price or is left out. Held symbols and
+        # indices always go (fail safe). The stamp is taken here, before the download, so two concurrent calls do not both ask.
+        try:
+            _gate_every = _yf_gate.min_interval_s()
+            if _gate_every > 0:
+                _gate_age_cap = _bulk_leftover_cfg()[3]
+                _send_yf, _held_yf = _yf_gate.split(
+                    yf_tickers, lambda _m: _m.startswith("^") or _cooldown_symbol_held(symbol_map.get(_m, _m)))
+                if _held_yf:
+                    _served_g = 0
+                    for _m in _held_yf:
+                        _base_g = symbol_map.get(_m, _m).replace(".NS", "").replace(".BO", "")
+                        _row_g = _leftover_stale_row(_m, _base_g, _gate_age_cap)
+                        if _row_g:
+                            results.append(_row_g)
+                            _served_g += 1
+                    _yf_gate.STATS["served"] += _served_g
+                    (logger.info if _YF_GATE_NOTE.allow() else logger.debug)(
+                        "quotes/bulk: %d symbol(s) were sent to yfinance less than %.0fs ago - %d served from a cached price "
+                        "(<= %.0fs old), %d left out of this answer, %d go to yfinance now (counters: %s)",
+                        len(_held_yf), _gate_every, _served_g, _gate_age_cap, len(_held_yf) - _served_g, len(_send_yf),
+                        dict(_yf_gate.STATS))
+                yf_tickers = _send_yf
+        except Exception as _yge:  # noqa: BLE001
+            logger.debug("quotes/bulk: yfinance gate failed (non-fatal): %s", _yge)
 
     if not yf_tickers:
         # Everything was already fresh (cache, live feed, or AngelOne REST) —

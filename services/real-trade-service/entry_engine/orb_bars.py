@@ -33,14 +33,20 @@ FETCH_ON = ((os.getenv("ORB_BARS_FETCH") or "").strip() or "true").lower() not i
 REFRESH_S = env_float_safe("ORB_BARS_REFRESH_S", 60.0, positive=True)          # a symbol's bars are re-fetched at most this often
 MAX_LAG_S = env_float_safe("ORB_BARS_MAX_LAG_S", 180.0, positive=True)         # newest cached bar older than this: write no fields
 TIMEOUT_S = env_float_safe("ORB_BARS_TIMEOUT_S", 4.0, positive=True)
-MAX_INFLIGHT = env_int_safe("ORB_BARS_MAX_INFLIGHT", 3, positive=True)
+MAX_INFLIGHT = env_int_safe("ORB_BARS_MAX_INFLIGHT", 6, positive=True)             # round 610: 3 -> 6 (market-data handled the load in the 18 Nov log)
+# round 610: fetch slots kept free for the names the entry walk, the swing entry and the exits ask for (priority=True). The record-only ORB recorder
+# (orb_shadow.record, run for EVERY candidate early in the decision) may only use MAX_INFLIGHT - RESERVE slots, so it can no longer fill them all.
+PRIORITY_RESERVE = min(env_int_safe("ORB_BARS_PRIORITY_RESERVE", 2, lo=0), max(0, MAX_INFLIGHT - 1))
+WANT_TTL_S = env_float_safe("ORB_BARS_WANT_TTL_S", 30.0, positive=True)             # a queued priority request older than this is dropped (the next decision asks again)
+MAX_WANTED = 300
 MAX_CACHE = 600
 
 _lock = threading.Lock()
 _cache: Dict[Tuple[str, str], Dict[str, Any]] = {}     # (symbol, IST day) -> {"bars": [(t,o,h,l,c,v)...], "at": monotonic}
 _last_try: Dict[Tuple[str, str], float] = {}
 _inflight: set = set()
-_stats: Dict[str, int] = {"requests": 0, "ok": 0, "failed": 0, "hit": 0, "miss": 0, "stale": 0}
+_wanted: Dict[Tuple[str, str], float] = {}                # round 610: priority names that found no free slot -> monotonic time they asked (oldest first)
+_stats: Dict[str, int] = {"requests": 0, "ok": 0, "failed": 0, "hit": 0, "miss": 0, "stale": 0, "queued": 0, "queue_dropped": 0, "skipped_current": 0}
 
 
 def _f(v: Any) -> Optional[float]:
@@ -73,7 +79,7 @@ def _fetch_rows(symbol: str) -> list:
 _fetch: Callable[[str], list] = _fetch_rows
 
 
-def _worker(key: Tuple[str, str]) -> None:
+def _fetch_one(key: Tuple[str, str]) -> None:
     try:
         from stockky_ms.timeframes import rows_to_bars
         bars = rows_to_bars(_fetch(key[0]))
@@ -89,8 +95,51 @@ def _worker(key: Tuple[str, str]) -> None:
             _inflight.discard(key)
 
 
-def get_bars(symbol: str, now_mono: Optional[float] = None, now: Optional[datetime] = None) -> Optional[List[tuple]]:
-    """Cached bars for today, or None. Never blocks: when the cache is missing or older than REFRESH_S it starts ONE background fetch (bounded by MAX_INFLIGHT)."""
+def _next_wanted(mono: Optional[float] = None) -> Optional[Tuple[str, str]]:
+    """Round 610: the oldest still-fresh queued priority request, reserved for the calling worker thread (it is put in _inflight and stamped in _last_try), or None.
+    Entries older than WANT_TTL_S, already in flight or fetched inside REFRESH_S meanwhile are dropped."""
+    mono = time.monotonic() if mono is None else mono
+    with _lock:
+        while _wanted:
+            k = min(_wanted, key=_wanted.get)
+            asked = _wanted.pop(k)
+            if mono - asked > WANT_TTL_S:
+                _stats["queue_dropped"] += 1
+                continue
+            if k in _inflight or mono - _last_try.get(k, -1e9) < REFRESH_S:
+                continue
+            _last_try[k] = mono
+            _inflight.add(k)
+            _stats["requests"] += 1
+            return k
+    return None
+
+
+def _worker(key: Tuple[str, str]) -> None:
+    """One fetch thread: fetches `key`, then keeps taking queued priority names until none is left (so a freed slot serves the shortlist at once)."""
+    nxt: Optional[Tuple[str, str]] = key
+    while nxt is not None:
+        _fetch_one(nxt)
+        nxt = _next_wanted()
+
+
+def _up_to_date(got: Optional[Dict[str, Any]], now: Optional[datetime]) -> bool:
+    """Round 610: True when the newest cached bar is already the last bar that can have closed (its end is at or after the start of the current minute), so another
+    fetch could not return a newer closed bar before the next minute boundary."""
+    try:
+        if not got or not got.get("bars"):
+            return False
+        end = _newest_bar_end(got["bars"])
+        return end is not None and end >= (ist_now(now).timestamp() // 60) * 60
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def get_bars(symbol: str, now_mono: Optional[float] = None, now: Optional[datetime] = None, priority: bool = False) -> Optional[List[tuple]]:
+    """Cached bars for today, or None. Never blocks: when the cache is missing or older than REFRESH_S it starts ONE background fetch (bounded by MAX_INFLIGHT).
+    Round 610: `priority=True` (the entry walk, the swing entry, held-position exits) may use every slot and, when none is free, is queued (WANT_TTL_S) and served
+    by the next worker that finishes; the default (the record-only ORB recorder, one call per candidate) leaves PRIORITY_RESERVE slots free and is never queued.
+    A symbol whose newest cached bar is already the last that can have closed this minute is not fetched again (stats `skipped_current`)."""
     try:
         sym = str(symbol or "").strip().upper()
         if not sym:
@@ -100,16 +149,26 @@ def get_bars(symbol: str, now_mono: Optional[float] = None, now: Optional[dateti
         start = False
         with _lock:
             got = _cache.get(key)
-            if FETCH_ON and key not in _inflight and len(_inflight) < MAX_INFLIGHT and mono - _last_try.get(key, -1e9) >= REFRESH_S:
-                _last_try[key] = mono
-                _inflight.add(key)
-                _stats["requests"] += 1
-                start = True
-                if len(_cache) > MAX_CACHE or len(_last_try) > MAX_CACHE * 4:
-                    for k in [k for k in _cache if k[1] != key[1]]:
-                        _cache.pop(k, None)
-                    for k in [k for k in _last_try if k[1] != key[1]]:
-                        _last_try.pop(k, None)
+            if FETCH_ON and key not in _inflight and mono - _last_try.get(key, -1e9) >= REFRESH_S:
+                if _up_to_date(got, now):
+                    _stats["skipped_current"] += 1
+                elif len(_inflight) < (MAX_INFLIGHT if priority else MAX_INFLIGHT - PRIORITY_RESERVE):
+                    _last_try[key] = mono
+                    _inflight.add(key)
+                    _wanted.pop(key, None)
+                    _stats["requests"] += 1
+                    start = True
+                    if len(_cache) > MAX_CACHE or len(_last_try) > MAX_CACHE * 4:
+                        for k in [k for k in _cache if k[1] != key[1]]:
+                            _cache.pop(k, None)
+                        for k in [k for k in _last_try if k[1] != key[1]]:
+                            _last_try.pop(k, None)
+                elif priority and key not in _wanted:
+                    if len(_wanted) >= MAX_WANTED:
+                        _wanted.pop(min(_wanted, key=_wanted.get), None)
+                        _stats["queue_dropped"] += 1
+                    _wanted[key] = mono
+                    _stats["queued"] += 1
         if start:
             threading.Thread(target=_worker, args=(key,), name="orb-bars", daemon=True).start()
         return list(got["bars"]) if got else None
@@ -364,7 +423,7 @@ def stats() -> Dict[str, int]:
 def _reset_for_tests() -> None:
     global _fetch
     with _lock:
-        _cache.clear(); _last_try.clear(); _inflight.clear()
+        _cache.clear(); _last_try.clear(); _inflight.clear(); _wanted.clear()
         for k in _stats:
             _stats[k] = 0
         _log_state["at"], _log_state["base"] = None, {}

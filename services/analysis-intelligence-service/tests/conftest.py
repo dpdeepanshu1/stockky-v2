@@ -43,6 +43,24 @@ def _clear_feed_caches(module) -> None:
             cache.clear()
 
 
+def _clear_gn_state(module) -> None:
+    """round 605: event/main.py remembers empty Google News answers and a 429 back-off at module level; every test starts clean."""
+    for v in list(vars(module).values()):
+        cache = getattr(v, "_GN_EMPTY_CACHE", None)
+        if isinstance(cache, dict):
+            cache.clear()
+            v._GN_BACKOFF["until"] = 0.0
+            for k in v._GN_STATS:
+                v._GN_STATS[k] = 0
+
+
+@pytest.fixture(autouse=True)
+def _reset_event_google_state(request):
+    _clear_gn_state(request.module)
+    yield
+    _clear_gn_state(request.module)
+
+
 @pytest.fixture(autouse=True)
 def _reset_event_feed_cache(request):
     """group 144: event/main.py caches the site-wide RSS feeds; every test starts with it empty,

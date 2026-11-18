@@ -3,7 +3,7 @@
 #     bash scripts/eod_check.sh            # today
 #     DAY=2026-11-17 bash scripts/eod_check.sh
 # Asks for the admin username / password (password hidden, never printed or stored), logs in on real-trade (POST /auth/login), then runs:
-#   guard_log_summary, daily_trade_report (Real Trade included), today's gate counts, and blocked_outcome for no_setup_window.
+#   guard_log_summary (decisions tables + container logs), daily_trade_report (Real Trade included), today's gate counts, and blocked_outcome for no_setup_window.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 DAY="${DAY:-$(TZ=Asia/Kolkata date +%F)}"

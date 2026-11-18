@@ -719,6 +719,7 @@ services/analysis-intelligence-service/event/event_depth.py
 services/analysis-intelligence-service/event/event_feed.py
 services/analysis-intelligence-service/event/event_lite.py
 services/analysis-intelligence-service/event/main.py
+services/analysis-intelligence-service/event/news_age.py
 services/analysis-intelligence-service/event/requirements.txt
 services/analysis-intelligence-service/event_lite.py
 services/analysis-intelligence-service/fundamental/.dockerignore
@@ -742,6 +743,7 @@ services/analysis-intelligence-service/news/env_util.py
 services/analysis-intelligence-service/news/event_lite.py
 services/analysis-intelligence-service/news/feed_fetch.py
 services/analysis-intelligence-service/news/main.py
+services/analysis-intelligence-service/news/news_age.py
 services/analysis-intelligence-service/news/news_quality.py
 services/analysis-intelligence-service/news/requirements.txt
 services/analysis-intelligence-service/rate_limit_report.py
@@ -857,6 +859,11 @@ services/analysis-intelligence-service/tests/test_round192_hf_model_fallback.py
 services/analysis-intelligence-service/tests/test_round197_check_breakdown.py
 services/analysis-intelligence-service/tests/test_round198_market_feeds.py
 services/analysis-intelligence-service/tests/test_round201_check_workers.py
+services/analysis-intelligence-service/tests/test_round600_news_age.py
+services/analysis-intelligence-service/tests/test_round603_check_priority.py
+services/analysis-intelligence-service/tests/test_round604_skip_dead_news_sources.py
+services/analysis-intelligence-service/tests/test_round605_google_backoff.py
+services/analysis-intelligence-service/tests/test_round611_check_held_first.py
 services/analysis-intelligence-service/tests/test_sentiment_main.py
 services/analysis-intelligence-service/tests/test_sentiment_market_data.py
 services/analysis-intelligence-service/tests/test_service_main.py
@@ -1670,6 +1677,7 @@ services/market-data-service/migrations/live_quotes.sql
 services/market-data-service/migrations/symbol_master.sql
 services/market-data-service/oracle_compat.py
 services/market-data-service/order_flow_tape.py
+services/market-data-service/quote_skip.py
 services/market-data-service/rate_limiter.py
 services/market-data-service/requirements.txt
 services/market-data-service/session_proof.py
@@ -1775,12 +1783,15 @@ services/market-data-service/tests/test_round222_prev_close_guard.py
 services/market-data-service/tests/test_round553_global_strip.py
 services/market-data-service/tests/test_round554_fo_eod.py
 services/market-data-service/tests/test_round559_view_only_index.py
+services/market-data-service/tests/test_round606_quote_skip.py
+services/market-data-service/tests/test_round607_yf_bulk_gate.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
 services/market-data-service/tests/test_surprise_premarket_bulk_pause.py
 services/market-data-service/tests/test_tz_cache_dir_precreated.py
 services/market-data-service/yahoo_ws_feed.py
+services/market-data-service/yf_bulk_gate.py
 services/notification-scheduler-service/.dockerignore
 services/notification-scheduler-service/Dockerfile
 services/notification-scheduler-service/control/__init__.py
@@ -1933,6 +1944,7 @@ services/position-stocks-service/orders/manual_buy_window.py
 services/position-stocks-service/orders/momentum_health.py
 services/position-stocks-service/orders/momentum_hook.py
 services/position-stocks-service/orders/opening_protect.py
+services/position-stocks-service/orders/or_live.py
 services/position-stocks-service/orders/orb_shadow.py
 services/position-stocks-service/orders/order_flow.py
 services/position-stocks-service/orders/overnight_stop.py
@@ -1958,6 +1970,7 @@ services/position-stocks-service/orders/setup_live.py
 services/position-stocks-service/orders/setup_short.py
 services/position-stocks-service/orders/setup_stamp.py
 services/position-stocks-service/orders/setup_stats.py
+services/position-stocks-service/orders/shared_or_budget.py
 services/position-stocks-service/orders/short_entry.py
 services/position-stocks-service/orders/short_gates.py
 services/position-stocks-service/orders/short_live.py
@@ -2334,6 +2347,11 @@ services/position-stocks-service/tests/test_round579_candidate_log_utcnow.py
 services/position-stocks-service/tests/test_round589_opening_no_setup.py
 services/position-stocks-service/tests/test_round590_penny_gate.py
 services/position-stocks-service/tests/test_round591_window_no_setup.py
+services/position-stocks-service/tests/test_round602_entry_stage_skip_marks.py
+services/position-stocks-service/tests/test_round608_typed_event_cache.py
+services/position-stocks-service/tests/test_round612_or_live.py
+services/position-stocks-service/tests/test_round613_shared_or_budget.py
+services/position-stocks-service/tests/test_round615_or_refund.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -2425,6 +2443,7 @@ services/real-trade-service/entry_engine/open_cues.py
 services/real-trade-service/entry_engine/opening_gate.py
 services/real-trade-service/entry_engine/opening_guard.py
 services/real-trade-service/entry_engine/opening_protect.py
+services/real-trade-service/entry_engine/or_live.py
 services/real-trade-service/entry_engine/or_shadow.py
 services/real-trade-service/entry_engine/orb_bars.py
 services/real-trade-service/entry_engine/orb_shadow.py
@@ -2442,6 +2461,7 @@ services/real-trade-service/entry_engine/setup_engine.py
 services/real-trade-service/entry_engine/setup_inputs.py
 services/real-trade-service/entry_engine/setup_live.py
 services/real-trade-service/entry_engine/setup_stamp.py
+services/real-trade-service/entry_engine/shared_or_budget.py
 services/real-trade-service/entry_engine/shortlist.py
 services/real-trade-service/entry_engine/size_floor.py
 services/real-trade-service/entry_engine/size_ladder.py
@@ -2948,6 +2968,13 @@ services/real-trade-service/tests/test_round512_market_research.py
 services/real-trade-service/tests/test_round557_strategy_version.py
 services/real-trade-service/tests/test_round591_window_no_setup.py
 services/real-trade-service/tests/test_round599_or_shadow.py
+services/real-trade-service/tests/test_round600_setup_walk_error.py
+services/real-trade-service/tests/test_round610_orb_bars_priority.py
+services/real-trade-service/tests/test_round611_check_held_symbols.py
+services/real-trade-service/tests/test_round612_or_live.py
+services/real-trade-service/tests/test_round613_shared_or_budget.py
+services/real-trade-service/tests/test_round614_check_ps_held.py
+services/real-trade-service/tests/test_round615_or_refund.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

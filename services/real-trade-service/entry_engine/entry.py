@@ -25,6 +25,7 @@ import math
 import os
 from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import threading
+import time as _time_r600
 from datetime import datetime, timedelta, timezone
 import write_behind as _write_behind   # A3
 from typing import Any, Optional
@@ -54,6 +55,7 @@ from entry_engine import day_spike_gate, flow_gate, gap_rank, open_cues
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
+from entry_engine import or_live as _or_live   # round 612: live OR rescue (soft gates only)
 from entry_engine import or_shadow as _or_shadow   # round 599: shadow-only OR rules (record, never change an entry)
 from entry_engine import setup_inputs as _setup_inputs   # E276 round 68
 from entry_engine import conviction_size as _conviction_size   # E266
@@ -66,6 +68,25 @@ except ImportError:
         return None if x is None or not math.isfinite(x) or abs(x) > 30.0 else x
 
 logger = logging.getLogger("real-trade-entry")
+
+
+# Round 600: how many times the setup walk raised since this process started, and when each symbol was last warned about (one WARNING per symbol per 300 s).
+SETUP_WALK_ERRORS = {"count": 0}
+_WALK_ERR_WARNED: "dict[str, float]" = {}
+
+
+def _walk_error_note(symbol: str, exc: BaseException) -> None:
+    """Round 600: count a setup-walk failure and log it at WARNING (throttled per symbol). Never raises."""
+    try:
+        SETUP_WALK_ERRORS["count"] += 1
+        now = _time_r600.time()
+        if now - _WALK_ERR_WARNED.get(symbol, 0.0) >= 300.0:
+            _WALK_ERR_WARNED[symbol] = now
+            logger.warning("entry_engine: setup walk FAILED for %s (%s: %s); inside the no-setup window the entry waits instead of going on as a plain entry "
+                           "(%d walk failure(s) since start)", symbol, type(exc).__name__, exc, SETUP_WALK_ERRORS["count"], exc_info=True)
+    except Exception:  # noqa: BLE001 - a diagnostics failure must not matter
+        logger.debug("entry_engine: walk error note failed", exc_info=True)
+
 
 # ── Stop / target constants ───────────────────────────────────────────────────
 ATR_STOP_MULTIPLIER   = 1.5
@@ -734,6 +755,20 @@ async def _rearm_requeue(db: Session, mode: str) -> int:
         return 0
 
 
+def _or_live_allow(decision, mode: str, symbol: str, hit: Optional[dict]) -> bool:
+    """Round 612: True when a live OR rule lets this refused entry go on to the hard gates (logged and stamped in flow_json["or_live"]). Fails closed: False on any doubt."""
+    try:
+        if not hit or not _or_live.allow(hit, ist_now(), key=(mode, symbol)):
+            return False
+        decision.flow_json = _or_live.stamp(getattr(decision, "flow_json", None), hit)
+        logger.info("OR_LIVE[%s/%s] rule %s let the entry through (%s); rescue %d of %d today (budget: %s)", mode, symbol, hit.get("rule"),
+                    "; ".join(f"{k}={v}" for k, v in hit.items() if k != "refused"), _or_live.used_today(), int(getattr(config, "OR_LIVE_MAX_PER_DAY", 4)), _or_live.budget_source())
+        return True
+    except Exception:  # noqa: BLE001
+        logger.debug("or_live allow failed for %s (no rescue)", symbol, exc_info=True)
+        return False
+
+
 def _or_shadow_record(decision, mode: str, symbol: str, hit: Optional[dict]) -> None:
     """Round 599: log one OR_SHADOW line and stamp flow_json["or_shadow"] for a rule that WOULD have let this refused entry in. Record only: the entry stays refused. Never raises."""
     try:
@@ -768,7 +803,38 @@ def _preopen_gap_or_waive(symbol: str, db, waived: list, pen: Optional[dict] = N
     return reason
 
 
+def _or_live_settle(mode: str, res: Any) -> None:
+    """Round 614: after a cycle, give back the live OR rescues of this mode whose entry did not become an order. `res` is evaluate_mode's result (None when the cycle raised: nothing is
+    given back). A rescue stays spent when its symbol has an ENTER row, an uncertain / circuit-rejected BUY, or when anything is in doubt. Never raises."""
+    try:
+        keys = [k for k in _or_live.pending_keys() if isinstance(k, tuple) and len(k) == 2 and k[0] == mode]
+        if not keys:
+            return
+        details = res.get("entry_details") if isinstance(res, dict) else None
+        entered = {d.get("symbol") for d in details if isinstance(d, dict) and d.get("action") == "ENTER"} if isinstance(details, list) else None
+        for k in keys:
+            sym = k[1]
+            if entered is None or sym in entered or _uncertain_buy_active(mode, sym):
+                _or_live.keep(k)
+            elif _or_live.give_back(k):
+                logger.info("OR_LIVE[%s/%s] rescue given back (no order followed); %d of %d used today", mode, sym, _or_live.used_today(), int(getattr(config, "OR_LIVE_MAX_PER_DAY", 4)))
+    except Exception:  # noqa: BLE001 - a budget note never changes a cycle
+        logger.debug("or_live settle failed (rescues stay spent)", exc_info=True)
+
+
 async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
+    """Round 614: the entry cycle (_evaluate_mode_impl) plus the settling of its live OR rescues (_or_live_settle)."""
+    for _k in [k for k in _or_live.pending_keys() if isinstance(k, tuple) and len(k) == 2 and k[0] == mode]:
+        _or_live.keep(_k)      # left over from a cycle that never finished: stays spent
+    res = None
+    try:
+        res = await _evaluate_mode_impl(db, mode, gate_armed)
+        return res
+    finally:
+        _or_live_settle(mode, res)
+
+
+async def _evaluate_mode_impl(db: Session, mode: str, gate_armed: bool) -> dict:
     await _rearm_requeue(db, mode)
     candidates = _fetch_candidates(db, mode)
     if not candidates:
@@ -1552,9 +1618,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 _stamp_event = _pev
                 if tick is not None and (_pev is not None or _s2_on or _s3_on):
                     if _pev is not None:
-                        _bars = await asyncio.to_thread(lambda s=cand.symbol: orb_bars.fetch_now(s) or orb_bars.get_bars(s))
+                        _bars = await asyncio.to_thread(lambda s=cand.symbol: orb_bars.fetch_now(s) or orb_bars.get_bars(s, priority=True))
                     else:
-                        _bars = orb_bars.get_bars(cand.symbol)               # cached, never blocks; the next cycle has it
+                        _bars = orb_bars.get_bars(cand.symbol, priority=True)    # cached, never blocks; round 610: a free slot or the queue serves it, the next cycle has it
                     _orb = orb_bars.range_trigger(_bars)
                     _flow = _of.parse(getattr(decision, "flow_json", None))
                     _gap_now = preopen.gap_for(cand.symbol)
@@ -1593,7 +1659,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         _vw_or = _orb.get("vwap") if isinstance(_orb, dict) else None
                         _or_ctx = {"event": _pev, "above_vwap": (bool(float(tick.price) > float(_vw_or)) if _vw_or else None),
                                    "sector_third": (_inputs or {}).get("sector_third") if isinstance(_inputs, dict) else None,
-                                   "priced_in": (_inputs or {}).get("event_priced_in") if isinstance(_inputs, dict) else None}
+                                   "priced_in": (_inputs or {}).get("event_priced_in") if isinstance(_inputs, dict) else None,
+                                   "imbalance": _flow.get("imbalance_5") if isinstance(_flow, dict) else None}
                     except Exception:  # noqa: BLE001
                         _or_ctx = None
                     _ns_all_ran = bool(_s1_on and _s2_on and _s3_on)
@@ -1610,9 +1677,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                     logger.info("entry_engine: %s %s risk x%.2f for its ladder stage", mode, cand.symbol, _rm)
                             except Exception:  # noqa: BLE001 - the ladder only loosens; a failure keeps the base risk
                                 logger.debug("entry: ladder risk multiple failed (base risk)", exc_info=True)
-            except Exception:  # noqa: BLE001 - the setup walk must never stop an entry
-                _setup_res, _setup_mult = None, None
-                logger.debug("entry_engine: setup walk failed for %s (legacy stamp, full size)", cand.symbol, exc_info=True)
+            except Exception as _walk_exc:  # noqa: BLE001 - the setup walk must not crash the cycle; round 600: but a failed walk no longer lets a plain entry through
+                # Round 600: this used to log at DEBUG and leave _setup_res None, which window_no_setup_refusal reads as "no walk result" and lets the entry go on, so a broken
+                # walk silently turned every candidate into a plain shortlist entry. Now the failure is counted, logged at WARNING (once per symbol per 300 s) and marked
+                # why="walk_error": inside the OPENING_NO_SETUP window that WAITs (looked at again next cycle); a pullback re-arm entry is still exempt there.
+                _setup_res, _setup_mult = {"id": None, "skip": "NO_SETUP", "why": "walk_error"}, None
+                _walk_error_note(cand.symbol, _walk_exc)
         # E273 round 20: a gap-up refusal that was waived for a positive event stands unless S1 matched (closed bar above the opening-range high, price over the pre-open price).
         _gu_reject = gap_event.unconfirmed_reason(_gap_waived, (_setup_res or {}).get("id"))
         if _gu_reject:
@@ -1633,11 +1703,14 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _wns_reject = setup_live.window_no_setup_refusal(
             _setup_res, now=ist_now(), exempt=bool(_rearm.has_waiver(mode, cand.symbol)), enabled=bool(getattr(config, "OPENING_NO_SETUP_REFUSE", True)),
             until=str(getattr(config, "OPENING_NO_SETUP_UNTIL_IST", "15:30")), since=str(getattr(config, "OPENING_NO_SETUP_SINCE_IST", "09:20")))
+        if _wns_reject and isinstance(_or_ctx, dict) and not (isinstance(_setup_res, dict) and _setup_res.get("why") == "walk_error"):   # a failed setup walk is never rescued
+            _or_shadow_record(decision, mode, cand.symbol, _or_shadow.rule_b(            # round 599: shadow rule B (record only)
+                _wns_reject, _or_ctx.get("event"), _or_ctx.get("above_vwap"), _or_ctx.get("sector_third"), _or_ctx.get("priced_in"),
+                float(getattr(config, "OR_SHADOW_MIN_EVENT_STRENGTH", 0.5))))
+            if _or_live_allow(decision, mode, cand.symbol, _or_live.rule_b(               # round 612: LIVE rule B - VWAP + 2 of event / sector top / order flow; hard gates still follow
+                    _wns_reject, _or_ctx.get("event"), _or_ctx.get("above_vwap"), _or_ctx.get("sector_third"), _or_ctx.get("imbalance"), _or_ctx.get("priced_in"))):
+                _wns_reject = None
         if _wns_reject:
-            if isinstance(_or_ctx, dict):          # round 599: shadow rule B (record only)
-                _or_shadow_record(decision, mode, cand.symbol, _or_shadow.rule_b(
-                    _wns_reject, _or_ctx.get("event"), _or_ctx.get("above_vwap"), _or_ctx.get("sector_third"), _or_ctx.get("priced_in"),
-                    float(getattr(config, "OR_SHADOW_MIN_EVENT_STRENGTH", 0.5))))
             _wait_with_preview(_wns_reject)
             decision.gate_tag = "no_setup_window"
             db.add(decision)
@@ -1647,6 +1720,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _stack_reject = size_floor.stacked_refusal(_soft_pen, _floor_lifted)      # E285 round 152 (plan item 7): stacked soft penalties skip, they are not lifted
         if _stack_reject:
             _or_shadow_record(decision, mode, cand.symbol, _or_shadow.rule_a(_stack_reject, _setup_res))      # round 599: shadow rule A (record only)
+            if _or_live_allow(decision, mode, cand.symbol, _or_live.rule_a(_stack_reject, _setup_res)):        # round 612: LIVE rule A - a matched setup; goes in at the floor-lifted size
+                _stack_reject = ""
+        if _stack_reject:
             _wait_with_preview(_stack_reject)
             decision.gate_tag = "soft_stack"
             db.add(decision)

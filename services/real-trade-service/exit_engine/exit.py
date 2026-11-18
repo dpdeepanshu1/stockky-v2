@@ -1913,7 +1913,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         and 9 * 60 + 45 <= now.astimezone(IST).hour * 60 + now.astimezone(IST).minute < 15 * 60
                         and _sm.due(int(position.id), time.monotonic())):
                     from entry_engine import orb_bars as _ob
-                    _sm_v = _sm.evaluate(bars_1m=_ob.get_bars(position.symbol), entry=position.avg_entry_price, stop=position.current_stop, ltp=ltp, qty=position.qty_open,
+                    _sm_v = _sm.evaluate(bars_1m=_ob.get_bars(position.symbol, priority=True), entry=position.avg_entry_price, stop=position.current_stop, ltp=ltp, qty=position.qty_open,
                                          opened_at=as_aware(position.opened_at), now=now, tick=dhan_client.tick_size_for_price(ltp))
                     _sm_applied = False
                     if _sm_v["action"] == "TIGHTEN" and _usable_positive(_sm_v.get("new_stop")) is not None:   # E354: same
@@ -2012,7 +2012,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     if config.PROFIT_LOCK_MODE != "off" and _ig_best is not None and ltp > position.avg_entry_price:
                         from entry_engine import orb_bars as _ob_pl
                         from exit_engine import momentum_health as _mh_pl
-                        _pl_rng = _mh_pl.avg_range_pct(_ob_pl.get_bars(position.symbol), 10)
+                        _pl_rng = _mh_pl.avg_range_pct(_ob_pl.get_bars(position.symbol, priority=True), 10)
                         _pl_v = _ig.profit_lock(position.avg_entry_price, _ig_best, ltp, position.current_stop, _pl_rng, dhan_client.tick_size_for_price(ltp),
                                                 range_mult=config.PROFIT_LOCK_RANGE_MULT, min_gap_pct=config.PROFIT_LOCK_MIN_GAP_PCT,
                                                 max_gap_pct=config.PROFIT_LOCK_MAX_GAP_PCT, fallback_gap_pct=config.PROFIT_LOCK_FALLBACK_GAP_PCT,

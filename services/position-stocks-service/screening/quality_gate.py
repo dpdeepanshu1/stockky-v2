@@ -913,7 +913,11 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
             _sig.event_type, _sig.event_polarity, _sig.event_strength = _te["type"], _te["polarity"], _te["strength"]
             _sig.event_age_min, _sig.announced_at = _te["age_min"], _te["announced_at"]
     # only a complete LIVE answer is reused; anything that fell back to the cache or lost the event call is fetched again next time
-    if _ttl > 0 and not _ev_failed and None not in (fund_score, tech_score, market_cap_cr):
+    # round 655: market cap is legitimately missing for some small caps (the fundamental service answers 200 with market_cap None, e.g.
+    # STEAMHOUSE), so requiring it kept those symbols out of the cache and every shortlist pass re-fetched fund + tech (~every 31 s in the
+    # 19 Nov VM log, against a 90 s TTL). A live fund AND tech score is enough; QUALITY_GATE_CACHE_NO_MCAP=0 restores the old rule.
+    _need = (fund_score, tech_score) if getattr(config, "QUALITY_GATE_CACHE_NO_MCAP", True) else (fund_score, tech_score, market_cap_cr)
+    if _ttl > 0 and not _ev_failed and None not in _need:
         if len(_result_cache) > 2000:
             _result_cache.clear()
         _result_cache[symbol] = (_time.monotonic(), dataclasses.replace(_sig))

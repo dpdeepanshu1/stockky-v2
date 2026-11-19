@@ -198,10 +198,11 @@ def test_sync_simultaneous_starts_run_one_sync():
     res = _hammer(m.start_sync_background)
     time.sleep(0.2)
     release.set()
-    for _ in range(50):
-        if m.get_sync_job()["status"] == "done":
-            break
-        time.sleep(0.05)
+    # Round 643: wait on a deadline, not 50 short sleeps (2.5 s): on a loaded CI runner the worker thread can take
+    # longer than that to be scheduled after the release, and the test then read "running".
+    deadline = time.time() + 15
+    while time.time() < deadline and m.get_sync_job()["status"] != "done":
+        time.sleep(0.02)
     assert len(runs) == 1, runs
     assert sum(1 for r in res if r.get("status") == "started") == 1
     assert sum(1 for r in res if r.get("status") == "already_running") == len(res) - 1

@@ -75,17 +75,35 @@ def test_next_call_starts_a_build_and_loads_it(monkeypatch):
     assert vp._state["profile"]["days"] == 5
 
 
-def test_warning_is_logged_once_per_window(caplog):
+def test_warning_is_logged_once_per_window():
+    import logging
     _fresh()
     real = threading.Thread
     threading.Thread = _FailThread
+    lg = logging.getLogger("position-stocks-volume-profile")
+    msgs = []
+
+    class _H(logging.Handler):
+        def emit(self, record):
+            msgs.append(record.getMessage())
+    h = _H(level=logging.WARNING)
+    # Round 645: own handler instead of caplog (caplog.at_level does not lift logging.disable, and an earlier test in a
+    # full run can leave logging disabled); set the state here and restore it afterwards.
+    saved = (lg.level, lg.disabled, logging.root.manager.disable)
+    lg.setLevel(logging.WARNING)
+    lg.disabled = False
+    logging.disable(logging.NOTSET)
+    lg.addHandler(h)
     try:
-        with caplog.at_level("WARNING", logger="position-stocks-volume-profile"):
-            for _ in range(5):
-                vp._profile()
+        for _ in range(5):
+            vp._profile()
     finally:
         threading.Thread = real
-    msgs = [r for r in caplog.records if "could not start the build thread" in r.getMessage()]
+        lg.removeHandler(h)
+        lg.setLevel(saved[0])
+        lg.disabled = saved[1]
+        logging.disable(saved[2])
+    msgs = [m for m in msgs if "could not start the build thread" in m]
     assert len(msgs) == 1
 
 

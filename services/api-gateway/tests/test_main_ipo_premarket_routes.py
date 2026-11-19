@@ -689,6 +689,9 @@ class TestPremarketSymbolParsing:
     def test_force_and_background_flag_parsing(self, ienv, threads, value, expected):
         _premarket(_jbody(["A"]), background=value)
         assert bool(threads) is expected                                   # a thread only when background
+        # Round 643: the first (background) call claims the starting flag and the fake thread never clears it,
+        # so the second call would answer already_running and never reach base_calls.
+        gw._surprise_premarket_starting = False
         _premarket(_jbody(["A"]), background="false", force=value)
         assert ienv.base_calls[-1]["force"] is (value.lower() in ("1", "true", "yes"))
 

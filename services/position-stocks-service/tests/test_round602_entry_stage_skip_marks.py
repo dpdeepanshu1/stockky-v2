@@ -58,8 +58,20 @@ def test_a_slow_skip_names_the_slow_step_and_the_reason():
             def emit(self, rec):
                 records.append(rec)
         lg = logging.getLogger("position-stocks-entry-stage")
-        lg.addHandler(H())
-        line = t.end("skip SYMBOL_HELD_BY_OTHER_SERVICE")
+        h = H()
+        # Round 643: an earlier test in a full run can leave logging disabled or the level raised; set it here, restore below.
+        saved_log = (lg.level, lg.disabled, logging.root.manager.disable)
+        lg.setLevel(logging.WARNING)
+        lg.disabled = False
+        logging.disable(logging.NOTSET)
+        lg.addHandler(h)
+        try:
+            line = t.end("skip SYMBOL_HELD_BY_OTHER_SERVICE")
+        finally:
+            lg.removeHandler(h)
+            lg.setLevel(saved_log[0])
+            lg.disabled = saved_log[1]
+            logging.disable(saved_log[2])
     finally:
         t.time.perf_counter = orig
     assert line and "skip SYMBOL_HELD_BY_OTHER_SERVICE" in line and "skip_log_write 3.08s" in line

@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import config
@@ -103,6 +103,11 @@ def _parse_day(v: Any) -> Optional[date]:
         return None
 
 
+def _ist_today(now_utc: Optional[datetime] = None) -> date:
+    """Round 641: today's date in IST. The servers run in UTC, so date.today() is the previous day from 00:00 to 05:30 IST."""
+    return (now_utc or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=5, minutes=30))).date()
+
+
 def summarize_ip_status(data: Any, outbound_ip: Optional[str] = None, today: Optional[date] = None) -> Dict[str, Any]:
     """One verdict from Dhan's getIP answer. verdict: OK | MISMATCH | NOT_CONFIGURED | ORDERS_NOT_ALLOWED | UNKNOWN.
     outbound_ip is what an IP-echo service says this host uses; Dhan's own detectedIP wins when they differ. A change can be made when its modifyDate is today or earlier."""
@@ -112,7 +117,7 @@ def summarize_ip_status(data: Any, outbound_ip: Optional[str] = None, today: Opt
         if not isinstance(data, dict):
             out["advice"] = "Dhan's answer was not a JSON object; nothing could be read."
             return out
-        t = today or date.today()
+        t = today or _ist_today()                      # round 641: Dhan's modify dates are IST days
         status_txt = (_text(data.get("ipMatchStatus")) or "").upper() or None
         out.update({"ip_match_status": status_txt, "detected_ip": _text(data.get("detectedIP")), "primary_ip": _text(data.get("primaryIP")), "secondary_ip": _text(data.get("secondaryIP")),
                     "modify_date_primary": _text(data.get("modifyDatePrimary")), "modify_date_secondary": _text(data.get("modifyDateSecondary"))})

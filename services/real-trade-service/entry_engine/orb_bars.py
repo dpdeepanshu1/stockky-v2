@@ -95,6 +95,20 @@ def _fetch_one(key: Tuple[str, str]) -> None:
             _inflight.discard(key)
 
 
+_start_warn_at = -1e9
+
+
+def _warn_start_failed(e: BaseException) -> None:
+    """Round 640: one warning per minute at most when a fetch thread cannot be started (the slot has already been given back)."""
+    global _start_warn_at
+    mono = time.monotonic()
+    with _lock:
+        if mono - _start_warn_at < 60.0:
+            return
+        _start_warn_at = mono
+    logger.warning("orb bars: could not start a fetch thread (%s); the slot was freed and the name is retried after the refresh window", e)
+
+
 def _next_wanted(mono: Optional[float] = None) -> Optional[Tuple[str, str]]:
     """Round 610: the oldest still-fresh queued priority request, reserved for the calling worker thread (it is put in _inflight and stamped in _last_try), or None.
     Entries older than WANT_TTL_S, already in flight or fetched inside REFRESH_S meanwhile are dropped."""
@@ -170,7 +184,12 @@ def get_bars(symbol: str, now_mono: Optional[float] = None, now: Optional[dateti
                     _wanted[key] = mono
                     _stats["queued"] += 1
         if start:
-            threading.Thread(target=_worker, args=(key,), name="orb-bars", daemon=True).start()
+            try:
+                threading.Thread(target=_worker, args=(key,), name="orb-bars", daemon=True).start()
+            except Exception as e:  # noqa: BLE001 - round 640: only _fetch_one's finally gives the slot back, and it never ran
+                with _lock:
+                    _inflight.discard(key)          # _last_try[key] stays: the name waits one REFRESH_S before the next try
+                _warn_start_failed(e)
         return list(got["bars"]) if got else None
     except Exception as e:  # noqa: BLE001
         logger.debug("orb get_bars failed: %s", e)
@@ -421,6 +440,8 @@ def stats() -> Dict[str, int]:
 
 
 def _reset_for_tests() -> None:
+    global _start_warn_at
+    _start_warn_at = -1e9
     global _fetch
     with _lock:
         _cache.clear(); _last_try.clear(); _inflight.clear(); _wanted.clear()

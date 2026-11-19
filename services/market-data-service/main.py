@@ -453,6 +453,37 @@ _STARTUP_HOOKS: list = []
 _SHUTDOWN_HOOKS: list = []
 
 
+_BG_LOOP_TASKS: set = set()   # round 642: the event loop keeps only a weak reference to a task, so a start-up loop nobody holds can be garbage-collected
+
+
+def _keep_task(task, name: str, forever: bool = True):
+    """Hold a strong reference to a start-up task until it ends, and say so in the log when it dies (an exception in a task nobody awaits is otherwise
+    only reported when the task is garbage-collected, and the loop is silently gone). `forever=True` marks a loop that should never return."""
+    try:
+        _BG_LOOP_TASKS.add(task)
+    except TypeError:        # not a task (a test double): nothing to hold, nothing to watch
+        return task
+
+    def _done(t):
+        _BG_LOOP_TASKS.discard(t)
+        try:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("%s stopped with an error: %s: %s", name, type(exc).__name__, str(exc)[:200])
+            elif forever:
+                logger.warning("%s returned and is no longer running", name)
+        except Exception:  # noqa: BLE001 - logging only
+            pass
+
+    try:
+        task.add_done_callback(_done)
+    except Exception:  # noqa: BLE001 - a test double without callbacks
+        _BG_LOOP_TASKS.discard(task)
+    return task
+
+
 def _on_startup(fn):
     _STARTUP_HOOKS.append(fn)
     return fn
@@ -653,7 +684,7 @@ async def _boot_feed_fallback():
 @_on_startup
 async def _start_boot_feed_fallback():
     if _boot_defers_feeds():
-        asyncio.create_task(_boot_feed_fallback())
+        _keep_task(asyncio.create_task(_boot_feed_fallback()), "boot feed fallback", forever=False)
 
 
 # ── Issue 2 fix: keep both WS feeds pointed at the REAL candidate universe ──
@@ -790,7 +821,7 @@ async def _refresh_feed_universe_loop():
 
 @_on_startup
 async def _start_feed_universe_refresh():
-    asyncio.create_task(_refresh_feed_universe_loop())
+    _keep_task(asyncio.create_task(_refresh_feed_universe_loop()), "feed universe refresh loop", forever=False)   # it returns (and logs) when API_GATEWAY_URL is unset
 
 
 @_on_startup

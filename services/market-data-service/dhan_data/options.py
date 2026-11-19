@@ -21,7 +21,7 @@ import re
 import threading
 import time
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import config
@@ -180,10 +180,15 @@ def _set_for_tests(rows: Iterable[OptionContract]) -> None:
         _loaded_at = time.time()
 
 
+def _ist_today(now_utc: Optional[datetime] = None) -> date:
+    """Round 641: today's date in IST. The servers run in UTC, so date.today() is the previous day from 00:00 to 05:30 IST."""
+    return (now_utc or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=5, minutes=30))).date()
+
+
 def list_expiries(underlying: str, today: Optional[date] = None) -> List[str]:
     """Sorted future-or-today expiries known from the scrip master for one underlying."""
     u = (underlying or "").upper()
-    t = (today or date.today()).isoformat()
+    t = (today or _ist_today()).isoformat()          # round 641: contract expiries are IST days
     with _lock:
         ex = {k[1] for k in _contracts if k[0] == u and k[1] >= t}
     return sorted(ex)

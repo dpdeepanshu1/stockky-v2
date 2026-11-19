@@ -57,6 +57,8 @@ class PrevDay(NamedTuple):
 
 
 def reset() -> None:
+    global _start_warn_at
+    _start_warn_at = -1e9
     with _lock:
         _cache.clear()
         _inflight.clear()
@@ -172,6 +174,20 @@ def peek(symbol: str) -> Optional[PrevDay]:
     return hit[1] if hit and hit[0] == ist_today_str() else None
 
 
+_start_warn_at = -1e9
+
+
+def _warn_start_failed(e: BaseException) -> None:
+    """Round 640: one warning per minute at most when a fetch thread cannot be started (the slot has already been given back)."""
+    global _start_warn_at
+    mono = time.monotonic()
+    with _lock:
+        if mono - _start_warn_at < 60.0:
+            return
+        _start_warn_at = mono
+    logger.warning("prev_day: could not start a fetch thread (%s); the slot was freed and the symbol is retried after the retry window", e)
+
+
 def get(symbol: str) -> Optional[PrevDay]:
     """Cached value for today; on a miss starts a background fetch and returns None."""
     try:
@@ -189,7 +205,12 @@ def get(symbol: str) -> Optional[PrevDay]:
         if _INLINE:
             _worker(symbol)
             return peek(symbol)
-        threading.Thread(target=_worker, args=(symbol,), name=f"prevday-{symbol}", daemon=True).start()
+        try:
+            threading.Thread(target=_worker, args=(symbol,), name=f"prevday-{symbol}", daemon=True).start()
+        except Exception as e:  # round 640: only _worker's finally gives the slot back, and it never ran
+            with _lock:
+                _inflight.discard(symbol)           # _last_try[symbol] stays: one PREVDAY_RETRY_S wait before the next try
+            _warn_start_failed(e)
     except Exception as e:
         logger.debug("prev_day.get(%s): %s", symbol, e)
     return None

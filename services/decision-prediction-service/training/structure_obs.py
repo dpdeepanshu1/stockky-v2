@@ -347,13 +347,18 @@ def row_to_dict(r: Any) -> Dict[str, Any]:
     return d
 
 
+def _ist_today(now_utc: Optional[datetime] = None) -> date:
+    """Round 641: today's date in IST. The servers run in UTC, so date.today() is the previous day from 00:00 to 05:30 IST."""
+    return (now_utc or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=5, minutes=30))).date()
+
+
 def evaluate_pending(db: Any, M: Any, fetch_bars: Callable[[str], Any], fetch_bench: Optional[Callable[[], Any]] = None,
                      max_batch: int = 50, today: Optional[date] = None,
                      fetch_sector_bench: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
     """Score observations that are not 'done'. One history fetch per symbol per call. A row whose bars never arrive is left pending and given up
     on (eval_status 'no_data') GIVE_UP_DAYS after its observation day. Returns counts; never raises."""
     res = {"considered": 0, "evaluated": 0, "done": 0, "waiting": 0, "no_data": 0, "errors": 0}
-    today = today or date.today()
+    today = today or _ist_today()
     try:
         rows = db.query(M).filter(M.eval_status.in_(("pending", "partial"))).limit(max(1, min(int(max_batch), 300)) * 4).all()
     except Exception:  # noqa: BLE001
@@ -412,7 +417,7 @@ def evaluate_pending(db: Any, M: Any, fetch_bars: Callable[[str], Any], fetch_be
 
 
 def report(db: Any, M: Any, days: int = 60, min_n: int = 30, limit: int = 20000, today: Optional[date] = None) -> Dict[str, Any]:
-    today = today or date.today()
+    today = today or _ist_today()
     since = (today - timedelta(days=max(1, min(int(days), 400)))).isoformat()
     rows = [row_to_dict(r) for r in db.query(M).order_by(M.id.desc()).limit(limit).all()]
     rows = [r for r in rows if r.get("obs_date") and r["obs_date"] >= since]

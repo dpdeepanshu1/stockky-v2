@@ -1442,6 +1442,7 @@ services/decision-prediction-service/training/tests/test_group401_sector_relativ
 services/decision-prediction-service/training/tests/test_identity_once_and_engine_cache.py
 services/decision-prediction-service/training/tests/test_learning_insights_honest.py
 services/decision-prediction-service/training/tests/test_oracle_first_db_url.py
+services/decision-prediction-service/training/tests/test_round641_structure_obs_ist_day.py
 services/decision-prediction-service/training/tests/test_scanner_cache.py
 services/decision-prediction-service/training/trades.py
 services/decision-prediction-service/training/trading.py
@@ -1800,6 +1801,8 @@ services/market-data-service/tests/test_round607_yf_bulk_gate.py
 services/market-data-service/tests/test_round634_job_claim.py
 services/market-data-service/tests/test_round635_writer_start_claim.py
 services/market-data-service/tests/test_round637_dhan_start_steps.py
+services/market-data-service/tests/test_round641_options_ist_day.py
+services/market-data-service/tests/test_round642_startup_tasks_kept.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -1857,6 +1860,7 @@ services/notification-scheduler-service/tests/test_round206_stale_muted.py
 services/notification-scheduler-service/tests/test_round539_history.py
 services/notification-scheduler-service/tests/test_round631_start_claims.py
 services/notification-scheduler-service/tests/test_round639_session_proof_start_claim.py
+services/notification-scheduler-service/tests/test_round642_startup_tasks_kept.py
 services/notification-scheduler-service/tests/test_session_proof_is_holiday.py
 services/notification-scheduler-service/tests/test_telegram_long_message_split.py
 services/notification-scheduler-service/tests/test_telegram_token_redaction.py
@@ -2373,6 +2377,8 @@ services/position-stocks-service/tests/test_round616_entry_stage_finer_marks.py
 services/position-stocks-service/tests/test_round636_own_norms_start_claim.py
 services/position-stocks-service/tests/test_round638_volume_profile_start_claim.py
 services/position-stocks-service/tests/test_round639_session_proof_start_claim.py
+services/position-stocks-service/tests/test_round640_prev_day_start_claim.py
+services/position-stocks-service/tests/test_round641_ip_guard_ist_day.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -3000,6 +3006,8 @@ services/real-trade-service/tests/test_round620_watchlist_late_cutoff.py
 services/real-trade-service/tests/test_round632_swing_scan_claim.py
 services/real-trade-service/tests/test_round636_own_norms_start_claim.py
 services/real-trade-service/tests/test_round639_session_proof_start_claim.py
+services/real-trade-service/tests/test_round640_orb_bars_start_claim.py
+services/real-trade-service/tests/test_round640_prev_day_start_claim.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

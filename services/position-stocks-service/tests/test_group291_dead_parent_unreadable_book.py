@@ -20,6 +20,12 @@ from tests.test_reconcile import (env, mkpos, super_row, plain_row, available, s
 from orders import reconcile
 
 
+def _ist_str(dt):
+    """Dhan's createTime is IST wall-clock text; round 647 reads a bare time as IST, so the test row must be written in IST too (the position's opened_at is UTC)."""
+    from tz_utils import IST, as_aware
+    return as_aware(dt).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     monkeypatch.setattr(reconcile, "_order_list_cache", (0.0, []))
@@ -33,7 +39,7 @@ def _fresh(monkeypatch):
 def _buy(p, avg, qty=None, status="TRADED"):
     return plain_row("B1", status=status, avg=avg, transactionType="BUY", securityId=p.dhan_security_id,
                      quantity=qty or p.quantity, filledQty=qty or p.quantity,
-                     createTime=p.opened_at.strftime("%Y-%m-%d %H:%M:%S"))
+                     createTime=_ist_str(p.opened_at))
 
 
 def _sell(p, avg, oid="S1"):

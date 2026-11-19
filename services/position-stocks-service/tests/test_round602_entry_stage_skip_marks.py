@@ -43,7 +43,8 @@ def test_attempt_entry_names_the_skip_reason():
 
 def test_a_slow_skip_names_the_slow_step_and_the_reason():
     config.ENTRY_STAGE_LOG, config.ENTRY_STAGE_SLOW_S, config.ENTRY_STAGE_MIN_S = True, 1.0, 0.1
-    clock = iter([0.0, 0.05, 0.10, 0.12, 3.20, 3.21])     # begin, gate_state, symbol_claim, skip_gate_logic, skip_log_write (3.08 s), end
+    config.ENTRY_STAGE_SLOW_SKIP_S = 5.0
+    clock = iter([0.0, 0.05, 0.10, 0.12, 6.20, 6.21])     # begin, gate_state, symbol_claim, skip_gate_logic, skip_log_write (6.08 s: over ENTRY_STAGE_SLOW_SKIP_S, round 649), end
     orig = t.time.perf_counter
     t.time.perf_counter = lambda: next(clock)
     try:
@@ -74,7 +75,7 @@ def test_a_slow_skip_names_the_slow_step_and_the_reason():
             logging.disable(saved_log[2])
     finally:
         t.time.perf_counter = orig
-    assert line and "skip SYMBOL_HELD_BY_OTHER_SERVICE" in line and "skip_log_write 3.08s" in line
+    assert line and "skip SYMBOL_HELD_BY_OTHER_SERVICE" in line and "skip_log_write 6.08s" in line
     assert "after_last_mark" not in line                     # the lump is gone: the slow step has its own name
     assert len(records) == 1
 

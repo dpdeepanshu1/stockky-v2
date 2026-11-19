@@ -1425,6 +1425,10 @@ def _fetch_events(symbol: str, force: bool = False) -> dict:
         ev.set()
 
 
+def _empty_negcache_s() -> float:
+    return env_float_safe("EVENT_EMPTY_NEGCACHE_S", 300, lo=0, hi=3600)
+
+
 def _fetch_events_impl(symbol: str, force: bool = False) -> dict:
     sym = _normalize(symbol)
     cache_key = f"{EVENT_CACHE_PREFIX}{sym}"
@@ -1597,6 +1601,16 @@ def _fetch_events_impl(symbol: str, force: bool = False) -> dict:
         return result
 
     stale = _redis_get(fallback_key)
+    if not stale:
+        # round 651: nothing found and no older answer to serve. Round 619 left this uncached on purpose (an empty answer can be an outage), but
+        # with nothing remembered the same name was fetched in full on every pass: 19 Nov log, GHCLTEXTIL 6x, BLUECLOUDS 4x, SHRINGARMS 3x in 15 min,
+        # every source "0 items" while Yahoo was paused. A short negative entry (EVENT_EMPTY_NEGCACHE_S, default 300; 0 = off) bounds the retry
+        # rate while an outage clears in minutes. It is NOT written to the fallback key, so it never stands in for real data later.
+        neg_ttl = _empty_negcache_s()
+        if neg_ttl > 0:
+            logger.info(f"Nothing found for {sym}; not fetching it again for {neg_ttl:.0f}s")
+            _redis_set(cache_key, {**result, "cached": True, "empty_negcache": True}, ttl=int(neg_ttl))
+        return result
     if stale:
         logger.info(f"Live fetch for {sym} empty; serving fallback")
         stale = {**(_apply_news_age(stale) or stale), "cached": True, "stale": True}   # round 600: the fallback is age-filtered too

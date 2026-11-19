@@ -1038,6 +1038,7 @@ STOP_WATCHDOG_LEG_LOG = _get_bool("STOP_WATCHDOG_LEG_LOG", True)   # round 223: 
 ENTRY_STAGE_LOG = _get_bool("ENTRY_STAGE_LOG", True)               # round 225: time the stages of one attempt_entry call (log only)
 ENTRY_STAGE_SLOW_S = _get_float("ENTRY_STAGE_SLOW_S", 1.0)         # one WARNING with the slow stages when a call takes at least this long (0 = never)
 ENTRY_STAGE_MIN_S = _get_float("ENTRY_STAGE_MIN_S", 0.1)           # a stage must take this long to be listed
+ENTRY_STAGE_SLOW_SKIP_S = _get_float("ENTRY_STAGE_SLOW_SKIP_S", 5.0)  # round 649: a call that ended in a SKIP is logged at INFO below this many seconds, WARNING from here (0 = every slow skip is a WARNING again)
 STOP_WATCHDOG_RETRY_S = _get_float("STOP_WATCHDOG_RETRY_S", 30.0)                # wait after a rejected watchdog exit
 # Read-back after every stop move (dhan_client.verify_stop_leg): the stop is saved as moved only when Dhan's own leg shows it. Unreadable =
 # fails open (as before). STOP_VERIFY_ENABLED=0 = off.

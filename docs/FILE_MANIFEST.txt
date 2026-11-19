@@ -2379,6 +2379,10 @@ services/position-stocks-service/tests/test_round638_volume_profile_start_claim.
 services/position-stocks-service/tests/test_round639_session_proof_start_claim.py
 services/position-stocks-service/tests/test_round640_prev_day_start_claim.py
 services/position-stocks-service/tests/test_round641_ip_guard_ist_day.py
+services/position-stocks-service/tests/test_round647_entry_fill_single_match_time.py
+services/position-stocks-service/tests/test_round648_exit_fill_before_open.py
+services/position-stocks-service/tests/test_round649_entry_slow_skip_info.py
+services/position-stocks-service/tests/test_round650_sized_down_log_after_last_check.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py

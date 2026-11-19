@@ -8,6 +8,12 @@ from tests.test_reconcile import (env, mkpos, super_row, plain_row, available, l
 from orders import reconcile
 
 
+def _ist_str(dt):
+    """Dhan's createTime is IST wall-clock text; round 647 reads a bare time as IST, so the test row must be written in IST too (the position's opened_at is UTC)."""
+    from tz_utils import IST, as_aware
+    return as_aware(dt).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     monkeypatch.setattr(reconcile, "_order_list_cache", (0.0, []))
@@ -149,7 +155,7 @@ class TestCancelledRemainderOfAPartFill:
         b.super_orders = [super_row("SO1", status="REJECTED", filledQty=21, quantity=21)]
         b.plain_orders = [
             plain_row("B1", avg=107.17, transactionType="BUY", securityId=p.dhan_security_id, quantity=21, filledQty=21,
-                      createTime=p.opened_at.strftime("%Y-%m-%d %H:%M:%S")),
+                      createTime=_ist_str(p.opened_at)),
             plain_row("S1", avg=107.99, transactionType="SELL", securityId=p.dhan_security_id, quantity=21, filledQty=21),
         ]
         assert reconcile.run_exit_reconciliation(db) == 1

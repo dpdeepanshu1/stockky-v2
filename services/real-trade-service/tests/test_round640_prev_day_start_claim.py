@@ -41,12 +41,20 @@ class _Rig:
             def emit(h, record):
                 self.log.append(record.getMessage())
         self.h = _H(level=logging.WARNING)
+        # Round 643: a full run can leave logging disabled or the level raised by an earlier test; set what this rig needs.
+        self.log_state = (PD.logger.level, PD.logger.disabled, logging.root.manager.disable)
+        PD.logger.setLevel(logging.WARNING)
+        PD.logger.disabled = False
+        logging.disable(logging.NOTSET)
         PD.logger.addHandler(self.h)
         return self
 
     def __exit__(self, *a):
         threading.Thread, PD._INLINE, PD._fetch_candles = self.saved
         PD.logger.removeHandler(self.h)
+        PD.logger.setLevel(self.log_state[0])
+        PD.logger.disabled = self.log_state[1]
+        logging.disable(self.log_state[2])
         PD.reset()
 
 

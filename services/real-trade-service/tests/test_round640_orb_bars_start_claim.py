@@ -44,12 +44,20 @@ class _Rig:
             def emit(h, record):
                 self.log.append(record.getMessage())
         self.h = _H(level=logging.WARNING)
+        # Round 643: a full run can leave logging disabled or the level raised by an earlier test; set what this rig needs.
+        self.log_state = (OB.logger.level, OB.logger.disabled, logging.root.manager.disable)
+        OB.logger.setLevel(logging.WARNING)
+        OB.logger.disabled = False
+        logging.disable(logging.NOTSET)
         OB.logger.addHandler(self.h)
         return self
 
     def __exit__(self, *a):
         threading.Thread, OB.FETCH_ON, OB.MAX_INFLIGHT, OB.PRIORITY_RESERVE, OB._fetch = self.saved
         OB.logger.removeHandler(self.h)
+        OB.logger.setLevel(self.log_state[0])
+        OB.logger.disabled = self.log_state[1]
+        logging.disable(self.log_state[2])
         OB._reset_for_tests()
 
 

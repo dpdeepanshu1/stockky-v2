@@ -25,14 +25,29 @@ def _helper():
     keep = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == "_keep_task")
             or (isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "_BG_LOOP_TASKS")]
     assert len(keep) == 2, "main.py must define _BG_LOOP_TASKS and _keep_task"
-    log = logging.getLogger("round642-" + str(id(keep)))
-    log.propagate = False
+    # Round 643: a stand-in logger, not a real one: a real logger can be silenced by state an earlier test left in a
+    # full run (logging.disable, a raised root level), which made log-capture tests pass alone and fail in CI.
     seen: list = []
 
-    class _H(logging.Handler):
-        def emit(self, record):
-            seen.append((record.levelname, record.getMessage()))
-    log.addHandler(_H(level=logging.DEBUG))
+    class _Log:
+        def _rec(self, level, msg, args):
+            seen.append((level, msg % args if args else msg))
+
+        def error(self, msg, *a, **k):
+            self._rec("ERROR", msg, a)
+
+        def exception(self, msg, *a, **k):
+            self._rec("ERROR", msg, a)
+
+        def warning(self, msg, *a, **k):
+            self._rec("WARNING", msg, a)
+
+        def info(self, msg, *a, **k):
+            self._rec("INFO", msg, a)
+
+        def debug(self, msg, *a, **k):
+            pass
+    log = _Log()
     ns = {"logger": log}
     exec(compile(ast.Module(body=keep, type_ignores=[]), MAIN, "exec"), ns)
     return ns, seen

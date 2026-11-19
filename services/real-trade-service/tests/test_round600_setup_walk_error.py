@@ -73,14 +73,23 @@ def test_walk_error_note_counts_every_failure_but_warns_once_per_symbol(caplog=N
     class H(logging.Handler):
         def emit(self, rec):
             records.append(rec)
-    lg = logging.getLogger("real-trade-entry")
-    lg.addHandler(H()); lg.setLevel(logging.DEBUG)
+    # Round 643: a private logger with the handler attached and the level set, instead of the shared "real-trade-entry"
+    # logger (the old code left a handler on it for every later test and could be silenced by logging state left by an
+    # earlier test in a full run).
+    lg = logging.getLogger("round600-walk-error-test")
+    lg.handlers[:] = [H()]
+    lg.setLevel(logging.DEBUG)
+    lg.disabled = False
+    lg.propagate = False
+    saved_disable = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
     ns = {"logger": lg, "_time_r600": __import__("time")}
     exec(m.group(0), ns)
     for _ in range(3):
         ns["_walk_error_note"]("ABC", ValueError("boom"))
     ns["_walk_error_note"]("XYZ", KeyError("k"))
     assert ns["SETUP_WALK_ERRORS"]["count"] == 4
+    logging.disable(saved_disable)
     warns = [x for x in records if x.levelno == logging.WARNING]
     assert len(warns) == 2 and "ABC" in warns[0].getMessage() and "ValueError" in warns[0].getMessage()
 

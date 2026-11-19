@@ -112,6 +112,13 @@ def test_failed_start_logs_one_warning():
 
     h = _H(level=logging.WARNING)
     log = logging.getLogger("_spc_round639")
+    # Round 643: another test in a full run can leave logging switched off or the root level raised
+    # (logging.disable, a dictConfig with disable_existing_loggers, a root level above WARNING). This test
+    # needs the warning to reach its handler, so it sets that state itself and puts it back afterwards.
+    saved_state = (log.level, log.disabled, logging.root.manager.disable)
+    log.setLevel(logging.WARNING)
+    log.disabled = False
+    logging.disable(logging.NOTSET)
     log.addHandler(h)
     try:
         threading.Thread = _Boom
@@ -120,6 +127,9 @@ def test_failed_start_logs_one_warning():
     finally:
         threading.Thread = real
         log.removeHandler(h)
+        log.setLevel(saved_state[0])
+        log.disabled = saved_state[1]
+        logging.disable(saved_state[2])
         _restore(spc, saved)
     assert len(seen) == 1 and "could not start the refresh thread" in seen[0]
 

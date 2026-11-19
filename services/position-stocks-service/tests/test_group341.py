@@ -163,6 +163,25 @@ def test_incomplete_result_is_not_cached(qg, monkeypatch):
     assert calls["ft"] == 2
 
 
+def test_missing_market_cap_result_is_cached(qg, monkeypatch):
+    """round 655: market_cap None (small cap) with live fund + tech scores is reused within the TTL."""
+    calls = {"ft": 0, "ev": 0}
+    _fakes(qg, monkeypatch, fund=(60.48, 28.0, None), calls=calls)
+    a = asyncio.run(qg.check("STEAMHOUSE"))
+    b = asyncio.run(qg.check("STEAMHOUSE"))
+    assert calls == {"ft": 1, "ev": 1}
+    assert a.technical_score == b.technical_score == 28.0 and b.market_cap_cr is None
+
+
+def test_missing_market_cap_flag_off_refetches(qg, monkeypatch):
+    monkeypatch.setattr(config, "QUALITY_GATE_CACHE_NO_MCAP", False)
+    calls = {"ft": 0, "ev": 0}
+    _fakes(qg, monkeypatch, fund=(60.48, 28.0, None), calls=calls)
+    asyncio.run(qg.check("STEAMHOUSE"))
+    asyncio.run(qg.check("STEAMHOUSE"))
+    assert calls["ft"] == 2
+
+
 def test_failed_event_call_keeps_remembered_earnings(qg, monkeypatch):
     monkeypatch.setattr(config, "QUALITY_GATE_RESULT_TTL_S", 0.0)
     _fakes(qg, monkeypatch, earnings="2026-10-13")

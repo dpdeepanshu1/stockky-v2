@@ -1689,6 +1689,9 @@ SCALP_SLOT_NOTIONAL_CAP_MULT = _get_float("SCALP_SLOT_NOTIONAL_CAP_MULT", 1.5)
 # Quality gate: a fully-fetched result is reused for this many seconds (the 10 s cycle re-fetched 3 calls per shortlisted symbol each
 # time, ~24 technical calls for one rejected symbol in 7 minutes, and the self-inflicted load caused the ReadTimeouts). 0 = off.
 QUALITY_GATE_RESULT_TTL_S = _get_float("QUALITY_GATE_RESULT_TTL_S", 90.0)
+# round 655: also reuse a result whose market cap is missing (fund + tech live). A small cap with market_cap None was never cached and was
+# re-fetched every pass. 0 = the old rule (market cap required).
+QUALITY_GATE_CACHE_NO_MCAP = _get_bool("QUALITY_GATE_CACHE_NO_MCAP", True)
 # When the event call fails, the last earnings date / negative-news reason seen for the symbol within this many hours still applies
 # (the EARNINGS_TODAY and NEWS_NEGATIVE blocks were silently skipped on every timeout). 0 = off.
 QUALITY_GATE_EVENT_MEMORY_H = _get_float("QUALITY_GATE_EVENT_MEMORY_H", 24.0)

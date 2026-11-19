@@ -578,7 +578,11 @@ def apply_stop_floor(levels: AdaptiveLevels, current_ltp: float, symbol: Optiona
         if tmax > 0:
             target_pct = min(target_pct, max(tmax, floor * rr))     # the cap never takes the 2:1 away from a wider stop
         target_price, stop_price = _levels_to_prices(current_ltp, target_pct, floor, side)
-        logger.info("adaptive: %s stop floor %.2f%% -> %.2f%% (%s), target %.2f%% -> %.2f%%", symbol, levels.stop_pct, floor, why, levels.target_pct, target_pct)
+        # round 652: this runs for every candidate on every scan cycle, and unlike the target-cap line it was always INFO (19 Nov log, 15 min: KISSHT 15,
+        # GHCLTEXTIL 13+6, ARVINDFASN 13, PSB 10 identical-looking lines). Same rule as E185: INFO when the numbers (to 0.1) are new for that symbol or
+        # 5 minutes old, otherwise DEBUG. The levels returned are unchanged.
+        logger.log(logging.INFO if _cap_line_is_new(("floor", symbol, round(levels.stop_pct, 1), round(floor, 1), round(target_pct, 1))) else logging.DEBUG,
+                   "adaptive: %s stop floor %.2f%% -> %.2f%% (%s), target %.2f%% -> %.2f%%", symbol, levels.stop_pct, floor, why, levels.target_pct, target_pct)
         return AdaptiveLevels(
             target_pct=round(target_pct, 4), stop_pct=math.ceil(floor * 1e4 - 1e-9) / 1e4,      # rounded UP: a 4-dp round-down could land under the floor and be refused again
             target_price=target_price, stop_price=stop_price,

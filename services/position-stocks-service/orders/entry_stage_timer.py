@@ -3,7 +3,7 @@
 6 Nov: one entry took about 1.8 s between the last gate and the order and the cause was a guess (the Market Board log write was blamed but it is a
 queue put; the DB insert runs on its own thread). attempt_entry() now marks the end of a few stages; when the whole call takes longer than
 ENTRY_STAGE_SLOW_S (default 1.0 s, 0 = never log) ONE WARNING lists every stage that took at least ENTRY_STAGE_MIN_S (default 0.1 s), largest first.
-ENTRY_STAGE_LOG=0 turns the timer off. Thread-local (attempt_entry is synchronous), cheap (a few perf_counter calls), never raises."""
+A call that ended in a skip logs at INFO below ENTRY_STAGE_SLOW_SKIP_S (default 5 s; round 649), WARNING from there. ENTRY_STAGE_LOG=0 turns the timer off. Thread-local (attempt_entry is synchronous), cheap (a few perf_counter calls), never raises."""
 from __future__ import annotations
 
 import logging
@@ -67,7 +67,14 @@ def end(outcome: str = "ok") -> Optional[str]:
         if slow <= 0 or total < slow:
             return None
         line = format_line(cur["symbol"], total, cur["stages"], float(getattr(config, "ENTRY_STAGE_MIN_S", 0.1) or 0.0), outcome)
-        logger.warning(line)
+        # Round 649: a call that ended in a skip (no order, nothing at stake) logs at INFO until it reaches ENTRY_STAGE_SLOW_SKIP_S; the 19 Nov
+        # log had ~40 WARNING lines in 10 minutes, nearly all skips of 1-4 s (depth_gate waits up to 1 s by design). An entry, an error or any
+        # other outcome keeps the WARNING at ENTRY_STAGE_SLOW_S.
+        skip_s = float(getattr(config, "ENTRY_STAGE_SLOW_SKIP_S", 5.0) or 0.0)
+        if str(outcome).startswith("skip") and total < skip_s:
+            logger.info(line)
+        else:
+            logger.warning(line)
         return line
     except Exception:  # noqa: BLE001
         return None

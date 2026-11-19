@@ -947,6 +947,7 @@ def _attempt_entry_impl(
         return None
 
     # 2026-10-05: stale-tick / slippage / day-gain guard — see _price_guard_reject().
+    _drift_soft_msg = None     # round 650: the "sized down" line for the price-guard soft reasons, logged once the last total check has passed
     _drift_soft: dict = {}     # E273 round 33 / 34: an up-chase past ENTRY_MAX_SLIPPAGE_PCT or a day gain past MAX_DAY_GAIN_PCT (each up to its HARD_MULT x the limit) is a size penalty, not a refusal
     price_reject = _price_guard_reject(candidate.symbol, candidate.current_ltp, soft=_drift_soft if _soft else None)
     if price_reject:
@@ -961,7 +962,10 @@ def _attempt_entry_impl(
             _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _dr_reject, quality=quality)
             return None
-        logger.info("position-stocks entry: %s price-guard soft reasons sized down instead of refused (%s)", candidate.symbol, "; ".join(f"{k}: {_soft_why[k]}" for k in _drift_soft))
+        # Round 650 (E676): said later, once the total of every penalty has passed its last check (below); the gain-room / VWAP / pre-open-gap
+        # penalties are added after this point, and the 19 Nov log showed "sized down instead of refused" and, 1 s later, the refusal for the same pick.
+        _drift_soft_msg = ("position-stocks entry: %s price-guard soft reasons sized down instead of refused (%s)", candidate.symbol,
+                           "; ".join(f"{k}: {_soft_why[k]}" for k in _drift_soft))
     entry_stage_timer.mark("price_guard")           # round 616: finer stage marks (log only) - the 18 Nov slow skips were one lump "skip_gate_logic"
 
     # AUDIT FIX (this session): same-symbol re-entry guard — reject buying
@@ -1063,6 +1067,8 @@ def _attempt_entry_impl(
             _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _tot_reject, quality=quality)
             return None
+    if _drift_soft_msg:
+        logger.info(*_drift_soft_msg)
 
     # group280 (plan C3): Dhan 5-level depth - skip a wide spread / thin book before any capital is reserved.
     _depth_reject = depth_gate.reject_reason(candidate.symbol)
@@ -1363,7 +1369,6 @@ def _attempt_entry_impl(
         _penalties.update(_struct_pen)
         for _k, _pv in _struct_pen.items():
             _soft_why[_k] = f"STRUCTURE:{_k.replace('structure_', '')} penalty {_pv:.2f}"
-        logger.info("position-stocks entry: %s structure verdict sized down instead of refused (%s)", candidate.symbol, ", ".join(f"{k} {v:.2f}" for k, v in _struct_pen.items()))
     # E273 round 32: penalties added after the setup engine ran (round 31 rvol, round 32 structure) were not in its size. Skip on a high total, else rescale the size and the stamp.
     _late_pen = {k: v for k, v in _penalties.items() if k not in _pen_early}
     if _late_pen:
@@ -1376,6 +1381,8 @@ def _attempt_entry_impl(
         if _new_mult is not None and _new_mult != _setup_mult:
             _setup_mult = _new_mult
             _flow_snap = setup_stamp.restamp(_flow_snap, _penalties, _setup_mult)
+    if _struct_pen:       # round 650: said after the late total check, so it is only logged for an entry that was not refused by it
+        logger.info("position-stocks entry: %s structure verdict sized down instead of refused (%s)", candidate.symbol, ", ".join(f"{k} {v:.2f}" for k, v in _struct_pen.items()))
 
     entry_stage_timer.mark("late_penalties")
     # group469: approve-first mode. OFF unless APPROVE_FIRST_N > 0. While a round is open (the gate settings changed) each automatic entry

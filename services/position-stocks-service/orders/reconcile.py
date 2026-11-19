@@ -1037,6 +1037,10 @@ def _entry_dead_on_row(row: dict) -> bool:
     return False
 
 
+ENTRY_FILL_MAX_GAP_S = 600.0         # round 647: with several matches, only one created within this of opened_at (and clearly closest) is taken
+ENTRY_FILL_SINGLE_MAX_GAP_S = 180.0  # round 647: a LONE match must be created within this of opened_at, else it is an earlier trade's order
+
+
 def _entry_fill_from_orderbook(db: Session, pos: ScalpPosition,
                                orders: Optional[list] = None) -> Optional[float]:
     """GROUP 232. Real ENTRY fill from today's plain order book, used when the super-order row carries
@@ -1086,10 +1090,17 @@ def _entry_fill_from_orderbook(db: Session, pos: ScalpPosition,
         found.append((avg, gap))
     chosen: Optional[float] = None
     if len(found) == 1:
-        chosen = found[0][0]
+        # Round 647: a lone match used to be taken with no time check. On 19 Nov 2026 the second SHRINGARMS short (id 547) was
+        # priced from the ENTRY order of an earlier trade (same security id, same quantity) because the new order was not in the
+        # book yet: entry 249.60 -> 251.15 and both live legs were moved, then moved again 13 s later (-> 250.10) when the right
+        # order appeared. An entry order is created seconds from opened_at (the position row is written right after the order is
+        # placed), so a lone match gets the tight ENTRY_FILL_SINGLE_MAX_GAP_S; with several, the 10-minute window still picks the
+        # closest one. A row with no createTime keeps the old behaviour.
+        avg_one, gap_one = found[0]
+        chosen = avg_one if (gap_one is None or gap_one <= ENTRY_FILL_SINGLE_MAX_GAP_S) else None
     elif len(found) > 1:
         timed = sorted((f for f in found if f[1] is not None), key=lambda f: f[1])
-        if timed and timed[0][1] <= 600 and (len(timed) == 1 or timed[1][1] - timed[0][1] > 60):
+        if timed and timed[0][1] <= ENTRY_FILL_MAX_GAP_S and (len(timed) == 1 or timed[1][1] - timed[0][1] > 60):
             chosen = timed[0][0]
     # group341: this ran (and logged) on EVERY reconcile pass even when the stored price already equalled the fill - 11 identical lines
     # in 40 s after the TECHM entry. Log only when it is about to change something.
@@ -1246,6 +1257,24 @@ def _retry_rearm_pending(db: Session, pos: ScalpPosition) -> None:
 
 _exit_fill_logged: set = set()   # group344: (position id, fill) already announced by this process
 
+EXIT_FILL_BEFORE_OPEN_SLACK_S = 60.0   # round 648: an exit order created more than this BEFORE the position opened is an earlier trade's exit
+
+
+def _created_before_position_opened(r: dict, pos: ScalpPosition) -> bool:
+    """Round 648: True when this order-book row carries a createTime and it is earlier than pos.opened_at by more than
+    EXIT_FILL_BEFORE_OPEN_SLACK_S. A position's exit order cannot exist before the position does; a same-symbol, same-size re-entry
+    the same day has the earlier trade's exit in the book too (SHRINGARMS id 545 closed 04:44, id 547 opened 04:48 on 19 Nov 2026).
+    No createTime, no opened_at or an unreadable time: False (the row stays a candidate, as before). Never raises."""
+    try:
+        raw_t = r.get("createTime") or r.get("create_time") or r.get("exchangeTime")
+        if not raw_t or not pos.opened_at:
+            return False
+        t = datetime.fromisoformat(str(raw_t).replace("Z", "+00:00").replace(" ", "T")[:19])
+        t = t.replace(tzinfo=IST) if t.tzinfo is None else t
+        return (as_aware(pos.opened_at) - t).total_seconds() > EXIT_FILL_BEFORE_OPEN_SLACK_S
+    except (TypeError, ValueError, AttributeError):
+        return False
+
 
 def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
                               orders: Optional[list] = None, *, quiet: bool = False) -> Optional[float]:
@@ -1285,6 +1314,8 @@ def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
             continue
         if ref_price and abs(avg - ref_price) / ref_price > 0.10:
             continue
+        if _created_before_position_opened(r, pos):
+            continue   # round 648: an earlier trade's exit order, not this position's
         found.append(avg)
         if str(r.get("correlationId") or r.get("tag") or "").upper().startswith("VTT"):
             found_vtt.append(avg)

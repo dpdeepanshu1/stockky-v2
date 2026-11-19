@@ -109,6 +109,27 @@ def _log_balance_key(matched_key: str) -> None:
     )
 
 
+_LEND_LOG_REPEAT_S = 300.0
+_LEND_LOG_MOVE_FRAC = 0.05
+_lend_logged: dict = {}     # {"t": monotonic time, "share": pct, "lent": rupees} of the last INFO line
+
+
+def _lend_line_is_new(share_pct: float, lent: float, now: Optional[float] = None) -> bool:
+    """round 653: True (log at INFO) for the first line, a changed share, lent cash 5% away from the last logged figure, or a line 5 minutes old. Never raises."""
+    try:
+        import time as _t
+        now = _t.monotonic() if now is None else now
+        last = _lend_logged
+        if last and last["share"] == round(share_pct, 2) and now - last["t"] < _LEND_LOG_REPEAT_S \
+                and abs(lent - last["lent"]) < _LEND_LOG_MOVE_FRAC * max(abs(last["lent"]), 1.0):
+            return False
+        _lend_logged.clear()
+        _lend_logged.update({"t": now, "share": round(share_pct, 2), "lent": float(lent)})
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
     for key in _BALANCE_KEYS:
         v = funds.get(key)
@@ -169,8 +190,11 @@ def sync_real_equity(db: Session) -> Optional[float]:
                 balance, market_value, shared_exposure.get_other_service_exposure(db), _share_pct, config.CAPITAL_LEND_RESERVE_FRAC,
                 peer_fresh=_peer_age is not None and _peer_age <= config.CAPITAL_LEND_PEER_MAX_AGE_S)
             if _lent is not None and _lent > capped_cash:
-                logger.info("equity_sync: capital lend - spendable cash Rs%.2f instead of the fixed %.0f%% share Rs%.2f (Dhan free Rs%.2f)",
-                            _lent, _share_pct, capped_cash, balance)
+                # round 653: this runs on every sync (cycle, entry, manual), so the same line was logged 27 times in 15 minutes (19 Nov log).
+                # INFO when the share changed, the lent cash moved 5% or more since the last INFO line, or 5 minutes passed; otherwise DEBUG.
+                logger.log(logging.INFO if _lend_line_is_new(_share_pct, _lent) else logging.DEBUG,
+                           "equity_sync: capital lend - spendable cash Rs%.2f instead of the fixed %.0f%% share Rs%.2f (Dhan free Rs%.2f)",
+                           _lent, _share_pct, capped_cash, balance)
                 capped_cash = _lent
     except Exception as _cl_exc:  # noqa: BLE001
         logger.debug("equity_sync: capital lend skipped (fixed share used): %s", _cl_exc)

@@ -1428,11 +1428,22 @@ class TestFetchEventsCachingAndFallback:
         assert em._mem[key]["stale"] is True
         assert em._mem_exp[key] == pytest.approx(time.time() + 900, abs=5)
 
-    def test_empty_live_fetch_no_fallback_returns_empty_result_uncached(self, monkeypatch):
+    def test_empty_live_fetch_no_fallback_returns_empty_result_with_short_negative_entry(self, monkeypatch):
+        """round 651: was "uncached"; now a 300 s negative entry under the cache key only (never the fallback key)."""
+        monkeypatch.delenv("EVENT_EMPTY_NEGCACHE_S", raising=False)
         _wire(monkeypatch)
         res = em._fetch_events("ZWID.NS")
         assert res["cached"] is False
         assert res["recent_news"] == [] and res["classified_events"] == []
+        key = f"{em.EVENT_CACHE_PREFIX}ZWID.NS"
+        assert em._mem[key]["empty_negcache"] is True
+        assert em._mem_exp[key] == pytest.approx(time.time() + 300, abs=5)
+        assert f"{em.EVENT_FALLBACK_PREFIX}ZWID.NS" not in em._mem
+
+    def test_empty_live_fetch_no_fallback_is_uncached_when_negcache_is_off(self, monkeypatch):
+        monkeypatch.setenv("EVENT_EMPTY_NEGCACHE_S", "0")
+        _wire(monkeypatch)
+        em._fetch_events("ZWID.NS")
         assert f"{em.EVENT_CACHE_PREFIX}ZWID.NS" not in em._mem
         assert f"{em.EVENT_FALLBACK_PREFIX}ZWID.NS" not in em._mem
 

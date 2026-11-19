@@ -1,3 +1,17 @@
+## 19 Nov 2026 - Round 657 (E683): an Oracle call timeout in the position-stocks trading loop is a WARNING with the real pool numbers, not "DB pool exhausted" (log only)
+
+ * **Found in the 19 Nov log (15:11 IST):** `position-stocks: DB pool exhausted: pool size=4 checked_out=0 overflow=-1` twice, each with an ERROR line and a traceback, for a `DPY-4024: call timeout of 8000 ms exceeded`. real-trade-service hit the same DB at the same moment (1 timeout, recovered on the next tick), so the cause was the database, not a dry pool (`checked_out=0`).
+ * **Changed (`position-stocks-service/main.py`, `_trading_loop` except branch):** a DPY-4024 that is not also a QueuePool / TimeoutError logs one WARNING with `_pool_status_text()`, sleeps the same 5 s and does not touch the circuit breaker. A genuine pool error keeps the old ERROR + "DB pool exhausted" path unchanged (the E229 source check still matches).
+ * **Checked here:** new `tests/test_round656_call_timeout_label.py` (2 cases, source-level like test_e229), the E229 test, the full position-stocks-service suite (5840 passed). `docs/FILE_MANIFEST.txt` and `docs/ENV_REFERENCE.txt` regenerated (2210 variables).
+ * **Not changed:** real-trade-service's own "Auto-Pilot DB timeout" Telegram alert (1st / 3rd in a row, then every 15 min) works as designed.
+
+## 19 Nov 2026 - Round 656 (E682): the quality gate also reuses a result whose market cap is missing (position-stocks-service)
+
+ * **Found in the 19 Nov log:** STEAMHOUSE got `/technical/analyze` and `/fundamental/analyze` every ~31 s (08:58:37, 08:59:09, 08:59:40) against a 90 s `QUALITY_GATE_RESULT_TTL_S`. The fundamental service answers 200 with `market_cap: None` for it, and `check()` only cached a result when fund, tech AND market cap were all present, so such a symbol was never cached. Symbols with a market cap (VOLTAS, GPIL) were fetched about once per 3 minutes.
+ * **Changed:** `screening/quality_gate.py` caches when fund and tech are live even if market cap is None; new `QUALITY_GATE_CACHE_NO_MCAP` (default on, 0 = the old rule) in `config.py`.
+ * **Checked here:** `tests/test_group341.py` + 2 cases (cached with no market cap; flag off refetches); full position-stocks-service suite passed. Not live-tested: STEAMHOUSE was not on the shortlist in the verification window.
+ * **Also found, not changed:** a symbol with no market cap is still passed to the cap floor as None (the floor only applies when it is known), unchanged.
+
 ## 19 Nov 2026 - Round 655 (E681): CI fix - docs/FILE_MANIFEST.txt did not list the three test files added in rounds 651-653 (docs only)
 
  * **CI failure:** `scripts/test_repo_scripts.py::test_every_tracked_file_of_this_checkout_is_in_the_manifest` (1 failed, 446 passed): `test_round651_empty_events_negcache.py`, `test_round652_stop_floor_log_dedupe.py` and `test_round653_capital_lend_log_dedupe.py` were tracked but not in the manifest. The rounds added files and I did not run the manifest step (round 654 had no new file; it only regenerated `ENV_REFERENCE.txt`).

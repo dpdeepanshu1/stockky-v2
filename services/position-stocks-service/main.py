@@ -1691,10 +1691,17 @@ async def _trading_loop() -> None:
         except asyncio.CancelledError:
             break
         except Exception as e:
+            _pool_err = "QueuePool" in repr(e) or "TimeoutError" in type(e).__name__
+            if "DPY-4024" in str(e) and not _pool_err:
+                # round 656: a single Oracle call timeout is not a dry pool (19 Nov 15:11 IST log: "DB pool exhausted ... checked_out=0" with
+                # an empty pool, 3 ERROR lines + a traceback per event). One WARNING line with the real pool numbers; same 5 s back-off, no breaker trip.
+                logger.warning("position-stocks trading loop: Oracle call timeout, next cycle retries (%s): %s", _pool_status_text(), str(e)[:160])
+                await asyncio.sleep(5)
+                continue
             logger.error("position-stocks trading loop error: %s", e, exc_info=True)
             # DB pool/timeout trouble is infrastructure, not a broker failure — don't trip the
             # trading circuit breaker on it, and back off briefly so the pool can drain.
-            if "QueuePool" in repr(e) or "DPY-4024" in str(e) or "TimeoutError" in type(e).__name__:
+            if _pool_err:
                 logger.error("position-stocks: DB pool exhausted: %s", _pool_status_text())      # E229
                 await asyncio.sleep(5)
             else:

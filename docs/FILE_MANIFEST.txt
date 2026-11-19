@@ -2385,6 +2385,7 @@ services/position-stocks-service/tests/test_round648_exit_fill_before_open.py
 services/position-stocks-service/tests/test_round649_entry_slow_skip_info.py
 services/position-stocks-service/tests/test_round650_sized_down_log_after_last_check.py
 services/position-stocks-service/tests/test_round652_stop_floor_log_dedupe.py
+services/position-stocks-service/tests/test_round656_call_timeout_label.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py

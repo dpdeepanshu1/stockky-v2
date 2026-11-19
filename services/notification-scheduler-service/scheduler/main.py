@@ -30,6 +30,37 @@ _STARTUP_HOOKS: list = []
 _SHUTDOWN_HOOKS: list = []
 
 
+_BG_LOOP_TASKS: set = set()   # round 642: the event loop keeps only a weak reference to a task, so a start-up loop nobody holds can be garbage-collected
+
+
+def _keep_task(task, name: str, forever: bool = True):
+    """Hold a strong reference to a start-up task until it ends, and say so in the log when it dies (an exception in a task nobody awaits is otherwise
+    only reported when the task is garbage-collected, and the loop is silently gone). `forever=True` marks a loop that should never return."""
+    try:
+        _BG_LOOP_TASKS.add(task)
+    except TypeError:        # not a task (a test double): nothing to hold, nothing to watch
+        return task
+
+    def _done(t):
+        _BG_LOOP_TASKS.discard(t)
+        try:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("%s stopped with an error: %s: %s", name, type(exc).__name__, str(exc)[:200])
+            elif forever:
+                logger.warning("%s returned and is no longer running", name)
+        except Exception:  # noqa: BLE001 - logging only
+            pass
+
+    try:
+        task.add_done_callback(_done)
+    except Exception:  # noqa: BLE001 - a test double without callbacks
+        _BG_LOOP_TASKS.discard(task)
+    return task
+
+
 def _on_startup(fn):
     _STARTUP_HOOKS.append(fn)
     return fn
@@ -269,21 +300,21 @@ async def start_loop():
 
     try:
         from overnight_orchestrator import scheduling_loop
-        asyncio.create_task(scheduling_loop())
+        _keep_task(asyncio.create_task(scheduling_loop()), "scheduler: overnight orchestrator loop")
         logger.info("scheduler: overnight orchestrator loop started")
     except Exception as e:
         logger.warning("overnight orchestrator loop start failed: %s", e)
 
     try:
         from watchlist_moves import loop as _watchlist_moves_loop
-        asyncio.create_task(_watchlist_moves_loop())
+        _keep_task(asyncio.create_task(_watchlist_moves_loop()), "scheduler: watchlist moves loop")
         logger.info("scheduler: watchlist moves loop started")
     except Exception as e:
         logger.warning("watchlist moves loop start failed: %s", e)
 
     try:
         from pattern_alerts import loop as _pattern_alerts_loop
-        asyncio.create_task(_pattern_alerts_loop())
+        _keep_task(asyncio.create_task(_pattern_alerts_loop()), "scheduler: pattern alerts loop")
         logger.info("scheduler: pattern alerts loop started")
     except Exception as e:
         logger.warning("pattern alerts loop start failed: %s", e)

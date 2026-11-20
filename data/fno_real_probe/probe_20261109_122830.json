@@ -1,7 +1,0 @@
-{
- "live": true,
- "underlying": "NIFTY",
- "side": "CE",
- "exit_code": 2,
- "orders": []
-}

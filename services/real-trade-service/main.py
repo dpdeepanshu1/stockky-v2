@@ -1404,115 +1404,125 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     as expected BEFORE entry_engine exists to call this for real."""
     mode = body.mode.upper()
     require_admin_if_real(mode, authorization)  # DEMO: open; REAL: admin required
-    gate = _check_and_expire_gates(db, mode)
-    account_row = db.query(models.TradeAccount).filter_by(mode=mode).first()
-    risk_row = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
-    if account_row is None or risk_row is None:
-        raise HTTPException(status_code=404, detail=f"No account/risk-config for mode={mode}")
-    # BUG FIX (this session): same lazy daily-reset as get_account() — this
-    # dry-run route bypasses it, so without this it could preview against a
-    # stale (pre-reset) realized_pnl_today.
-    _pf_maybe_reset_daily_pnl(db, account_row)
+    # round 672 (D7h): the blocking DB reads run in worker threads (two steps, the live-price await stays on the loop between them);
+    # same code, same order, one Session used one step at a time. ROUTES_DB_OFF_LOOP=0 runs both inline as before.
+    def _prepare():
+        gate = _check_and_expire_gates(db, mode)
+        account_row = db.query(models.TradeAccount).filter_by(mode=mode).first()
+        risk_row = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
+        if account_row is None or risk_row is None:
+            raise HTTPException(status_code=404, detail=f"No account/risk-config for mode={mode}")
+        # BUG FIX (this session): same lazy daily-reset as get_account() — this
+        # dry-run route bypasses it, so without this it could preview against a
+        # stale (pre-reset) realized_pnl_today.
+        _pf_maybe_reset_daily_pnl(db, account_row)
 
-    # 2026-09-12 fix (audit finding, minor): this used to call
-    # _pf_open_positions() (excludes PENDING_EXIT), same gap
-    # manual_engine.py's/entry_engine.py's own _account_state already fixed
-    # elsewhere — a symbol mid-exit (SELL sent to Dhan, unconfirmed) would
-    # look exposure-free to this dry-run's no-pyramiding/portfolio-risk
-    # preview even though it's still real, in-flight exposure. This
-    # endpoint never places an order itself, so the blast radius was
-    # "the preview can be stale," not real money — but there's no reason
-    # for the dry run to disagree with what the real path already uses.
-    open_positions = _pf_held_exposure_positions(db, mode)
-    # GROUP 193: age of position-stocks-service's published exposure (shown in the reject message).
-    _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
-    # GROUP 289: same loss-streak input the live entry path uses, so this preview matches what a real BUY would get.
-    _streak, _streak_at = _pf_today_loss_streak(db, mode)
+        # 2026-09-12 fix (audit finding, minor): this used to call
+        # _pf_open_positions() (excludes PENDING_EXIT), same gap
+        # manual_engine.py's/entry_engine.py's own _account_state already fixed
+        # elsewhere — a symbol mid-exit (SELL sent to Dhan, unconfirmed) would
+        # look exposure-free to this dry-run's no-pyramiding/portfolio-risk
+        # preview even though it's still real, in-flight exposure. This
+        # endpoint never places an order itself, so the blast radius was
+        # "the preview can be stale," not real money — but there's no reason
+        # for the dry run to disagree with what the real path already uses.
+        open_positions = _pf_held_exposure_positions(db, mode)
+        # GROUP 193: age of position-stocks-service's published exposure (shown in the reject message).
+        _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
+        # GROUP 289: same loss-streak input the live entry path uses, so this preview matches what a real BUY would get.
+        _streak, _streak_at = _pf_today_loss_streak(db, mode)
+        return gate, account_row, risk_row, open_positions, _peer_age, _streak, _streak_at
+
+    gate, account_row, risk_row, open_positions, _peer_age, _streak, _streak_at = await _db_off_loop(_prepare)
     _open_pnl = 0.0
     if body.side.upper() == "BUY":   # E370: same open-loss input as the live BUY paths (E368); a SELL is never checked against it
         from portfolio import open_pnl as _open_pnl_mod
         from market_feed.feed import get_quotes as _open_pnl_quotes
         _open_pnl = await _open_pnl_mod.open_unrealized_pnl(db, mode, quotes_fn=_open_pnl_quotes)
-    account_state = AccountState(
-        equity=account_row.current_equity,
-        risk_per_trade_pct=effective_risk_pct(risk_row),
-        max_daily_loss_pct=risk_row.max_daily_loss_pct,
-        max_concurrent_positions=effective_max_positions(risk_row),
-        max_portfolio_risk_pct=risk_row.max_portfolio_risk_pct,
-        stale_data_seconds=risk_row.stale_data_seconds,
-        max_tick_volatility_mult=risk_row.max_tick_volatility_mult,
-        allow_pyramiding=risk_row.allow_pyramiding,
-        realized_pnl_today=account_row.realized_pnl_today,
-        open_unrealized_pnl=float(_open_pnl or 0.0),
-        open_position_count=len(open_positions),
-        open_position_symbols={p.symbol for p in open_positions} | _pf_working_buy_symbols(db, mode),   # group297
-        open_positions_total_risk=sum(
-            # BUG FIX (2026-09-01) — same fix as entry_engine/entry.py's
-            # _account_state: abs() turned a profitable ratcheted-up stop
-            # (breakeven/ATR-trail — see exit_engine/exit.py) into a fake
-            # positive "risk" figure instead of the 0 it actually represents.
-            max(0.0, p.avg_entry_price - (p.current_stop or p.avg_entry_price)) * p.qty_open
-            for p in open_positions
-        ),
-        trading_globally_paused=not gate.armed,
-        # 2026-09-10 fix (audit follow-up): same fix as manual_engine.py's
-        # _account_state — this dry-run endpoint exists specifically so an
-        # admin can "verify the 9 checks behave as expected" (see this
-        # function's own docstring); a hardcoded True made check #2 always
-        # report as passing regardless of actual market hours, which is
-        # the opposite of an accurate dry run. entry_engine/entry.py has
-        # wired the real value in since it was written — only this
-        # endpoint and manual_engine.py still had the placeholder.
-        market_is_open=is_market_open_ist(),
-        # BUG FIX (session52, found while wiring the capital-share cap):
-        # this dry-run AccountState never set cash_available either — same
-        # gap as manual_engine.py, meaning a preview here for a BUY always
-        # hit check 5b's "not enough for even 1 share" rejection regardless
-        # of the account's real cash, disagreeing with what the live path
-        # would actually do. Wired to match entry_engine.py/manual_engine.py.
-        cash_available=account_row.cash_available,
-        broker_cash_available=account_row.broker_cash_available,
-        open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in open_positions),
-        # AUDIT FIX (2026-09-20): completes the capital_share_cap total for
-        # this dry-run preview too — see AccountState's field comment and
-        # execution/shared_exposure.py.
-        other_service_open_positions_market_value=(
-            shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
-        ),
-        # GROUP 193: BUYs Dhan is still working (not yet booked as positions)
-        # and the age of the peer figure (shown in the reject message).
-        in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
-        # A11: same account-wide loss input as the live paths, so this preview matches a real BUY.
-        account_wide_daily_loss_pct=(
-            shared_daily_pnl.account_wide_loss_pct(db, account_row.realized_pnl_today, account_row.current_equity)
-            if mode == "REAL" else 0.0
-        ),
-        other_service_exposure_age_s=_peer_age,
-        # E276 round 50: shared portfolio heat (gap allowance on carried holds + position-stocks-service's open risk); zeros when DEMO / off / peer stale.
-        open_positions_gap_allowance=heat_state.own_heat(db, mode, open_positions)[1],
-        other_service_open_risk=heat_state.peer_heat(db, mode)[0],
-        other_service_capital_base=heat_state.peer_heat(db, mode)[1],
-        open_positions_sector_risk=heat_state.own_sector_risk(db, mode, open_positions),
-        other_service_sector_risk=heat_state.peer_sector_risk(db, mode),
-        loss_streak=_streak,
-        loss_streak_last_close_at=_streak_at,
-        # 2026-09-21 (session79): same flat max-trade-value cap resolution
-        # as the live entry/manual paths, so this dry run doesn't disagree
-        # with what a real order would actually do.
-        max_trade_value=(
-            risk_row.max_trade_value if risk_row.max_trade_value is not None
-            else config.MAX_TRADE_VALUE
-        ),
-    )
-    intent = OrderIntent(
-        mode=mode, symbol=body.symbol.upper(), side=body.side.upper(),
-        qty=body.qty, entry_price=body.entry_price, stop_price=body.stop_price,
-    )
-    result = risk_evaluate(intent, account_state)
-    db.add(models.TradeRiskEvent(
-        mode=mode, symbol=body.symbol.upper(), check_name=result.check_name,
-        verdict=result.verdict.value, detail=result.reason,
-    ))
+    def _decide():
+        account_state = AccountState(
+            equity=account_row.current_equity,
+            risk_per_trade_pct=effective_risk_pct(risk_row),
+            max_daily_loss_pct=risk_row.max_daily_loss_pct,
+            max_concurrent_positions=effective_max_positions(risk_row),
+            max_portfolio_risk_pct=risk_row.max_portfolio_risk_pct,
+            stale_data_seconds=risk_row.stale_data_seconds,
+            max_tick_volatility_mult=risk_row.max_tick_volatility_mult,
+            allow_pyramiding=risk_row.allow_pyramiding,
+            realized_pnl_today=account_row.realized_pnl_today,
+            open_unrealized_pnl=float(_open_pnl or 0.0),
+            open_position_count=len(open_positions),
+            open_position_symbols={p.symbol for p in open_positions} | _pf_working_buy_symbols(db, mode),   # group297
+            open_positions_total_risk=sum(
+                # BUG FIX (2026-09-01) — same fix as entry_engine/entry.py's
+                # _account_state: abs() turned a profitable ratcheted-up stop
+                # (breakeven/ATR-trail — see exit_engine/exit.py) into a fake
+                # positive "risk" figure instead of the 0 it actually represents.
+                max(0.0, p.avg_entry_price - (p.current_stop or p.avg_entry_price)) * p.qty_open
+                for p in open_positions
+            ),
+            trading_globally_paused=not gate.armed,
+            # 2026-09-10 fix (audit follow-up): same fix as manual_engine.py's
+            # _account_state — this dry-run endpoint exists specifically so an
+            # admin can "verify the 9 checks behave as expected" (see this
+            # function's own docstring); a hardcoded True made check #2 always
+            # report as passing regardless of actual market hours, which is
+            # the opposite of an accurate dry run. entry_engine/entry.py has
+            # wired the real value in since it was written — only this
+            # endpoint and manual_engine.py still had the placeholder.
+            market_is_open=is_market_open_ist(),
+            # BUG FIX (session52, found while wiring the capital-share cap):
+            # this dry-run AccountState never set cash_available either — same
+            # gap as manual_engine.py, meaning a preview here for a BUY always
+            # hit check 5b's "not enough for even 1 share" rejection regardless
+            # of the account's real cash, disagreeing with what the live path
+            # would actually do. Wired to match entry_engine.py/manual_engine.py.
+            cash_available=account_row.cash_available,
+            broker_cash_available=account_row.broker_cash_available,
+            open_positions_market_value=sum(p.avg_entry_price * p.qty_open for p in open_positions),
+            # AUDIT FIX (2026-09-20): completes the capital_share_cap total for
+            # this dry-run preview too — see AccountState's field comment and
+            # execution/shared_exposure.py.
+            other_service_open_positions_market_value=(
+                shared_exposure.get_other_service_exposure(db) if mode == "REAL" else 0.0
+            ),
+            # GROUP 193: BUYs Dhan is still working (not yet booked as positions)
+            # and the age of the peer figure (shown in the reject message).
+            in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
+            # A11: same account-wide loss input as the live paths, so this preview matches a real BUY.
+            account_wide_daily_loss_pct=(
+                shared_daily_pnl.account_wide_loss_pct(db, account_row.realized_pnl_today, account_row.current_equity)
+                if mode == "REAL" else 0.0
+            ),
+            other_service_exposure_age_s=_peer_age,
+            # E276 round 50: shared portfolio heat (gap allowance on carried holds + position-stocks-service's open risk); zeros when DEMO / off / peer stale.
+            open_positions_gap_allowance=heat_state.own_heat(db, mode, open_positions)[1],
+            other_service_open_risk=heat_state.peer_heat(db, mode)[0],
+            other_service_capital_base=heat_state.peer_heat(db, mode)[1],
+            open_positions_sector_risk=heat_state.own_sector_risk(db, mode, open_positions),
+            other_service_sector_risk=heat_state.peer_sector_risk(db, mode),
+            loss_streak=_streak,
+            loss_streak_last_close_at=_streak_at,
+            # 2026-09-21 (session79): same flat max-trade-value cap resolution
+            # as the live entry/manual paths, so this dry run doesn't disagree
+            # with what a real order would actually do.
+            max_trade_value=(
+                risk_row.max_trade_value if risk_row.max_trade_value is not None
+                else config.MAX_TRADE_VALUE
+            ),
+        )
+        intent = OrderIntent(
+            mode=mode, symbol=body.symbol.upper(), side=body.side.upper(),
+            qty=body.qty, entry_price=body.entry_price, stop_price=body.stop_price,
+        )
+        result = risk_evaluate(intent, account_state)
+        db.add(models.TradeRiskEvent(
+            mode=mode, symbol=body.symbol.upper(), check_name=result.check_name,
+            verdict=result.verdict.value, detail=result.reason,
+        ))
+        return result
+
+    result = await _db_off_loop(_decide)
     await _commit_off_loop(db)
     return {
         "verdict": result.verdict.value,

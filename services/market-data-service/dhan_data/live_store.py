@@ -20,6 +20,7 @@ from typing import List, Optional
 from . import config
 
 import live_write_retry as _lwr
+import live_write_lock as _lwl
 
 logger = logging.getLogger("dhan-data.live-store")
 
@@ -305,8 +306,10 @@ def retry_failed() -> int:
         for chunk in _lwr.chunks(due, _lwr.chunk_size()):
             params = [p for _, p in chunk]
             try:
-                with engine.begin() as conn:
-                    conn.execute(stmt, params)
+                params.sort(key=lambda p: p["s"])      # round 669: same row order as every other writer
+                with _lwl.write_slot():                # round 669: one live_quotes transaction at a time (commit included)
+                    with engine.begin() as conn:
+                        conn.execute(stmt, params)
                 written += len(params)
                 _RETRY.note(written=len(params))
                 _now_m = time.monotonic()
@@ -355,8 +358,10 @@ def _write_sync(rows: List[dict]) -> int:
         nonlocal written, last_exc
         global _backoff_until
         try:
-            with engine.begin() as conn:
-                conn.execute(stmt, chunk)
+            chunk.sort(key=lambda p: p["s"])           # round 669: same row order as every other writer
+            with _lwl.write_slot():                    # round 669: one live_quotes transaction at a time (commit included)
+                with engine.begin() as conn:
+                    conn.execute(stmt, chunk)
             written += len(chunk)
             _now_m = time.monotonic()
             with _lock:
@@ -451,4 +456,5 @@ def status() -> dict:
     except Exception:  # noqa: BLE001
         _eng = None
     with _lock:
-        return {**_stats, "write_mode": write_mode(), "writing": should_write(), "engine": _eng, "retry": _RETRY.snapshot()}
+        return {**_stats, "write_mode": write_mode(), "writing": should_write(), "engine": _eng, "retry": _RETRY.snapshot(),
+                "write_lock": _lwl.status()}

@@ -187,6 +187,54 @@ def _format_alert(drift: list) -> str:
     return "\n".join(lines)
 
 
+async def _off(fn, *args, **kwargs):
+    """Round 672 (D7g): run one blocking step in a worker thread, same switch as reconcile_real_orders (RECONCILE_OFF_LOOP=0 runs it
+    inline as before). One Session, steps one after another, so nothing else changes."""
+    from execution import reconcile as _rec
+    return await _rec._off(fn, *args, **kwargs)
+
+
+def _collect(db, now: datetime):
+    """Round 672 (D7g): the BLOCKING part of one pass (Dhan holdings + positions calls, the book and order queries, the eDIS marker
+    lookups). Read-only. Returns (drift list, number of book rows). Runs in a worker thread (see _off); raises on any error and the
+    caller turns that into the report's error field."""
+    import config
+    import models
+    from execution import dhan_client
+    holdings = dhan_client.get_holdings(db)
+    positions = dhan_client.get_positions(db)
+    guard = now - timedelta(minutes=int(getattr(config, "HOLDINGS_SYNC_GUARD_MINUTES", 30)))
+    rows = db.query(models.TradePosition).filter(
+        models.TradePosition.mode == "REAL", models.TradePosition.status.in_(_LIVE_STATUSES),
+        models.TradePosition.qty_open > 0).all()
+    book = [{"symbol": p.symbol, "qty": int(p.qty_open), "status": p.status,
+             "young": (_aware(p.opened_at) or now) > guard} for p in rows]
+    stale_min = int(getattr(config, "HOURLY_RECONCILE_STALE_ORDER_MINUTES", 90))
+    cutoff = now - timedelta(minutes=stale_min)
+    stale = []
+    _ver: dict = {}
+
+    def _verified():
+        """Dhan's own answer to "is today's CDSL authorisation done?", fetched at most once per pass and only when a stale SELL needs it."""
+        if "v" not in _ver:
+            try:
+                _ver["v"] = dhan_client.edis_verification_summary(db).get("verified_today")
+            except Exception:  # noqa: BLE001
+                _ver["v"] = None
+        return _ver["v"]
+    for o in db.query(models.TradeOrder).filter(
+            models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))).all():
+        ts = _aware(o.updated_at or o.created_at)
+        if ts is not None and ts < cutoff:
+            item = {"id": o.id, "symbol": o.symbol, "side": o.side, "status": o.status,
+                    "age_min": int((now - ts).total_seconds() // 60)}
+            if str(o.side).upper() == "SELL" and edis_blocked(db, o.symbol, now, _verified()):
+                item["cause"] = EDIS_CAUSE
+            stale.append(item)
+    drift = compute_drift(book, broker_qty_map(holdings, positions), stale)
+    return drift, len(book)
+
+
 async def run_hourly_reconcile(db, notify=None, now: Optional[datetime] = None) -> dict:
     """One read-only pass. Never raises. `notify` is an async callable(text); defaults to notifier.notify_async."""
     global _last_run_at, _last_report, _last_alert_sig, _last_alert_at
@@ -194,43 +242,10 @@ async def run_hourly_reconcile(db, notify=None, now: Optional[datetime] = None) 
     _last_run_at = now
     report: dict = {"ran_at": now.isoformat(), "mode": "REAL", "drift": [], "warn_count": 0, "error": None}
     try:
-        import config
-        import models
-        from execution import dhan_client
-        holdings = dhan_client.get_holdings(db)
-        positions = dhan_client.get_positions(db)
-        guard = now - timedelta(minutes=int(getattr(config, "HOLDINGS_SYNC_GUARD_MINUTES", 30)))
-        rows = db.query(models.TradePosition).filter(
-            models.TradePosition.mode == "REAL", models.TradePosition.status.in_(_LIVE_STATUSES),
-            models.TradePosition.qty_open > 0).all()
-        book = [{"symbol": p.symbol, "qty": int(p.qty_open), "status": p.status,
-                 "young": (_aware(p.opened_at) or now) > guard} for p in rows]
-        stale_min = int(getattr(config, "HOURLY_RECONCILE_STALE_ORDER_MINUTES", 90))
-        cutoff = now - timedelta(minutes=stale_min)
-        stale = []
-        _ver: dict = {}
-
-        def _verified():
-            """Dhan's own answer to "is today's CDSL authorisation done?", fetched at most once per pass and only when a stale SELL needs it."""
-            if "v" not in _ver:
-                try:
-                    _ver["v"] = dhan_client.edis_verification_summary(db).get("verified_today")
-                except Exception:  # noqa: BLE001
-                    _ver["v"] = None
-            return _ver["v"]
-        for o in db.query(models.TradeOrder).filter(
-                models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))).all():
-            ts = _aware(o.updated_at or o.created_at)
-            if ts is not None and ts < cutoff:
-                item = {"id": o.id, "symbol": o.symbol, "side": o.side, "status": o.status,
-                        "age_min": int((now - ts).total_seconds() // 60)}
-                if str(o.side).upper() == "SELL" and edis_blocked(db, o.symbol, now, _verified()):
-                    item["cause"] = EDIS_CAUSE
-                stale.append(item)
-        drift = compute_drift(book, broker_qty_map(holdings, positions), stale)
+        drift, n_book = await _off(_collect, db, now)   # round 672 (D7g): broker HTTP + DB queries off the event loop
         report["drift"] = drift
         report["warn_count"] = sum(1 for d in drift if d.get("severity") == "warn")
-        report["book_positions"] = len(book)
+        report["book_positions"] = n_book
     except Exception as e:  # noqa: BLE001 - must never break the tick
         logger.warning("hourly reconcile failed (non-fatal): %s: %s", type(e).__name__, e)
         report["error"] = f"{type(e).__name__}: {e}"

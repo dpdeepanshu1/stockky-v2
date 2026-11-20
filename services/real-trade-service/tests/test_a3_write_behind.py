@@ -170,9 +170,9 @@ class Col:
         self.key = key
 
 
-def _decision(action="WAIT", divertable=True, id_=None, dtype="ENTRY"):
+def _decision(action="WAIT", divertable=True, id_=None, dtype="ENTRY", symbol="AAA"):
     cols = ["id", "mode", "symbol", "decision_type", "action", "reasoning", "created_at"]
-    d = NS(id=id_, mode="REAL", symbol="AAA", decision_type=dtype, action=action, reasoning="r", created_at=None,
+    d = NS(id=id_, mode="REAL", symbol=symbol, decision_type=dtype, action=action, reasoning="r", created_at=None,
            _wb_divertable=divertable, __table__=NS(columns=[Col(c) for c in cols]))
     return d
 
@@ -190,7 +190,7 @@ def test_divert_moves_only_flagged_unflushed_waits(monkeypatch):
     _setup(monkeypatch, lambda db, rows: None)
     wb.register("entry_wait", lambda db, rows: got.extend(rows))
     keep_enter = _decision(action="ENTER")
-    keep_unflagged = _decision(divertable=False)
+    keep_unflagged = _decision(divertable=False, symbol="BBB")
     keep_flushed = _decision(id_=9)
     keep_exit = _decision(dtype="EXIT")
     move = _decision()

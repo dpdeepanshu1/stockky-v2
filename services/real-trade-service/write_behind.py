@@ -137,6 +137,11 @@ def status() -> dict:
     s["enabled"] = enabled()
     s["backoff_remaining_s"] = round(max(0.0, _backoff_until - time.monotonic()), 1)
     s["max_queue"] = max_queue()
+    try:
+        import wait_dedupe
+        s["wait_dedupe"] = wait_dedupe.status()
+    except Exception:  # noqa: BLE001
+        pass
     return s
 
 
@@ -283,6 +288,11 @@ def reset_for_tests() -> None:
     _last_timeout_log, _timeouts_since_log = 0.0, 0
     _handlers.clear()
     register_defaults()
+    try:
+        import wait_dedupe
+        wait_dedupe.reset_for_tests()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ── row helpers (payload <-> model) ───────────────────────────────────────────────────────────────────────────────────
@@ -305,7 +315,12 @@ def divert_pending_waits(db) -> int:
     and is written synchronously as before. Never raises."""
     n = 0
     try:
+        import wait_dedupe                                     # round 659 (D3): a repeat of the last WAIT row for the symbol is dropped, not written
         for obj in list(db.new):
+            if getattr(obj, "decision_type", None) == "ENTRY" and getattr(obj, "id", None) is None and hasattr(obj, "__table__"):
+                if wait_dedupe.is_repeat(obj):
+                    db.expunge(obj)
+                    continue
             if (getattr(obj, "_wb_divertable", False) and getattr(obj, "action", None) == "WAIT"
                     and getattr(obj, "decision_type", None) == "ENTRY"):
                 payload = decision_payload(obj)

@@ -34,6 +34,11 @@ _tried: Dict[str, float] = {}
 # (default 1 h, not 15 min), and a batch that is mostly empty / failed pauses the whole backfill for BOARD_BACKFILL_PAUSE_S (default 5 min).
 _hold_until: Dict[str, float] = {}
 _pause_until = [0.0]
+# round 661 (D5): the bar store prunes to the top BOARD_TOP_SYMBOLS names and forgets their backfill flag; a pruned name is re-created from ticks
+# with a late first bar and would be queued again, so the backfill never idled. Each symbol is now fetched at most BOARD_BACKFILL_MAX_PER_SYMBOL
+# times per IST day and the whole backfill at most BOARD_BACKFILL_DAILY_MAX fetches per IST day (counts reset when the day changes).
+_fills: Dict[str, int] = {}
+_daily = {"day": None, "fetches": 0}
 _state = {"requested": 0, "fetched": 0, "merged_symbols": 0, "merged_bars": 0, "empty": 0, "errors": 0, "last_error": None, "last_run": 0.0}
 
 
@@ -48,17 +53,25 @@ def _cfg(name: str, default):
 def reset() -> None:
     with _lock:
         _pending.clear(); _tried.clear(); _hold_until.clear(); _pause_until[0] = 0.0
+        _fills.clear(); _daily.update(day=None, fetches=0)
         _state.update(requested=0, fetched=0, merged_symbols=0, merged_bars=0, empty=0, errors=0, last_error=None, last_run=0.0)
 
 
 def state() -> dict:
     with _lock:
-        return dict(_state, pending=len(_pending))
+        return dict(_state, pending=len(_pending), fetches_today=_daily["fetches"])
 
 
 def pending_count() -> int:
     with _lock:
         return len(_pending)
+
+
+def _roll_day(now: float) -> None:
+    """Caller holds _lock. Clears the per-day counters when the IST day changes."""
+    day = int((now + 330 * 60) // 86400)
+    if _daily["day"] != day:
+        _daily["day"] = day; _daily["fetches"] = 0; _fills.clear()
 
 
 def request(symbols: Iterable[str], now: Optional[float] = None) -> int:
@@ -68,9 +81,16 @@ def request(symbols: Iterable[str], now: Optional[float] = None) -> int:
     now = time.time() if now is None else now
     retry = float(_cfg("BOARD_BACKFILL_RETRY_S", 900))
     added = 0
+    max_per = int(_cfg("BOARD_BACKFILL_MAX_PER_SYMBOL", 2))
+    daily_max = int(_cfg("BOARD_BACKFILL_DAILY_MAX", 800))
     with _lock:
+        _roll_day(now)
+        if _daily["fetches"] >= daily_max:
+            return 0
         for s in symbols:
             if not s or s in _pending:
+                continue
+            if _fills.get(s, 0) >= max_per:
                 continue
             last = _tried.get(s)
             if last is not None and now - last < retry:
@@ -140,9 +160,17 @@ def run_pending(max_n: Optional[int] = None, now: Optional[float] = None,
     with _lock:
         if _pause_until[0] > now:
             return {"tried": 0, "merged_symbols": 0, "merged_bars": 0, "empty": 0, "errors": 0, "paused": True}
+        _roll_day(now)
+        room = int(_cfg("BOARD_BACKFILL_DAILY_MAX", 800)) - _daily["fetches"]
+        if room <= 0:
+            _pending.clear()
+            return {"tried": 0, "merged_symbols": 0, "merged_bars": 0, "empty": 0, "errors": 0, "daily_cap": True}
         batch = []
-        while _pending and len(batch) < max_n:
+        while _pending and len(batch) < min(max_n, room):
             batch.append(_pending.popitem(last=False)[0])
+        _daily["fetches"] += len(batch)
+        for b in batch:
+            _fills[b] = _fills.get(b, 0) + 1
     did = {"tried": len(batch), "merged_symbols": 0, "merged_bars": 0, "empty": 0, "errors": 0}
     if not batch:
         return did

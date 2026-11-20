@@ -319,27 +319,42 @@ def adapt_rows(rows: list, dial: Optional[str] = None) -> list:
     return out
 
 
-def ensure_surprise_schema() -> dict:
+_SCHEMA_DONE: set = set()
+_SCHEMA_LOCK = threading.Lock()
+
+
+def ensure_surprise_schema(force: bool = False) -> dict:
     """Create table/indexes if missing. Safe to call on every premarket / scan."""
     url = database_url()
     if not url:
         return {"ok": False, "error": "No DATABASE_URL / CACHE_DATABASE_URL configured"}
+    # round 662 (D8): the DDL only has to succeed once per process. Before this every call built a brand-new engine (a fresh TCP + TLS /
+    # wallet handshake, 100-700 ms and sometimes 3-4 s) just to re-run CREATE ... IF-NOT-EXISTS statements - 100+ engines in 21 h. A failed
+    # run is not remembered, so it is retried on the next call. force=True re-runs it (for example after a table was dropped by hand).
+    key = url
+    if not force:
+        with _SCHEMA_LOCK:
+            if key in _SCHEMA_DONE:
+                return {"ok": True, "table": TABLE_NAME, "backend": dialect(), "cached": True}
     eng = None
     try:
         from sqlalchemy import text
 
         dial = dialect()
         eng = make_engine("stockky-surprise-schema")
+        all_ok = True
         if eng is None:
             return {"ok": False, "error": "Could not build a database engine"}
 
         if dial == "oracle":
             # Oracle auto-commits DDL and has no IF NOT EXISTS: run each
             # statement in its own transaction and swallow "already exists".
+            all_ok = _oc is not None            # round 662: exec_ddl_safe returns False on a real failure (it never raises)
             for stmt in ddl_statements(dial):
                 s = stmt.strip()
                 if s and _oc is not None:
-                    _oc.exec_ddl_safe(eng, s, "oracle")
+                    if not _oc.exec_ddl_safe(eng, s, "oracle"):
+                        all_ok = False
         else:
             with eng.begin() as conn:
                 for stmt in ddl_statements(dial):
@@ -348,6 +363,9 @@ def ensure_surprise_schema() -> dict:
                         conn.execute(text(s))
 
         logger.info("surprise_static_feed schema ready (backend=%s)", dial)
+        if all_ok:                              # a failed / skipped DDL statement is retried on the next call
+            with _SCHEMA_LOCK:
+                _SCHEMA_DONE.add(key)
         return {"ok": True, "table": TABLE_NAME, "backend": dial}
     except Exception as e:
         logger.warning("ensure_surprise_schema failed: %s", e)

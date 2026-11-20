@@ -559,8 +559,54 @@ class TestLivePrices:
 # _self_heal_orders helper
 # ══════════════════════════════════════════════════════════════════════════
 class TestSelfHealOrders:
+    def _placed_order(self, db, status="PLACED"):
+        db.add(models.TradeOrder(mode="DEMO", symbol="ABC", side="BUY", qty=1, order_type="LIMIT", limit_price=10.0, status=status))
+        db.commit()
+
+    def test_demo_no_unsettled_orders_skips_both_checks(self):
+        """round 666 (D7d): nothing PLACED / PARTIAL -> both callees are no-ops, so the poll skips them."""
+        db = _fresh_db()
+        with mock.patch("entry_engine.entry.check_pending_fills") as cf, \
+             mock.patch("entry_engine.entry.expire_stale_orders") as es:
+            _run(main._self_heal_orders(db, "DEMO"))
+        cf.assert_not_called()
+        es.assert_not_called()
+
+    def test_demo_partial_order_still_runs_checks(self):
+        db = _fresh_db()
+        self._placed_order(db, "PARTIAL")
+        calls = []
+
+        async def _a(db_, mode):
+            calls.append("c")
+
+        async def _b(db_, mode):
+            calls.append("e")
+
+        with mock.patch("entry_engine.entry.check_pending_fills", side_effect=_a), \
+             mock.patch("entry_engine.entry.expire_stale_orders", side_effect=_b):
+            _run(main._self_heal_orders(db, "DEMO"))
+        assert calls == ["c", "e"]
+
+    def test_demo_precheck_error_falls_back_to_full_pass(self):
+        db = _fresh_db()
+        calls = []
+
+        async def _a(db_, mode):
+            calls.append("c")
+
+        async def _b(db_, mode):
+            calls.append("e")
+
+        with mock.patch.object(main, "_db_off_loop", side_effect=RuntimeError("pool down")), \
+             mock.patch("entry_engine.entry.check_pending_fills", side_effect=_a), \
+             mock.patch("entry_engine.entry.expire_stale_orders", side_effect=_b):
+            _run(main._self_heal_orders(db, "DEMO"))
+        assert calls == ["c", "e"]
+
     def test_demo_lock_acquired_runs_checks(self):
         db = _fresh_db()
+        self._placed_order(db)
         calls = []
 
         async def _fake_check_fills(db_, mode):
@@ -579,6 +625,7 @@ class TestSelfHealOrders:
 
     def test_demo_lock_busy_skips_without_raising(self):
         db = _fresh_db()
+        self._placed_order(db)
         lock = _get_lock("DEMO")
         lock.acquire()
         try:

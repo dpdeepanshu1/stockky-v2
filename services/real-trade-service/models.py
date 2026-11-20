@@ -324,6 +324,13 @@ class TradeDecision(Base):
     # day position, and for an approved entry the 20-level book). RECORD ONLY - nothing reads it to decide. NULL on older rows / when no depth was known.
     flow_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
+    # Round 658: the table had only its primary key, so every filter on mode / decision_type / created_at (the dashboard, the 3-day decision
+    # counts, the day outcome job) scanned the whole table: 3-5 s per query at 88k rows on 20 Nov. Created live on the VM the same day;
+    # db.py's _ensure_hot_path_indexes keeps an already-deployed database in step (additive, idempotent).
+    __table_args__ = (
+        Index("ix_trade_decisions_mode_type_created", "mode", "decision_type", "created_at"),
+        Index("ix_trade_decisions_mode_symbol_created", "mode", "symbol", "created_at"),
+    )
 
 
 # ── Orders / order lifecycle / fills ────────────────────────────────────────
@@ -659,6 +666,8 @@ class TradeExitDecision(Base):
     reasoning = Column(Text, nullable=True)
     ltp_at_decision = Column(Float, nullable=True)
     evaluated_at = Column(DateTime, nullable=False, default=_now)
+    # Round 658: log_retention.py deletes old HOLD rows by (action, evaluated_at); 310k rows on 20 Nov and no index to find them by.
+    __table_args__ = (Index("ix_trade_exit_decisions_action_evaluated", "action", "evaluated_at"),)
 
 
 # ── Risk events (every REJECTED/BLOCKED_GLOBAL verdict, for tuning limits) ──

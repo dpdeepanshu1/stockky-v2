@@ -128,6 +128,30 @@ async def _commit_off_loop(db) -> None:
     await _aio.to_thread(db.commit)
 
 
+def _offload(fn):
+    """round 661 (D7): the route body is plain blocking code (SQLAlchemy / Dhan HTTP). Run it in a worker thread so one slow or
+    stalled DB call (8 s timeouts seen) can no longer freeze /health and every other route on the shared event loop. The wrapper
+    stays a coroutine function, so callers and tests that await / asyncio.run(...) the handler are unchanged, and functools.wraps
+    keeps the signature FastAPI reads for Depends()/Query()/Path()."""
+    import functools
+
+    @functools.wraps(fn)
+    async def _wrapper(*args, **kwargs):
+        return await run_in_threadpool(fn, *args, **kwargs)
+    return _wrapper
+
+
+async def _db_off_loop(fn, *args, **kwargs):
+    """round 665 (D7c): run ONE blocking DB/HTTP step of a route that also awaits something (live prices, self-heal) in a worker thread,
+    so a stalled query (8 s DPY-4024 seen) no longer freezes /health and every other route. The route stays `async def`; only the blocking
+    step moves. A Session is used by one request at a time and the awaits run in sequence, so the hand-off is safe. Kill-switch for the
+    VM: set ROUTES_DB_OFF_LOOP=0 in .env and recreate real-trade-service to run every step inline exactly as before round 665."""
+    import os as _os
+    if _os.environ.get("ROUTES_DB_OFF_LOOP", "1").strip().lower() in ("0", "false", "no", "off"):
+        return fn(*args, **kwargs)
+    return await run_in_threadpool(fn, *args, **kwargs)
+
+
 app = FastAPI(title="Stockky Real Automatic Trade", version="0.1.0-phase1", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
@@ -164,6 +188,16 @@ async def _boot_forensics_shutdown():
     try:
         import boot_forensics
         boot_forensics.mark_clean_shutdown()
+    except Exception:
+        pass
+
+
+@_on_shutdown
+async def _log_retention_shutdown():
+    """round 658: ask the nightly retention thread to stop (it is a daemon thread; this just ends its loop cleanly)."""
+    try:
+        import log_retention
+        log_retention.stop()
     except Exception:
         pass
 
@@ -299,6 +333,13 @@ async def startup() -> None:
         logger.debug("startup regime adaptive loop not started (non-fatal): %s", _e)
     from execution import auto_pilot
     auto_pilot.start()
+    # round 658: nightly retention of repeated evidence rows (old WAIT decisions, old HOLD exit rows), outside market hours only.
+    # LOG_RETENTION_ENABLED=0 turns it off; the thread never raises into boot.
+    try:
+        import log_retention as _log_retention
+        _log_retention.start()
+    except Exception as _e:
+        logger.debug("startup log retention not started (non-fatal): %s", _e)
     # Adaptive threshold staleness check — logs + Telegram warning if any
     # regime-dependent constant is older than ADAPTIVE_STALE_THRESHOLD_DAYS.
     # round 512: defer_until_snapshot=True runs the check after regime_adaptive's first snapshot (45 s after boot) instead of at once,
@@ -649,7 +690,8 @@ def pullback_rearm_route():
 
 
 @app.get("/status/{mode}")
-async def gate_status(mode: str, db: Session = Depends(get_db)):
+@_offload
+def gate_status(mode: str, db: Session = Depends(get_db)):
     """Public-ish (no admin auth) — the dashboard needs to render 🔴/🟢
     badges before login. Returns only booleans/timestamps, never anything
     secret."""
@@ -902,7 +944,8 @@ async def connect_dhan(body: ConnectDhanRequest, admin: str = Depends(require_ad
 
 
 @app.post("/dhan/regenerate-token")
-async def regenerate_dhan_token(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def regenerate_dhan_token(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     # Manual trigger for the same TOTP auto-refresh cycle_runner and the
     # notification-scheduler's cron already call on a schedule — for when
     # the Dhan token expired and the scheduled refresh didn't fire in time.
@@ -922,7 +965,8 @@ async def regenerate_dhan_token(admin: str = Depends(require_admin), db: Session
 
 
 @app.get("/dhan/fno-credentials")
-async def dhan_fno_credentials(response: Response, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_fno_credentials(response: Response, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Hands the CURRENT Dhan client id + access token to fno-options-service, but only while its operator arms F&O REAL for the day (that call carries the admin's
     own session token). Plaintext leaves this service ONLY here: admin session required, token must be valid, every hand-over is written to the audit log,
     the response is never cached. fno-options-service keeps it in memory only (never on disk) and drops it on disarm / restart."""
@@ -938,12 +982,14 @@ async def dhan_fno_credentials(response: Response, admin: str = Depends(require_
 
 
 @app.get("/dhan/status")
-async def dhan_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     return dhan_credentials.connection_status(db)
 
 
 @app.get("/capital/board")
-async def capital_board_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def capital_board_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Round 242: the three-way capital split (Real Trade / Position Stocks / F&O): the board's percentages and rupee amounts, each service's score and what THIS service uses now.
     Read only. CAPITAL_ALLOC_MODE shadow (default) shows it without changing any sizing; live applies it."""
     from execution import capital_alloc
@@ -1010,7 +1056,8 @@ async def dhan_edis_authorize_form(
 
 
 @app.get("/dhan/edis/status")
-async def dhan_edis_status(admin: str = Depends(require_admin), db: Session = Depends(get_db), isin: str = "ALL"):
+@_offload
+def dhan_edis_status(admin: str = Depends(require_admin), db: Session = Depends(get_db), isin: str = "ALL"):
     """Read-only check: has today's CDSL authorization already been done?
     Check this before assuming an exit will fail — no need to re-run the
     T-PIN flow if aprvdQty already covers what you're about to sell."""
@@ -1018,13 +1065,15 @@ async def dhan_edis_status(admin: str = Depends(require_admin), db: Session = De
 
 
 @app.get("/dhan/ddpi")
-async def dhan_ddpi(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_ddpi(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """E259: Dhan's own DDPI ('fast sell') flag from GET /v2/profile: {active: true|false|null, raw: 'Active'|...}. null = could not tell. Read-only; cached 1 h."""
     return dhan_client.ddpi_status(db)
 
 
 @app.get("/dhan/edis/summary")
-async def dhan_edis_summary(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_edis_summary(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Dashboard-friendly rollup of the daily CDSL eDIS check — this is what
     the Real Trade overview page's green/red badge polls, right next to the
     Dhan connection status. See dhan_client.edis_verification_summary for
@@ -1073,7 +1122,8 @@ def auth_config_check():
 
 
 @app.get("/dhan/funds")
-async def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Read-only passthrough — proves the connection actually works before
     the admin bothers arming anything."""
     from execution import dhan_client
@@ -1087,7 +1137,8 @@ async def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(
 
 
 @app.get("/dhan/account")
-async def dhan_account(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_account(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """One call for the dashboard's Dhan Account card: connection/token
     state (always available, DB-only) plus a live funds call (proves the
     token actually still works against Dhan right now, not just that it
@@ -1108,7 +1159,8 @@ async def dhan_account(admin: str = Depends(require_admin), db: Session = Depend
 
 # ── Routes: risk config (gate 3) ────────────────────────────────────────────
 @app.get("/risk-config/{mode}")
-async def get_risk_config(mode: str, db: Session = Depends(get_db)):
+@_offload
+def get_risk_config(mode: str, db: Session = Depends(get_db)):
     """Read-only, no admin auth — matches the public-ish pattern of GET
     /status/{mode}. Returns the same fields POST /risk-config accepts so
     the frontend can populate its risk-config form without a separate
@@ -1223,14 +1275,16 @@ async def arm(mode: str, admin: Optional[str] = Depends(require_admin_if_real), 
 
 
 @app.post("/disarm/{mode}")
-async def disarm(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+@_offload
+def disarm(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
     _disarm(db, mode, "Manual disarm by admin", actor=admin)
     return {"ok": True, "armed": False, "mode": mode}
 
 
 @app.post("/emergency-pause")
-async def emergency_pause(db: Session = Depends(get_db)):
+@_offload
+def emergency_pause(db: Session = Depends(get_db)):
     """Pauses BOTH modes at once — the 🛑 PAUSE NEW TRADES button.
     Deliberately UNAUTHENTICATED: a stop/pause action only ever reduces
     risk, never increases it, so gating it behind admin login would be
@@ -1298,20 +1352,23 @@ def _approvals_mode(mode: str) -> str:
 
 
 @app.get("/approvals/{mode}")
-async def approvals_status(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+@_offload
+def approvals_status(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     from entry_engine import approve_first as _af
     return _af.status(db, _approvals_mode(mode))
 
 
 @app.post("/approvals/{mode}/reset")
-async def approvals_reset(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+@_offload
+def approvals_reset(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     """Start a fresh round of APPROVE_FIRST_N approvals now (as if the settings had just changed)."""
     from entry_engine import approve_first as _af
     return _af.do_reset(db, _approvals_mode(mode))
 
 
 @app.post("/approvals/{mode}/{symbol}/approve")
-async def approvals_approve(mode: str, symbol: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+@_offload
+def approvals_approve(mode: str, symbol: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     from entry_engine import approve_first as _af
     res = _af.do_approve(db, _approvals_mode(mode), symbol)
     if not res.get("ok"):
@@ -1320,7 +1377,8 @@ async def approvals_approve(mode: str, symbol: str, admin: Optional[str] = Depen
 
 
 @app.post("/approvals/{mode}/{symbol}/reject")
-async def approvals_reject(mode: str, symbol: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+@_offload
+def approvals_reject(mode: str, symbol: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     from entry_engine import approve_first as _af
     res = _af.do_reject(db, _approvals_mode(mode), symbol)
     if not res.get("ok"):
@@ -1785,7 +1843,8 @@ async def pipeline_status_route(mode: str, admin: Optional[str] = Depends(requir
 
 
 @app.get("/watchlist-entries/{mode}")
-async def watchlist_entries_route(
+@_offload
+def watchlist_entries_route(
     mode: str,
     status: Optional[str] = None,
     limit: int = 100,
@@ -1845,7 +1904,8 @@ async def watchlist_entries_route(
 
 
 @app.get("/resilience/status")
-async def resilience_status_route(
+@_offload
+def resilience_status_route(
     admin: Optional[str] = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -2126,6 +2186,21 @@ async def _self_heal_orders(db: Session, mode: str) -> None:
             # very next poll retries.
             from execution.auto_pilot import _get_lock
             from entry_engine.entry import check_pending_fills, expire_stale_orders
+            # round 666 (D7d): check_pending_fills only acts on PLACED BUY orders and expire_stale_orders only on PLACED / PARTIAL ones,
+            # so with none of those both are no-ops apart from their own queries - which ran on the event loop on every dashboard poll.
+            # One cheap existence query in a worker thread decides; any error here falls through to the original path (fail-open).
+            def _has_unsettled_orders() -> bool:
+                return db.query(models.TradeOrder.id).filter(
+                    models.TradeOrder.mode == mode,
+                    models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+                ).first() is not None
+            try:
+                _unsettled = await _db_off_loop(_has_unsettled_orders)
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("self-heal (%s) pre-check failed, running the full pass: %s", mode, _e)
+                _unsettled = True
+            if not _unsettled:
+                return
             lock = _get_lock(mode)
             if lock.acquire(blocking=False):
                 try:
@@ -2183,15 +2258,17 @@ async def _self_heal_orders(db: Session, mode: str) -> None:
 async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     mode = mode.upper()
     await _self_heal_orders(db, mode)
-    rows = (
-        db.query(models.TradePosition)
-        .filter(models.TradePosition.mode == mode,
-                models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")))
-        .all()
-    )  # includes PENDING_EXIT (a REAL exit already sent to Dhan, awaiting confirmation) — the DEMO/entry-cycle
+    def _load_open_positions():
+        return (
+            db.query(models.TradePosition)
+            .filter(models.TradePosition.mode == mode,
+                    models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")))
+            .all()
+        )
+    rows = await _db_off_loop(_load_open_positions)  # round 665 (D7c): query off the event loop. Includes PENDING_EXIT (a REAL exit already sent to Dhan, awaiting confirmation) — the DEMO/entry-cycle
        # open_positions() helper deliberately excludes it from re-evaluation; this endpoint should still show it.
     prices = await _live_prices([p.symbol for p in rows])
-    _setup_by_pos = _tape_fields_for_positions(db, rows, with_tightens=False)   # E285 round 104: setup stamp of each entry (fail-open: {} on any error)
+    _setup_by_pos = await _db_off_loop(_tape_fields_for_positions, db, rows, with_tightens=False)   # round 665 (D7c) off-loop; E285 round 104: setup stamp of each entry (fail-open: {} on any error)
     out = []
     for p in rows:
         ltp = prices.get(p.symbol)
@@ -2352,7 +2429,8 @@ async def flow_symbol_route(symbol: str, admin: Optional[str] = Depends(require_
 
 
 @app.get("/positions/{mode}/history")
-async def list_closed_positions(
+@_offload
+def list_closed_positions(
     mode: str, limit: int = 100,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
@@ -2401,7 +2479,8 @@ async def list_closed_positions(
 
 
 @app.get("/positions/{mode}/breakdown")
-async def closed_positions_breakdown(
+@_offload
+def closed_positions_breakdown(
     mode: str, days: int = 7,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
@@ -2428,7 +2507,8 @@ def _records_mode(mode: str) -> str:
 
 
 @app.get("/positions/{mode}/records")
-async def closed_position_records(
+@_offload
+def closed_position_records(
     mode: str, days: int = 7, symbol: Optional[str] = None, limit: int = 200, include_imported: bool = False,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
@@ -2467,7 +2547,8 @@ async def hourly_reconcile_report(
 
 
 @app.get("/positions/{mode}/report")
-async def closed_positions_expectancy_report(
+@_offload
+def closed_positions_expectancy_report(
     mode: str, days: int = 7,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
@@ -2536,7 +2617,8 @@ async def run_daily_report_now(
 
 
 @app.get("/stats/regime-override")
-async def regime_override_stats(
+@_offload
+def regime_override_stats(
     mode: str = "REAL", admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
     """2026-09-18 audit fix #2 — count + win-rate among CLOSED positions that
@@ -2645,13 +2727,15 @@ async def list_orders(mode: str, days: int = 2, admin: Optional[str] = Depends(r
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     mode = mode.upper()
     await _self_heal_orders(db, mode)
-    rows = (
-        db.query(models.TradeOrder).filter(
-            models.TradeOrder.mode == mode,
-            models.TradeOrder.created_at >= cutoff,
+    def _load_orders():
+        return (
+            db.query(models.TradeOrder).filter(
+                models.TradeOrder.mode == mode,
+                models.TradeOrder.created_at >= cutoff,
+            )
+            .order_by(models.TradeOrder.created_at.desc()).all()
         )
-        .order_by(models.TradeOrder.created_at.desc()).all()
-    )
+    rows = await _db_off_loop(_load_orders)   # round 665 (D7c): query off the event loop
     # Only bother pricing orders still "in flight" (waiting on a limit fill,
     # in full or in part) — a FILLED/CANCELLED/REJECTED/EXPIRED order's
     # current price is irrelevant dashboard noise, and skipping them keeps
@@ -2682,7 +2766,8 @@ async def list_orders(mode: str, days: int = 2, admin: Optional[str] = Depends(r
 
 
 @app.get("/adaptive/status")
-async def get_adaptive_status(db: Session = Depends(get_db)):
+@_offload
+def get_adaptive_status(db: Session = Depends(get_db)):
     """
     Shows the adaptive regime threshold, staleness of regime-dependent
     constants, and history of recorded market scores.
@@ -2731,7 +2816,8 @@ async def run_market_research(trigger: str = "manual", admin: str = Depends(requ
 
 
 @app.get("/adaptive/market-params/status")
-async def get_adaptive_market_params_status(db: Session = Depends(get_db)):
+@_offload
+def get_adaptive_market_params_status(db: Session = Depends(get_db)):
     """
     2026-09-11 addition. Shows the current adaptive values (and their
     static fallbacks + how much self-recorded history backs each one) for
@@ -2751,7 +2837,8 @@ async def get_adaptive_market_params_status(db: Session = Depends(get_db)):
         }
 
 @app.get("/board-overlay/{mode}")
-async def board_overlay_route(
+@_offload
+def board_overlay_route(
     mode: str,
     admin: Optional[str] = Depends(require_admin_if_real),
     db: Session = Depends(get_db),
@@ -2860,11 +2947,13 @@ async def list_candidates(
     if mode not in ("DEMO", "REAL"):
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
 
-    raw_candidates = (
-        db.query(models.TradeCandidate).filter_by(mode=mode)
-        .order_by(models.TradeCandidate.received_at.desc())
-        .limit(min(max(limit, 1), 200)).all()
-    )
+    def _load_raw_candidates():
+        return (
+            db.query(models.TradeCandidate).filter_by(mode=mode)
+            .order_by(models.TradeCandidate.received_at.desc())
+            .limit(min(max(limit, 1), 200)).all()
+        )
+    raw_candidates = await _db_off_loop(_load_raw_candidates)   # round 665 (D7c): query off the event loop
     candidates = []
     seen: dict[str, int] = {}
     for c in raw_candidates:
@@ -2890,15 +2979,17 @@ async def list_candidates(
     # a mismatched one from a different candidate row.
     latest_decisions: dict[int, models.TradeDecision] = {}
     if symbols:
-        decision_rows = (
-            db.query(models.TradeDecision)
-            .filter(models.TradeDecision.mode == mode,
-                    models.TradeDecision.decision_type == "ENTRY",
-                    models.TradeDecision.symbol.in_(set(symbols)),
-                    models.TradeDecision.candidate_id.isnot(None))
-            .order_by(models.TradeDecision.created_at.desc())
-            .all()
-        )
+        def _load_decision_rows():
+            return (
+                db.query(models.TradeDecision)
+                .filter(models.TradeDecision.mode == mode,
+                        models.TradeDecision.decision_type == "ENTRY",
+                        models.TradeDecision.symbol.in_(set(symbols)),
+                        models.TradeDecision.candidate_id.isnot(None))
+                .order_by(models.TradeDecision.created_at.desc())
+                .all()
+            )
+        decision_rows = await _db_off_loop(_load_decision_rows)   # round 665 (D7c)
         for d in decision_rows:
             if d.candidate_id not in latest_decisions:
                 latest_decisions[d.candidate_id] = d  # first hit per candidate = most recent
@@ -3010,7 +3101,8 @@ async def entry_guard_stats(admin: Optional[str] = Depends(require_admin)):
 
 
 @app.get("/live/state")
-async def live_state_route(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def live_state_route(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E283: Real Trade's live state for the Calibration tab in one read: the pool figures (trade_accounts), the heat numbers (own + the other service's) and how the newest
     ENTER decisions were stamped by setup. Read-only; each part answers on its own."""
     try:
@@ -3021,7 +3113,8 @@ async def live_state_route(admin: Optional[str] = Depends(require_admin), db: Se
 
 
 @app.get("/swing/status")
-async def swing_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def swing_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132 (swing plan S3-S5): the swing lane at a glance. Read-only."""
     try:
         from swing import engine as _se, live as _sl
@@ -3045,7 +3138,8 @@ async def swing_status(admin: Optional[str] = Depends(require_admin), db: Sessio
 
 
 @app.get("/swing/ledger")
-async def swing_ledger(kind: str = "", status: str = "", limit: int = 300, admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def swing_ledger(kind: str = "", status: str = "", limit: int = 300, admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132: the swing ledger rows (SHADOW = what the lane would have done, LIVE = real DEMO / REAL orders), newest first. Read-only."""
     try:
         from swing.repo import SqlRepo
@@ -3056,7 +3150,8 @@ async def swing_ledger(kind: str = "", status: str = "", limit: int = 300, admin
 
 
 @app.get("/swing/snapshots")
-async def swing_snapshots(days: int = 60, admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def swing_snapshots(days: int = 60, admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132: the saved daily rankings (compact rows) for scripts/swing_shadow_report.py. Read-only."""
     try:
         import json as _json
@@ -3068,7 +3163,8 @@ async def swing_snapshots(days: int = 60, admin: Optional[str] = Depends(require
 
 
 @app.get("/swing/report")
-async def swing_report(kind: str = "SHADOW", mode: str = "", since: str = "", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def swing_report(kind: str = "SHADOW", mode: str = "", since: str = "", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132: verdict (NOT_ENOUGH_DATA / USEFUL / NO_EDGE) of the CLOSED swing ledger trades after costs. Read-only. E135: `since=YYYY-MM-DD` counts only picks signalled on or after that day (use the day the stock list changed)."""
     try:
         from swing import engine as _se
@@ -3090,7 +3186,8 @@ async def swing_scan_now(admin: Optional[str] = Depends(require_admin)):
 
 
 @app.post("/swing/resume")
-async def swing_resume(mode: str = "DEMO", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def swing_resume(mode: str = "DEMO", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132 (plan S5): clear the swing auto-pause for a mode. Only trades closed AFTER this count towards the next pause."""
     m = (mode or "").upper()
     if m not in ("DEMO", "REAL"):
@@ -3125,7 +3222,8 @@ async def swing_probe(phase: str = "status", yes: bool = False, symbol: str = ""
 
 
 @app.get("/review-fixes/status")
-async def review_fixes_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def review_fixes_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """group 473: one read-only view of the 20 Oct review fixes (groups 470-472): the effective settings, whether the late-entry cut-off is
     blocking now, today's losing stop-outs and their symbols, and the opening-range shadow counters since boot. Nothing reads it to decide."""
     try:
@@ -3183,12 +3281,14 @@ async def structure_status(
     rows: list = []
     prices: dict = {}
     try:
-        q = (db.query(models.TradeDecision)
-             .filter(models.TradeDecision.mode == mode, models.TradeDecision.decision_type == "ENTRY",
-                     models.TradeDecision.structure_json.isnot(None), models.TradeDecision.created_at >= since)
-             .order_by(models.TradeDecision.created_at.desc()).limit(2000).all())
-        rows = [{"symbol": d.symbol, "created_at": iso_utc(d.created_at), "price": d.proposed_price,
-                 "structure_json": d.structure_json} for d in q]
+        def _load_structure_rows():
+            _q = (db.query(models.TradeDecision)
+                  .filter(models.TradeDecision.mode == mode, models.TradeDecision.decision_type == "ENTRY",
+                          models.TradeDecision.structure_json.isnot(None), models.TradeDecision.created_at >= since)
+                  .order_by(models.TradeDecision.created_at.desc()).limit(2000).all())
+            return [{"symbol": d.symbol, "created_at": iso_utc(d.created_at), "price": d.proposed_price,
+                     "structure_json": d.structure_json} for d in _q]
+        rows = await _db_off_loop(_load_structure_rows)   # round 665 (D7c): query off the event loop
         rejected = list(dict.fromkeys(r["symbol"] for r in rows if '"would_reject":true' in (r["structure_json"] or "")))[:30]
         prices = await _live_prices(rejected)
     except Exception as e:  # noqa: BLE001 - a status page must not raise
@@ -3198,8 +3298,10 @@ async def structure_status(
         _exit_stats = _structure_exit.stats()      # group365: what the daily structure did to OPEN positions (read-only)
     except Exception as e:  # noqa: BLE001
         _exit_stats = {"error": str(e)[:120]}
-    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "gate_mode_effective": _sg.mode_for(mode, db), "oos_observations": _sg.oos_count(db, mode), "oos_needed": config.STRUCTURE_ENFORCE_MIN_OOS, "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices),
-            "exit": _exit_stats}
+    def _structure_payload():   # round 665 (D7c): mode_for(mode, db) / oos_count(db, mode) hit the DB
+        return {"mode": mode, "gate_mode": _sg.mode_for(mode), "gate_mode_effective": _sg.mode_for(mode, db), "oos_observations": _sg.oos_count(db, mode), "oos_needed": config.STRUCTURE_ENFORCE_MIN_OOS, "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices),
+                "exit": _exit_stats}
+    return await _db_off_loop(_structure_payload)
 
 
 @app.get("/structure/observations/{mode}")
@@ -3547,7 +3649,8 @@ async def manual_reconcile(mode: str, admin: Optional[str] = Depends(require_adm
 
 
 @app.post("/reconcile/{mode}/holdings-sync")
-async def manual_holdings_sync(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+@_offload
+def manual_holdings_sync(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     """Manual, on-demand trigger for JUST the ghost-position sweep (see
     portfolio.holdings_sync_reconcile) — the same check that also runs
     automatically as part of every full reconcile_real_orders() pass
@@ -3586,7 +3689,8 @@ async def manual_holdings_sync(mode: str, admin: Optional[str] = Depends(require
 
 
 @app.get("/audit-log")
-async def audit_log(mode: Optional[str] = None, limit: int = 50, authorization: str = Header(default=""), db: Session = Depends(get_db)):
+@_offload
+def audit_log(mode: Optional[str] = None, limit: int = 50, authorization: str = Header(default=""), db: Session = Depends(get_db)):
     # mode=None (all modes) or mode=REAL both require admin, since either
     # could surface REAL-mode activity; only an explicit mode=DEMO query
     # is open. Manual check (not Depends) since mode is optional here and
@@ -3610,7 +3714,7 @@ async def dhan_live_positions(admin: str = Depends(require_admin), db: Session =
     trade_positions table. Used by the dashboard to show what's actually
     open at the broker level, independent of reconciliation state."""
     try:
-        positions = dhan_client.get_positions(db)
+        positions = await _db_off_loop(dhan_client.get_positions, db)   # round 665 (D7c): broker HTTP + token read off the event loop
     except dhan_client.DhanNotConnectedError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -3633,7 +3737,8 @@ async def dhan_live_positions(admin: str = Depends(require_admin), db: Session =
 
 
 @app.get("/dhan/holdings")
-async def dhan_live_holdings(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_live_holdings(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Live demat holdings from Dhan."""
     try:
         holdings = dhan_client.get_holdings(db)
@@ -3646,7 +3751,8 @@ async def dhan_live_holdings(admin: str = Depends(require_admin), db: Session = 
 
 
 @app.get("/dhan/orders")
-async def dhan_live_orders(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+@_offload
+def dhan_live_orders(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Live today's order list from Dhan broker."""
     try:
         orders = dhan_client.get_order_list(db)

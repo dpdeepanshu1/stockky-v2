@@ -49,6 +49,21 @@ def dialect() -> str:
     return "postgresql"
 
 
+def _pool_sizes():
+    """round 661/662 (D9): (pool_size, max_overflow) from RT_DB_POOL_SIZE / RT_DB_MAX_OVERFLOW, default 4 / 4 (the 31-Aug sizing above).
+    A dedicated name on purpose: the shared DB_POOL_SIZE in .env files is written for other services (2-3) and would silently shrink this
+    pool below the two background loops plus dashboard traffic it was sized for. Blank / non-numeric -> default; pool_size is at least 2."""
+    import os
+
+    def _n(name, default, lo):
+        raw = (os.environ.get(name) or "").strip()
+        try:
+            return max(lo, int(raw)) if raw else default
+        except ValueError:
+            return default
+    return _n("RT_DB_POOL_SIZE", 4, 2), _n("RT_DB_MAX_OVERFLOW", 4, 0)
+
+
 def get_engine():
     """Lazily build (once) and return the SQLAlchemy engine for whichever
     backend is configured. Returns None if neither Oracle nor a Postgres
@@ -77,11 +92,12 @@ def get_engine():
     # modest for a service with no write-heavy hot path, but enough
     # headroom for 2 background loops + a few concurrent dashboard/API
     # requests without queuing past pool_timeout.
+    _psize, _pover = _pool_sizes()
     if _oc.oracle_is_configured(config.DATABASE_URL):
         _engine, _ = _oc.build_oracle_engine(
             config.DATABASE_URL,
-            db_pool_size=4,
-            db_max_overflow=4,
+            db_pool_size=_psize,
+            db_max_overflow=_pover,
         )
         return _engine
 
@@ -93,8 +109,8 @@ def get_engine():
     _engine = create_engine(
         url,
         pool_pre_ping=True,
-        pool_size=4,
-        max_overflow=4,
+        pool_size=_psize,
+        max_overflow=_pover,
         pool_timeout=30,
         connect_args={"connect_timeout": 10, "application_name": "real-trade-service"},
     )
@@ -973,6 +989,11 @@ def _ensure_hot_path_indexes(engine, dialect_name: str) -> None:
     indexes = [
         ("ix_trade_orders_mode_created", "trade_orders", "mode, created_at"),
         ("ix_trade_candidates_mode_consumed_recv", "trade_candidates", "mode, consumed, received_at"),
+        # Round 658: trade_decisions had only its primary key (88k rows, 3-5 s scans on 20 Nov); trade_exit_decisions (310k rows) is pruned by
+        # (action, evaluated_at) by log_retention.py.
+        ("ix_trade_decisions_mode_type_created", "trade_decisions", "mode, decision_type, created_at"),
+        ("ix_trade_decisions_mode_symbol_created", "trade_decisions", "mode, symbol, created_at"),
+        ("ix_trade_exit_decisions_action_evaluated", "trade_exit_decisions", "action, evaluated_at"),
     ]
     for index_name, table, cols in indexes:
         sql = _oc.create_index_sql(dialect_name, index_name, table, cols)

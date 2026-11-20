@@ -810,6 +810,9 @@ INDEX_CASES = [
     ("_ensure_hot_path_indexes", [
         ("ix_trade_orders_mode_created", "trade_orders", ["mode", "created_at"]),
         ("ix_trade_candidates_mode_consumed_recv", "trade_candidates", ["mode", "consumed", "received_at"]),
+        ("ix_trade_decisions_mode_type_created", "trade_decisions", ["mode", "decision_type", "created_at"]),
+        ("ix_trade_decisions_mode_symbol_created", "trade_decisions", ["mode", "symbol", "created_at"]),
+        ("ix_trade_exit_decisions_action_evaluated", "trade_exit_decisions", ["action", "evaluated_at"]),
     ]),
     ("_ensure_nextday_watchlist_indexes", [
         ("ix_nextday_watchlist_mode_date_consumed", "trade_nextday_watchlist", ["mode", "market_date", "consumed"]),

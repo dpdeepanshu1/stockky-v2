@@ -220,6 +220,11 @@ async def _load_universe() -> bool:
     symbol_token_map = await asyncio.to_thread(get_all_nse_eq)
     if symbol_token_map:
         symbol_token_map, _skipped = drop_etfs(symbol_token_map)
+        try:        # round 660 (T4): the same thin-name trim as the websocket subscription (feed/universe_filter.py; fails open)
+            from feed import universe_filter as _uf
+            symbol_token_map, _ = _uf.trim(symbol_map=symbol_token_map, keep=[s for s in list(ws_client._last_read_ts) if ws_client._is_protected(s)])
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("universe filter skipped: %s", _e)
     if not symbol_token_map:
         return False
     _universe = sorted(_clean(s) for s in symbol_token_map)

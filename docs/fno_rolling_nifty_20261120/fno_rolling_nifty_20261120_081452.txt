@@ -1,0 +1,54 @@
+F&O OPTIONS BACKTEST  -  ROLLING  -  NIFTY  -  strategy CORE
+==============================================================================
+RELIABILITY: REAL premiums: Dhan's recorded expired-option candles (5-minute path), the strategies run on the index candles. Real prices, synthetic spread; limits are listed in the result's notes.
+
+period: 2026-02-02 .. 2026-11-13   days tested: 193   capital: 500000.0
+
+trades 251   win rate 46.2%   gross -175714.5   charges 19105.66   NET -194820.16
+avg win 2001.11   avg loss -3162.59   profit factor 0.54   expectancy -776.18
+max drawdown 204832.77 (40.97%)   longest losing streak 9
+
+BY_UNDERLYING
+  NIFTY        trades  251  win 46.2%  net   -194820.16  charges   19105.66
+
+BY_SIDE
+  CE           trades   96  win 36.5%  net   -130827.54  charges    7311.29
+  PE           trades  155  win 52.3%  net    -63992.62  charges   11794.37
+
+BY_EXIT
+  SL           trades  102  win 0.0%  net   -400317.46  charges    7213.71
+  SQUAREOFF    trades   13  win 30.8%  net      -8819.6  charges     1104.1
+  TARGET       trades   25  win 100.0%  net     109725.6  charges    1889.15
+  TRAIL        trades  111  win 78.4%  net     104591.3  charges     8898.7
+
+BY_DTE
+  1_2_days     trades   51  win 45.1%  net    -61255.74  charges    3737.24
+  3plus_days   trades  200  win 46.5%  net   -133564.42  charges   15368.42
+
+direction right but the trade still lost after charges: 3   stopped out after trading up 10%+: 26
+  fold 1: 2026-02-02..2026-05-19  trades 83  net -28559.84  win 57.8%
+  fold 2: 2026-05-19..2026-09-07  trades 83  net -87079.87  win 36.1%
+  fold 3: 2026-09-08..2026-11-13  trades 85  net -79180.45  win 44.7%
+data quality: strikes fetched ATM, ATM+1, ATM+2, ATM-1, ATM-2   held bars without a candle 81/2215 (3.7%)   exits at last known price 0.8%   days without a usable VIX 0 (0.0%)   OK
+
+BY MOVE FROM THE OPEN AT ENTRY (in the trade's direction; observation only)
+  moved < 0.2% from the open   trades  161  win 43%  net   -173117.15
+  moved 0.2% - 0.5%            trades   70  win 49%  net    -30814.32
+  moved >= 0.5%                trades   20  win 60%  net      9111.31
+
+VERDICT: NOT_PROVEN
+  - net result after charges is not positive
+  - profit factor 0.54 < 1.2
+  - the result is not positive in every chronological fold
+
+NOTES
+  - premiums are Dhan's recorded expired-option candles (real prices, 5-minute path); the spread is still synthetic (no bid / ask in the data)
+  - entry = the open of the bar AFTER the signal, in the ATM contract of that moment; the strike is then held and its candles are found by strike
+  - expiry code of the files vs the entry rule (min_days_to_expiry=1) must match: the expiry date is not in the reply
+  - 0 trading day(s) of the index data had no fetched option candle at all and were NOT tested
+  - 0 signal(s) had no ATM candle at the fill bar; 81 bar(s) of a held strike had no candle; 2 exit(s) closed at the last known candle
+  - 0 of 193 tested day(s) had no usable India VIX (none before the day, or older than 5 days); the VIX gate was not applied on them
+  - timestamps assumed to be the START of each bar: check with the one-week fetch before trusting a result
+  - the opposite-signal exit and the chain inputs of the live engine are not simulated
+
+A backtest describes the past under its own assumptions. It is not a forecast, and it is not advice.

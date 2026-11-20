@@ -1634,6 +1634,9 @@ BOARD_BACKFILL_RETRY_S = max(60, _get_int("BOARD_BACKFILL_RETRY_S", 900))       
 # group345: an empty / failed history answer is not asked again for this long, and a mostly-empty batch pauses the backfill (see feed/bar_backfill.py)
 BOARD_BACKFILL_EMPTY_RETRY_S = max(60, _get_int("BOARD_BACKFILL_EMPTY_RETRY_S", 3600))
 BOARD_BACKFILL_PAUSE_S = max(30, _get_int("BOARD_BACKFILL_PAUSE_S", 300))
+# round 661 (D5): per-symbol and per-day fetch caps, so a name the bar store keeps pruning and re-creating cannot be backfilled in a loop
+BOARD_BACKFILL_MAX_PER_SYMBOL = max(1, _get_int("BOARD_BACKFILL_MAX_PER_SYMBOL", 2))
+BOARD_BACKFILL_DAILY_MAX = max(1, _get_int("BOARD_BACKFILL_DAILY_MAX", 800))
 BOARD_PARAMS_VERSION = "b1"                                                          # bump when a BOARD_* default or formula changes
 # group441 (WS-15): record today's 1-minute bars (from the bar store) to disk, one file per symbol per IST day, so intraday (15m / 5m) structure and the
 # opening / VWAP / depth gates can be backtested later. RECORD ONLY: nothing in the entry path reads it. Needs a persistent volume at BAR_RECORD_DIR
@@ -1644,6 +1647,15 @@ BAR_RECORD_EVERY_S = max(60, _get_int("BAR_RECORD_EVERY_S", 300))
 BAR_RECORD_MAX_SYMBOLS = max(10, _get_int("BAR_RECORD_MAX_SYMBOLS", 250))
 BAR_RECORD_MIN_BARS = max(1, _get_int("BAR_RECORD_MIN_BARS", 20))
 BAR_RECORD_KEEP_DAYS = max(2, _get_int("BAR_RECORD_KEEP_DAYS", 45))
+# Round 660 (T4): subscribe only to names that can pass the liquidity floor (feed/universe_filter.py). The first session after the deploy records each name's
+# day turnover (from 15:20 IST) under <BAR_RECORD_DIR>/_universe_turnover.json; from the next session a name whose BEST recorded session is under
+# UNIVERSE_MIN_TURNOVER_CR crore is left out of the websocket and poller subscriptions (ENTRY_MIN_DAY_TURNOVER_CR is 1 and ENTRY_MIN_AVG_TURNOVER_CR is 3, so such a name
+# can never be entered). Unknown names, names read recently and the whole list (when the file is missing / stale / would leave fewer than UNIVERSE_MIN_KEEP) stay.
+UNIVERSE_TRIM_ENABLED = _get_bool("UNIVERSE_TRIM_ENABLED", True)
+UNIVERSE_MIN_TURNOVER_CR = _get_float("UNIVERSE_MIN_TURNOVER_CR", 1.0)
+UNIVERSE_MIN_DAYS = max(1, _get_int("UNIVERSE_MIN_DAYS", 1))
+UNIVERSE_MIN_KEEP = max(0, _get_int("UNIVERSE_MIN_KEEP", 400))
+UNIVERSE_FILE = _get_str("UNIVERSE_FILE", "")          # "" = <BAR_RECORD_DIR>/_universe_turnover.json
 # E285 round 109: record each stock's quoted spread (market-data `spread_pct`), one median / max reading per minute, under <BAR_RECORD_DIR>/spread/<day>/ (feed/spread_recorder.py).
 # RECORD ONLY: nothing in the entry path reads it; a later round learns each stock's own spread ceiling from it. Same volume as the bar recorder.
 SPREAD_RECORD_ENABLED = _get_bool("SPREAD_RECORD_ENABLED", True)

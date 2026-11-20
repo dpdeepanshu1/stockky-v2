@@ -18,8 +18,10 @@ as "leave it PLACED/PENDING_EXIT for next cycle", never as a fill.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -390,6 +392,15 @@ def _repair_orphaned_pending_exits(db: Session, tally: dict) -> None:
     tally["positions_unstuck"] = fixed
 
 
+async def _off(fn, *args, **kwargs):
+    """round 668 (D7e): one blocking step of reconcile_real_orders (a Dhan HTTP call, a DB query or a commit) in a worker thread, so a
+    stalled call no longer freezes the shared event loop (/health, dashboard polls). Steps still run one after another on the same
+    Session, so ordering and the caller's locks are unchanged. Kill-switch: RECONCILE_OFF_LOOP=0 runs every step inline as before."""
+    if os.environ.get("RECONCILE_OFF_LOOP", "1").strip().lower() in ("0", "false", "no", "off"):
+        return fn(*args, **kwargs)
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
 async def reconcile_real_orders(db: Session) -> dict:
     """One pass over every REAL order still PLACED or PARTIAL, and every
     REAL position PENDING_EXIT. Returns a tally for the cycle summary.
@@ -416,7 +427,7 @@ async def reconcile_real_orders(db: Session) -> dict:
     def _log_duration(label: str) -> None:
         logger.info("reconcile_real_orders took %.2fs (%s)", time.perf_counter() - _t0, label)
 
-    _repair_orphaned_pending_exits(db, tally)
+    await _off(_repair_orphaned_pending_exits, db, tally)   # round 668 (D7e): off the event loop
 
     # 2026-09-04 fix: pre-existing/manually-bought Dhan holdings (confirmed
     # against a user's Portfolio.csv export — Devyani International,
@@ -440,7 +451,7 @@ async def reconcile_real_orders(db: Session) -> dict:
     # import_broker_holdings above. Runs every cycle, same self-heal
     # treatment and same "must never block the cycle" contract.
     try:
-        ghost_result = holdings_sync_reconcile(db)
+        ghost_result = await _off(holdings_sync_reconcile, db)   # round 668 (D7e): broker call + DB sweep off the event loop
         tally["ghost_positions_closed"] = ghost_result["closed"]
         if ghost_result["closed"]:
             await notify_async(
@@ -453,15 +464,15 @@ async def reconcile_real_orders(db: Session) -> dict:
     except Exception as e:  # noqa: BLE001 — must never block the rest of the cycle
         logger.warning("reconcile: holdings_sync_reconcile failed: %s", e)
 
-    pending_orders = db.query(models.TradeOrder).filter(
+    pending_orders = await _off(lambda: db.query(models.TradeOrder).filter(
         models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))
-    ).all()
+    ).all())   # round 668 (D7e)
     if not pending_orders:
         _log_duration("no pending orders")
         return tally
 
     try:
-        broker_orders = dhan_client.get_order_list(db)
+        broker_orders = await _off(dhan_client.get_order_list, db)   # round 668 (D7e): broker HTTP off the event loop
     except Exception as e:  # noqa: BLE001 — a reconcile failure must never crash the cycle
         logger.warning("reconcile: could not fetch Dhan order list: %s", e)
         tally["errors"] += 1
@@ -686,7 +697,7 @@ async def reconcile_real_orders(db: Session) -> dict:
                 code_note = f" [{rejection_code}]" if rejection_code else ""
                 db.add(models.TradeOrderEvent(order_id=order.id, event_type=dead_status,
                                                detail=f"Broker reported {status}{note}{reason_note}{code_note}"))
-                db.commit()
+                await _off(db.commit)   # round 668 (D7e)
                 tally["dead_orders"] += 1
                 continue
 
@@ -724,7 +735,7 @@ async def reconcile_real_orders(db: Session) -> dict:
                 # (delta_qty < 0) being booked as a negative fill.
                 if is_complete_status and order.status != "FILLED":
                     order.status = "FILLED"
-                    db.commit()
+                    await _off(db.commit)   # round 668 (D7e)
                 continue
 
             if not _usable_price(fill_price):

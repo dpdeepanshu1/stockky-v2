@@ -485,3 +485,16 @@ def _round591_opening_no_setup_off_by_default(monkeypatch):
     import config as _cfg
     monkeypatch.setattr(_cfg, "OPENING_NO_SETUP_REFUSE", False, raising=False)
     yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _r659_wait_dedupe_off_by_default(monkeypatch):
+    """Round 659: the WAIT-row dedupe is per process; older tests run several cycles and count WAIT rows, so it is off here
+    (WAIT_DEDUPE_MINUTES=0) and tests/test_round659_wait_dedupe.py switches it on itself."""
+    monkeypatch.setenv("WAIT_DEDUPE_MINUTES", "0")
+    try:
+        import wait_dedupe as _wd
+        _wd.reset_for_tests()
+    except Exception:
+        pass
+    yield

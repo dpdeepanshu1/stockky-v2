@@ -21,7 +21,7 @@ def _clean(monkeypatch):
     global f
     f = importlib.import_module("angelone_ws_feed")      # other test modules pop and re-import it
     monkeypatch.delenv("LIVE_QUOTES_COMMIT_NOWAIT", raising=False)
-    f._LQ_SESSION.update({"applied": 0, "failed": 0, "last_error": None})
+    f._LQ_SESSION.update({"applied": 0, "failed": 0, "last_error": None, "stopped": False})
     yield
 
 

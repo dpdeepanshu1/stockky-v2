@@ -434,7 +434,10 @@ def _lq_env_int(name: str, default: int, lo: int, hi: int) -> int:
 # data that must be durable) now run with COMMIT_LOGGING=BATCH and COMMIT_WAIT=NOWAIT: the commit returns without waiting for the log writer.
 # Other sessions still see the committed rows at once (visibility does not depend on the redo write). Each statement is best effort: if the
 # database refuses one, it is logged once and the connection is used as before. LIVE_QUOTES_COMMIT_NOWAIT=0 turns it off.
-_LQ_SESSION = {"applied": 0, "failed": 0, "last_error": None}
+# Round 674 (D2c): Autonomous refuses both statements for the ADMIN user (ORA-01031 insufficient privileges, seen on the VM 20 Nov: applied 0,
+# failed 12). That refusal is permanent, so after the first one `stopped` is set and new connections skip the two statements (each retry was
+# two failed round trips). Any other error (a transient one) does not stop it. The counters stay so /internal/dhan-status shows what happened.
+_LQ_SESSION = {"applied": 0, "failed": 0, "last_error": None, "stopped": False}
 
 
 def live_quotes_commit_nowait() -> bool:
@@ -444,6 +447,8 @@ def live_quotes_commit_nowait() -> bool:
 
 def _lq_session_setup(dbapi_conn, _record=None) -> None:
     """Pool 'connect' hook for the dedicated Oracle writer engine. Never raises (a failure here must not fail the connection)."""
+    if _LQ_SESSION.get("stopped"):       # round 674: the database already said ORA-01031 (permanent): do not retry on every new connection
+        return
     try:
         cur = dbapi_conn.cursor()
     except Exception as e:  # noqa: BLE001
@@ -462,6 +467,10 @@ def _lq_session_setup(dbapi_conn, _record=None) -> None:
                 _LQ_SESSION["last_error"] = f"{type(e).__name__}: {str(e)[:100]}"
                 if first:
                     logger.warning("live_quotes: could not run '%s' (%s); commits on the writer connections stay as they were", stmt, _LQ_SESSION["last_error"])
+                if "ORA-01031" in str(e):   # round 674: insufficient privileges = permanent; skip the other statement and later connections
+                    _LQ_SESSION["stopped"] = True
+                    logger.warning("live_quotes: the database refuses session commit settings for this user (ORA-01031); not retrying on new connections")
+                    break
         if ok:
             _LQ_SESSION["applied"] += 1
     finally:

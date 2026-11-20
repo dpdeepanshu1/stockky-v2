@@ -504,6 +504,7 @@ scripts/delete-old-css.ps1
 scripts/dhan_half_sell_probe.py
 scripts/dhan_sell_probe.py
 scripts/dhan_swing_probe.py
+scripts/diag_wait_dedupe.py
 scripts/diagnose_g132_row.py
 scripts/diagnose_g132_scrip.py
 scripts/diagnose_group132.sh
@@ -1685,6 +1686,7 @@ services/market-data-service/env_util.py
 services/market-data-service/fo_eod.py
 services/market-data-service/instrument_filter.py
 services/market-data-service/kv_cache.py
+services/market-data-service/live_write_lock.py
 services/market-data-service/live_write_retry.py
 services/market-data-service/main.py
 services/market-data-service/market_hours.py
@@ -1806,6 +1808,8 @@ services/market-data-service/tests/test_round635_writer_start_claim.py
 services/market-data-service/tests/test_round637_dhan_start_steps.py
 services/market-data-service/tests/test_round641_options_ist_day.py
 services/market-data-service/tests/test_round642_startup_tasks_kept.py
+services/market-data-service/tests/test_round669_live_write_lock.py
+services/market-data-service/tests/test_round670_live_quotes_commit_nowait.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -3023,6 +3027,7 @@ services/real-trade-service/tests/test_round640_prev_day_start_claim.py
 services/real-trade-service/tests/test_round653_capital_lend_log_dedupe.py
 services/real-trade-service/tests/test_round658_log_retention.py
 services/real-trade-service/tests/test_round659_wait_dedupe.py
+services/real-trade-service/tests/test_round671_diag_wait_dedupe.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

@@ -35,6 +35,7 @@ from typing import Dict, Optional
 from market_hours import is_feed_window_ist
 import session_proof
 import live_write_retry as _lwr
+import live_write_lock as _lwl
 
 
 _UNRESOLVED_NAMES_MAX = 20
@@ -426,6 +427,50 @@ def _lq_env_int(name: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
+# Round 670 (E692, D2c): `log file sync` was the biggest wait in the 20 Nov ASH sample (1,239 of about 2,100 samples) and the transactions
+# that wait on it are the ones that hold the row locks other writers queue behind (round 669). live_quotes is a cache that is overwritten every
+# few seconds and read with a 15-20 s freshness window, so losing the last second of it in a database crash is irrelevant, while every
+# commit waiting for the redo write is pure cost. The dedicated writer connections (and ONLY those: never kv_cache's shared engine, which holds
+# data that must be durable) now run with COMMIT_LOGGING=BATCH and COMMIT_WAIT=NOWAIT: the commit returns without waiting for the log writer.
+# Other sessions still see the committed rows at once (visibility does not depend on the redo write). Each statement is best effort: if the
+# database refuses one, it is logged once and the connection is used as before. LIVE_QUOTES_COMMIT_NOWAIT=0 turns it off.
+_LQ_SESSION = {"applied": 0, "failed": 0, "last_error": None}
+
+
+def live_quotes_commit_nowait() -> bool:
+    """LIVE_QUOTES_COMMIT_NOWAIT (default on; 0/false/off/no = normal commits on the writer connections)."""
+    return _lq_env("LIVE_QUOTES_COMMIT_NOWAIT", "1").lower() not in ("0", "false", "off", "no")
+
+
+def _lq_session_setup(dbapi_conn, _record=None) -> None:
+    """Pool 'connect' hook for the dedicated Oracle writer engine. Never raises (a failure here must not fail the connection)."""
+    try:
+        cur = dbapi_conn.cursor()
+    except Exception as e:  # noqa: BLE001
+        _LQ_SESSION["failed"] += 1
+        _LQ_SESSION["last_error"] = f"{type(e).__name__}: {str(e)[:100]}"
+        return
+    ok = True
+    try:
+        for stmt in ("ALTER SESSION SET COMMIT_LOGGING = BATCH", "ALTER SESSION SET COMMIT_WAIT = NOWAIT"):
+            try:
+                cur.execute(stmt)
+            except Exception as e:  # noqa: BLE001 - best effort: keep the other statement and the connection
+                ok = False
+                _LQ_SESSION["failed"] += 1
+                first = _LQ_SESSION["last_error"] is None
+                _LQ_SESSION["last_error"] = f"{type(e).__name__}: {str(e)[:100]}"
+                if first:
+                    logger.warning("live_quotes: could not run '%s' (%s); commits on the writer connections stay as they were", stmt, _LQ_SESSION["last_error"])
+        if ok:
+            _LQ_SESSION["applied"] += 1
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def live_quotes_separate_engine() -> bool:
     """LIVE_QUOTES_DB_SEPARATE_ENGINE (default on; 0/false/off/no = writers share kv_cache's engine as before)."""
     return _lq_env("LIVE_QUOTES_DB_SEPARATE_ENGINE", "1").lower() not in ("0", "false", "off", "no")
@@ -453,6 +498,12 @@ def _build_live_quotes_engine(dialect: str):
             db_pool_recycle=recycle,
             db_pool_timeout=timeout,
         )
+        if live_quotes_commit_nowait():
+            try:
+                from sqlalchemy import event as _sa_event
+                _sa_event.listen(eng, "connect", _lq_session_setup)       # round 670: commits on these connections do not wait for the redo write
+            except Exception as e:  # noqa: BLE001
+                logger.debug("live_quotes: commit-nowait hook not attached: %s", e)
         return eng
     from sqlalchemy import create_engine
     return create_engine(
@@ -474,7 +525,8 @@ def live_quotes_engine_status() -> dict:
     """Which engine the live_quotes writers are using: kind 'dedicated' | 'shared', plus the last build error."""
     with _LQ_LOCK:
         return {"kind": _LQ_STATE["kind"], "separate_enabled": live_quotes_separate_engine(),
-                "error": _LQ_STATE["error"]}
+                "error": _LQ_STATE["error"],
+                "commit_nowait": {"enabled": live_quotes_commit_nowait(), **_LQ_SESSION}}
 
 
 def _get_live_quotes_engine():
@@ -604,8 +656,9 @@ def _upsert_tick_sync(sym: str, ltp, o, h, l, c, vol) -> None:
                 "SET ltp=EXCLUDED.ltp, ohlc_json=EXCLUDED.ohlc_json, "
                 "volume=EXCLUDED.volume, source=EXCLUDED.source, updated_at=now()"
             )
-        with engine.begin() as conn:
-            conn.execute(_text(sql), {"s": sym, "l": float(ltp), "o": ohlc, "v": int(vol or 0)})
+        with _lwl.write_slot():                # round 669: one live_quotes transaction at a time (commit included)
+            with engine.begin() as conn:
+                conn.execute(_text(sql), {"s": sym, "l": float(ltp), "o": ohlc, "v": int(vol or 0)})
     except Exception as e:
         logger.debug("live_quotes upsert failed for %s (non-fatal): %s", sym, e)
 
@@ -652,8 +705,10 @@ def _upsert_ticks_batch_sync(rows: list) -> None:
                 "SET ltp=EXCLUDED.ltp, ohlc_json=EXCLUDED.ohlc_json, "
                 "volume=EXCLUDED.volume, source=EXCLUDED.source, updated_at=now()"
             )
-        with engine.begin() as conn:
-            conn.execute(_text(sql), params)
+        params.sort(key=lambda p: p["s"])      # round 669: same row order as every other writer
+        with _lwl.write_slot():                # round 669: one live_quotes transaction at a time (commit included)
+            with engine.begin() as conn:
+                conn.execute(_text(sql), params)
         return True
     except Exception as e:
         logger.debug("live_quotes batch upsert of %d rows failed (non-fatal): %s", len(clean), e)

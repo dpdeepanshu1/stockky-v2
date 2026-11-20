@@ -57,6 +57,7 @@ docs/FILE_MANIFEST.txt
 docs/FNO_DECISIONS_ROUND236.txt
 docs/FNO_GO_LIVE_PLAN.txt
 docs/ROUTE_AUTH_TRIAGE.json
+docs/STOCKKY_IMPROVEMENT_PLAN_20Nov2026.md
 frontend/.dockerignore
 frontend/Dockerfile
 frontend/index.html
@@ -477,6 +478,7 @@ scripts/calibration_snapshot.py
 scripts/calibration_status.py
 scripts/candidate_outcomes_job.py
 scripts/charges_split.py
+scripts/check_1530.sh
 scripts/check_board_data.py
 scripts/check_compose_fno_env.py
 scripts/check_compose_gateway_url.py
@@ -1911,6 +1913,7 @@ services/position-stocks-service/feed/md_poller.py
 services/position-stocks-service/feed/scrip_master.py
 services/position-stocks-service/feed/sector_map.py
 services/position-stocks-service/feed/spread_recorder.py
+services/position-stocks-service/feed/universe_filter.py
 services/position-stocks-service/feed/ws_client.py
 services/position-stocks-service/main.py
 services/position-stocks-service/models.py
@@ -2386,6 +2389,7 @@ services/position-stocks-service/tests/test_round649_entry_slow_skip_info.py
 services/position-stocks-service/tests/test_round650_sized_down_log_after_last_check.py
 services/position-stocks-service/tests/test_round652_stop_floor_log_dedupe.py
 services/position-stocks-service/tests/test_round656_call_timeout_label.py
+services/position-stocks-service/tests/test_round660_universe_filter.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -2544,6 +2548,7 @@ services/real-trade-service/exit_engine/swing_momentum.py
 services/real-trade-service/exit_engine/tape_exit.py
 services/real-trade-service/intraday_eligibility.py
 services/real-trade-service/journal_notes.py
+services/real-trade-service/log_retention.py
 services/real-trade-service/main.py
 services/real-trade-service/manual_engine.py
 services/real-trade-service/market_context/__init__.py
@@ -3016,6 +3021,8 @@ services/real-trade-service/tests/test_round639_session_proof_start_claim.py
 services/real-trade-service/tests/test_round640_orb_bars_start_claim.py
 services/real-trade-service/tests/test_round640_prev_day_start_claim.py
 services/real-trade-service/tests/test_round653_capital_lend_log_dedupe.py
+services/real-trade-service/tests/test_round658_log_retention.py
+services/real-trade-service/tests/test_round659_wait_dedupe.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py
@@ -3046,6 +3053,7 @@ services/real-trade-service/timemachine/service.py
 services/real-trade-service/trade_breakdown.py
 services/real-trade-service/trade_records.py
 services/real-trade-service/tz_utils.py
+services/real-trade-service/wait_dedupe.py
 services/real-trade-service/watchlist_engine/__init__.py
 services/real-trade-service/watchlist_engine/afterhours_scan.py
 services/real-trade-service/watchlist_engine/decay.py

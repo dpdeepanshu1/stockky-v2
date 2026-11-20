@@ -28,13 +28,14 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
 import config
 import models
 from execution import auto_pilot as ap
 
-_engine = create_engine("sqlite:///:memory:")
+_engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)  # round 668: reconcile runs its steps in worker threads
 
 
 def run(coro):

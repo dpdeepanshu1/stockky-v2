@@ -718,6 +718,11 @@ def _ingest_tick(symbol: str, ltp: float, ts: float, volume, best_bid, best_ask,
             _maintain()
         except Exception as e:  # noqa: BLE001 - housekeeping must never drop a tick
             logger.debug("tick budget maintenance failed: %s", e)
+        try:        # round 660 (T4): from 15:20 IST write each symbol's day turnover for the next session's subscription trim (cheap time test first)
+            from feed import universe_filter as _uf_rec
+            _uf_rec.maybe_record(_last_volume, lambda s: (_tick_buffers[s][-1][1] if _tick_buffers.get(s) else None))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("universe filter record failed: %s", e)
     if volume:
         _last_volume[symbol] = volume
     if day_stats is not None:
@@ -831,6 +836,14 @@ async def _ws_loop(idx: int = 0) -> None:
                 symbol_token_map, _etf_skipped = drop_etfs(symbol_token_map)
                 if _etf_skipped:
                     logger.info("position-stocks WS: leaving %d ETF/fund names out of the subscription", _etf_skipped)
+                # round 660 (T4): names that can never pass the liquidity floor are not subscribed (feed/universe_filter.py; fails open)
+                try:
+                    from feed import universe_filter as _uf
+                    symbol_token_map, _uf_dropped = _uf.trim(symbol_map=symbol_token_map, keep=[s for s in list(_last_read_ts) if _is_protected(s)])
+                    if _uf_dropped:
+                        logger.info("position-stocks WS: leaving %d thin names out of the subscription (universe filter)", _uf_dropped)
+                except Exception as _e:  # noqa: BLE001
+                    logger.debug("universe filter skipped: %s", _e)
             if not symbol_token_map:
                 # 2026-09-21: a failed scrip-master fetch used to fall straight
                 # through here, connect the WS and "subscribe" to ZERO tokens —
@@ -1060,6 +1073,11 @@ def ws_status() -> dict:
         _extra = {"md_poller": md_poller.status()}
     _extra["ws_connections"] = {str(i): {"up": _conn_up.get(i, False), "tokens": _conn_tokens.get(i, 0)} for i in sorted(_conn_tokens)}
     _extra["uncovered_tokens"] = _uncovered_tokens
+    try:        # round 660 (T4): what the subscription trim did (kept / trimmed / why not)
+        from feed import universe_filter as _uf_st
+        _extra["universe_filter"] = _uf_st.status()
+    except Exception:  # noqa: BLE001
+        pass
     return {
         **_extra,
         "source": "market_data" if _md else "angelone_ws",

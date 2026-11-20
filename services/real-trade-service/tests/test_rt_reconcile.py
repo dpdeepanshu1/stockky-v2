@@ -57,7 +57,10 @@ class Rig:
 
 @pytest.fixture()
 def env(monkeypatch):
-    eng = create_engine("sqlite:///:memory:")
+    # round 668 (D7e): reconcile_real_orders now runs its blocking steps in worker threads, so the one in-memory DB must be shared
+    # across threads (StaticPool keeps a single connection; check_same_thread=False lets the worker use it, steps run one at a time).
+    from sqlalchemy.pool import StaticPool
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     models.Base.metadata.create_all(eng)
     db = sessionmaker(bind=eng)()
     rig = Rig()

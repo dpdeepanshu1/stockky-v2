@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
 import config
@@ -74,7 +75,7 @@ def pin(monkeypatch):
 
 @pytest.fixture()
 def db():
-    eng = create_engine("sqlite:///:memory:")
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)  # round 668: reconcile runs its steps in worker threads
     models.Base.metadata.create_all(eng)
     s = sessionmaker(bind=eng)()
     s.add(models.TradeAccount(mode="DEMO", starting_capital=100000.0,

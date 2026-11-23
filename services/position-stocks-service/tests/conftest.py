@@ -173,6 +173,7 @@ def _opening_protect_off_by_default(monkeypatch):
     Off for every older test so none can flake inside that window; test_group392_opening_protect.py turns it on and pins the clock."""
     import config as _config
     monkeypatch.setattr(_config, "OPENING_PROTECT_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "MIDDAY_SIZE_ENABLED", False, raising=False)       # round 675: clock-dependent (12:00-14:00 half size); test_round675_midday_size.py turns it on and pins the clock
     monkeypatch.setattr(_config, "PENNY_TICK_GATE_ENABLED", False, raising=False)   # round 590: older tests use cheap prices and tiny sizes; the round 590 tests call the helper directly
     monkeypatch.setattr(_config, "ENTRY_MIN_NOTIONAL_RS", 0.0, raising=False)
     monkeypatch.setattr(_config, "OPENING_NO_SETUP_REFUSE", False, raising=False)   # round 589: clock-dependent (before 09:30); the round 589 tests call the helper directly

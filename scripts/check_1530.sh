@@ -2,6 +2,7 @@
 # Round 659 (I5 of the 20 Nov plan): one read-only check for 15:30 IST. Run from ~/stockky-v2:  bash scripts/check_1530.sh
 # Prints: gate state, Dhan token hours left, CPU throttle ratio per service, DPY-4024 timeouts per service with the UTC minute,
 # today's WAIT / ENTER row counts, write-behind + WAIT-dedupe counters, last log-retention line, F&O overview head.
+# Round 676 adds the /ops/db-latency summary and the open-window 'oracle slow' count (P0.3 of the 23 Nov plan).
 # Round 667 adds I1 (compose caps), D4 (entry SLOW lines) and D2 (ASH wait events) at the end, so one paste unblocks them.
 # Asks for the admin username / password (hidden, never printed or stored). Changes nothing.
 set -u
@@ -56,6 +57,24 @@ q = (select(t.c['action'], func.count()).where(t.c['mode'] == 'REAL', t.c['decis
      t.c['created_at'] >= d - timedelta(hours=5, minutes=30), t.c['created_at'] < d + timedelta(hours=18, minutes=30)).group_by(t.c['action']))
 for r in s.execute(q): print(tuple(r))
 E
+echo; echo "== Oracle latency since each container start (connect / execute: count, slow count, p95, max ms; slow = ORACLE_SLOW_QUERY_MS, 1500) =="
+PS_URL="${POSITION_STOCKS_URL:-http://127.0.0.1:8006}"
+for u in "real-trade:$RT_URL" "position-stocks:$PS_URL"; do
+  echo "-- ${u%%:*}"
+  curl -s -m 20 "${u#*:}/ops/db-latency" | python3 -c 'import sys,json
+try:
+    d = json.load(sys.stdin)
+    for lab, e in (d.get("engines") or {}).items():
+        x, c = e.get("exec") or {}, e.get("connect") or {}
+        print("  %-22s exec n=%s slow=%s p95=%s max=%s | connect n=%s slow=%s p95=%s max=%s" % (lab, x.get("n"), x.get("slow_n"), x.get("p95_ms"), x.get("max_ms"), c.get("n"), c.get("slow_n"), c.get("p95_ms"), c.get("max_ms")))
+        if e.get("last_slow"): print("    last slow:", json.dumps(e["last_slow"])[:300])
+    if not d.get("engines"): print("  no engines in the answer:", json.dumps(d)[:300])
+except Exception as ex: print("  unreadable answer:", ex)'
+done
+echo; echo "== 'oracle slow' warnings in the open window of $DAY (09:00-11:00 IST = 03:30-05:30 UTC; 0 on a day that has not reached 11:00 proves nothing) =="
+for s in real-trade-service position-stocks-service; do
+  echo -n "$s: "; docker compose logs --since "${DAY}T03:30:00Z" --until "${DAY}T05:30:00Z" --no-color "$s" 2>/dev/null | grep -c -i "oracle slow"
+done
 echo; echo "== log retention (last lines) =="
 docker compose logs --since 48h --no-color real-trade-service 2>/dev/null | grep "log-retention" | tail -3
 echo; echo "== F&O overview (head) =="

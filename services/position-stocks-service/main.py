@@ -1788,6 +1788,17 @@ def health():
     return {"status": "ok", "service": "position-stocks-service", "structure_engine": _structure_engine_info()}
 
 
+@app.get("/ops/db-latency")
+def ops_db_latency():
+    """round 675: Oracle latency of THIS service (same shape as real-trade-service and market-data-service /ops/db-latency): per-engine connect / execute
+    count, avg, p50, p95, max, slow counts, the last slow statement, pool state. Read-only; a plain `def`, so FastAPI runs it in its threadpool."""
+    try:
+        import oracle_compat
+        return oracle_compat.latency_snapshot()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)[:160]}
+
+
 @app.post("/auth/login")
 def login(body: LoginRequest):
     """Same admin username/password as real-trade-service — verified against

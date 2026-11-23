@@ -20,7 +20,7 @@ from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
 from orders import learned_stop, setup_short, short_refusals, short_target, squeeze_guard
-from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, penny_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
+from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, midday_size, penny_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels, widen_to_atr_floor
 from tz_utils import ist_now
 
@@ -256,6 +256,16 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     if _setup_mult is not None:
         value = value * max(0.0, min(1.0, float(_setup_mult)))
         logger.info("short plan: %s matches %s (%s) size x%s", sym, _setup["id"], ",".join(_setup.get("confirmations") or []), _setup_mult)
+    _mid_mult = midday_size.size_mult()        # round 675: midday window (12:00-14:00) shrinks the entry; the LOWER of it and the setup's own size applies, no stacking
+    if _mid_mult < 1.0:
+        try:
+            _sm = float(_setup_mult) if _setup_mult is not None else 1.0
+        except (TypeError, ValueError):
+            _sm = 1.0
+        _mid_extra = min(1.0, _mid_mult / _sm) if _sm > 0 else 1.0     # the setup size is already in `value`; only the part still missing is applied
+        if _mid_extra < 1.0:
+            value = value * _mid_extra
+            logger.info("short plan: %s sized x%.2f more (midday window x%.2f)", sym, _mid_extra, _mid_mult)
     qty = sizing.compute_quantity(value, live, "SHORT")
     if qty is None:
         _refuse(db, cand, "SHORT_ONE_SHARE_TOO_BIG", f"one share at {live:.2f} exceeds the budget {value:.2f}")

@@ -922,6 +922,14 @@ OPENING_LOSS_BUDGET_FRAC = max(0.0, min(1.0, _get_float("OPENING_LOSS_BUDGET_FRA
 # false = no automatic entry, long or short, until OPENING_0920_PATH_UNTIL_IST (09:30), when S2 starts. Manual BUYs are not touched.
 OPENING_0920_PATH = _get_bool("OPENING_0920_PATH", True)
 OPENING_0920_PATH_UNTIL_IST = _get_str("OPENING_0920_PATH_UNTIL_IST", "09:30")
+# round 675: midday half size (orders/midday_size.py). 30-day Position Stocks hour split (23 Nov): entries started 12:00-13:59 were 38 trades with 1 target hit
+# (25 stagnation exits, 11 stops) and about -163 net; entries from 09:00 hit the target in 12 of 36. From MIDDAY_SIZE_FROM_IST until MIDDAY_SIZE_UNTIL_IST a new automatic
+# entry, long or short, is sized at MIDDAY_SIZE_MULT of what it would have been. It only SHRINKS an entry (never blocks one, never adds one), the lower of it and a
+# matched setup's own size applies (no stacking), and manual BUYs are not touched. MIDDAY_SIZE_ENABLED=false = off. Full stop only after 100 trades still negative.
+MIDDAY_SIZE_ENABLED = _get_bool("MIDDAY_SIZE_ENABLED", True)
+MIDDAY_SIZE_MULT = _get_float("MIDDAY_SIZE_MULT", 0.5)
+MIDDAY_SIZE_FROM_IST = _get_str("MIDDAY_SIZE_FROM_IST", "12:00")
+MIDDAY_SIZE_UNTIL_IST = _get_str("MIDDAY_SIZE_UNTIL_IST", "14:00")
 # round 589: 16 Nov the 09:20 slot took 2 "shortlist (no setup)" longs (NATCOPHARM, DHANBANK) and both were stopped out within minutes (-2.1 %, -1.8 %), 0 wins of 5 for the day.
 # Before OPENING_0920_PATH_UNTIL_IST an automatic LONG must match a setup (S1 catalyst etc.); a plain shortlist entry with no setup waits for the 09:30 slot. false = old behaviour.
 OPENING_NO_SETUP_REFUSE = _get_bool("OPENING_NO_SETUP_REFUSE", True)

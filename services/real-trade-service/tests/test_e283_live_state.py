@@ -45,6 +45,8 @@ def test_heat_part_numbers(monkeypatch):
 
 def test_route_is_admin_only_read_only():
     main = (ROOT / "main.py").read_text(encoding="utf-8")
-    m = re.search(r'@app\.get\("/live/state"\)\nasync def live_state_route\((.*?)\):', main, re.S)
+    # round 661 (D7): the body is plain blocking code behind @_offload (a worker thread), so the source reads `@_offload` + `def`; the older
+    # shape was a bare `async def`. Both are the same admin-only route.
+    m = re.search(r'@app\.get\("/live/state"\)\n(?:@_offload\n)?(?:async )?def live_state_route\((.*?)\):', main, re.S)
     assert m and "require_admin" in m.group(1) and "get_db" in m.group(1)
     assert '@app.post("/live/state")' not in main

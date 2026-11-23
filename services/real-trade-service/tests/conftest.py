@@ -270,13 +270,17 @@ def _write_behind_off_by_default(monkeypatch):
     rows straight after the call, so the queue is off unless a test turns it on (tests/test_a3_write_behind.py does)."""
     monkeypatch.setenv("WRITE_BEHIND_ENABLED", "0")
     mod = _sys_g172.modules.get("write_behind")
-    if mod is not None:
+    if mod is not None and hasattr(mod, "reset_for_tests"):
         mod.reset_for_tests()
     yield
+    # Round 678: a test may swap in a stand-in module (tests/test_round658_log_retention.py puts a bare one with only note_timeout into sys.modules);
+    # it is still there at this teardown, so call stop / reset_for_tests only where the module has them.
     mod = _sys_g172.modules.get("write_behind")
     if mod is not None:
-        mod.stop()
-        mod.reset_for_tests()
+        if hasattr(mod, "stop"):
+            mod.stop()
+        if hasattr(mod, "reset_for_tests"):
+            mod.reset_for_tests()
 
 
 @_pytest_g172.fixture(autouse=True)

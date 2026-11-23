@@ -10,6 +10,10 @@ cd "$(dirname "$0")/.." || exit 1
 RT_URL="${REAL_TRADE_URL:-http://127.0.0.1:8005}"
 FNO_URL="${FNO_URL:-http://127.0.0.1:8007}"
 DAY="${DAY:-$(TZ=Asia/Kolkata date +%F)}"
+# round 678: a DAY after today has no rows yet (23 Nov: DAY=2026-11-24 was typed on 23 Nov and every "today" part came back empty). Say so instead of printing zeros.
+if [[ "$DAY" > "$(TZ=Asia/Kolkata date +%F)" ]]; then
+  echo "WARNING: DAY=$DAY is after today ($(TZ=Asia/Kolkata date +%F) IST): that day has no rows yet, so counts of 0 below mean nothing. Run it on the day itself (leave DAY unset)." >&2
+fi
 read -r -p "admin username [admin]: " ADM_U
 read -r -s -p "admin password: " ADM_P; echo
 TOKEN=$(ADM_U="${ADM_U:-admin}" ADM_P="$ADM_P" RT_URL="$RT_URL" python3 -c '

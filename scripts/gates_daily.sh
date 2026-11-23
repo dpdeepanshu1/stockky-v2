@@ -9,6 +9,10 @@ cd "$(dirname "$0")/.." || exit 1
 DAY="${1:-$(TZ=Asia/Kolkata date +%F)}"
 GATES="${GATES:-no_setup_window structure}"
 CHUNK="${CHUNK:-25}"
+if [[ "$DAY" > "$(TZ=Asia/Kolkata date +%F)" ]]; then   # round 678: a future day has no blocked rows yet
+  echo "DAY=$DAY is after today ($(TZ=Asia/Kolkata date +%F) IST): nothing to read yet. Run it on the day itself after 15:45 IST." >&2
+  exit 2
+fi
 if [ "$DAY" = "$(TZ=Asia/Kolkata date +%F)" ] && [ "$(TZ=Asia/Kolkata date +%H%M)" -lt 1545 ]; then
   echo "WARNING: it is before 15:45 IST, so the day is not finished; later prices are missing from this read." >&2
 fi

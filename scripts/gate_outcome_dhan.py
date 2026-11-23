@@ -41,7 +41,10 @@ def main():
     ap.add_argument("--syms", required=True, help='space separated SYMBOL:HH:MM')
     ap.add_argument("--up", type=float, default=2.0)
     a = ap.parse_args()
-    from dhan_data import history  # only present inside the market-data container
+    from dhan_data import history, scrip_master  # only present inside the market-data container
+    # A fresh python process starts with an EMPTY Dhan symbol map; without this every name reads as "not in the scrip master".
+    loaded = scrip_master.ensure_loaded(block=True)
+    print("dhan scrip master:", scrip_master.status(), "(loaded)" if loaded else "(NOT loaded: nothing below can be trusted)")
     day = datetime.strptime(a.day, "%Y-%m-%d")
     frm, to = day.replace(hour=9, minute=15), day.replace(hour=15, minute=30)
     rows, counts = [], {}
@@ -55,7 +58,7 @@ def main():
         try:
             candles = history.fetch_intraday(sym, "1m", frm, to)
         except Exception as e:  # no scrip / no data / limiter: report, do not guess
-            rows.append((sym, hhmm, None, f"no_data ({type(e).__name__})"))
+            rows.append((sym, hhmm, None, f"no_data ({type(e).__name__}: {str(e)[:70]})"))
             counts["no_data"] = counts.get("no_data", 0) + 1
             continue
         r = outcome(candles, hhmm, a.up) if candles else None

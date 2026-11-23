@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import position_save, entry_stage_timer, candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, penny_gate, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import position_save, entry_stage_timer, candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, midday_size, opening_protect, penny_gate, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels, widen_to_atr_floor
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -1509,12 +1509,13 @@ def _attempt_entry_impl(
             quantity = _cq
 
     # group392: half size (OPENING_SIZE_MULT) inside the opening window; 1.0 outside it.
-    _open_mult = opening_protect.size_mult()
+    # round 675: the midday window (MIDDAY_SIZE_MULT, 12:00-14:00) works the same way; the two windows never overlap, and the lower of the two is taken.
+    _open_mult = min(opening_protect.size_mult(), midday_size.size_mult())
     if _open_mult < 1.0 and quantity > 1:
         _oq = max(1, int(quantity * _open_mult + 0.5))
         if _oq < quantity:
-            logger.info("position-stocks entry: %s sized down %d -> %d shares (opening window x%.2f)",
-                        candidate.symbol, quantity, _oq, _open_mult)
+            logger.info("position-stocks entry: %s sized down %d -> %d shares (%s window x%.2f)",
+                        candidate.symbol, quantity, _oq, "midday" if midday_size.active() else "opening", _open_mult)
             _onew = _oq * candidate.current_ltp
             if _onew < position_value:
                 _hold_release(db, position_value=position_value - _onew, realized_pnl=0.0)

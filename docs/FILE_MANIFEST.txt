@@ -472,6 +472,7 @@ scripts/audit_tabs.py
 scripts/audit_ui_coverage.py
 scripts/backup_state.sh
 scripts/blocked_outcome.py
+scripts/blocked_sources.py
 scripts/board_parity_check.py
 scripts/calibration_pack.py
 scripts/calibration_snapshot.py
@@ -542,7 +543,9 @@ scripts/fno_rolling_index_candles.py
 scripts/fno_rolling_probe.py
 scripts/fno_sim_backtest.py
 scripts/freeze_constraints.sh
+scripts/gate_outcome_dhan.py
 scripts/gate_scorecard.py
+scripts/gates_daily.sh
 scripts/gen_env_reference.py
 scripts/gen_ms_golden.py
 scripts/gen_technical_baseline.py
@@ -589,6 +592,7 @@ scripts/setup_backtest.py
 scripts/shared_copies_baseline.json
 scripts/short_history_replay.py
 scripts/six_month_backtest.py
+scripts/stagnation_after_exit.py
 scripts/stats_loop.sh
 scripts/strategy_readout.py
 scripts/strategy_registry.py
@@ -1970,6 +1974,7 @@ services/position-stocks-service/orders/live_anchor.py
 services/position-stocks-service/orders/live_state.py
 services/position-stocks-service/orders/long_target.py
 services/position-stocks-service/orders/manual_buy_window.py
+services/position-stocks-service/orders/midday_size.py
 services/position-stocks-service/orders/momentum_health.py
 services/position-stocks-service/orders/momentum_hook.py
 services/position-stocks-service/orders/opening_protect.py
@@ -2394,6 +2399,7 @@ services/position-stocks-service/tests/test_round650_sized_down_log_after_last_c
 services/position-stocks-service/tests/test_round652_stop_floor_log_dedupe.py
 services/position-stocks-service/tests/test_round656_call_timeout_label.py
 services/position-stocks-service/tests/test_round660_universe_filter.py
+services/position-stocks-service/tests/test_round675_midday_size.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py

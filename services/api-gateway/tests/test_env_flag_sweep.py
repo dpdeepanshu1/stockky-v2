@@ -22,6 +22,8 @@ _ENV_CALLS = {"os.getenv", "os.environ.get", "_os.getenv", "_os.environ.get", "r
 _ALLOWED = {
     "RL_RENAME_DISCOVERY",          # `not in ("0","false",...)`: a blank value is not in the off-list -> stays on
     "DEAD_PARENT_FILL_CHECK",       # `os.getenv(..., "1").strip() == "0"` (position-stocks reconcile, group 276): only a literal 0 turns it off, blank stays on
+    "ROUTES_DB_OFF_LOOP",           # round 665 (real-trade main.py): `.strip().lower() in ("0","false","no","off")` -> off; a blank value is not in the list, so it stays on
+    "RECONCILE_OFF_LOOP",           # round 668 (real-trade execution/reconcile.py): same off-list test, blank stays on
 }
 _NUMERIC_HINTS = ("int(", "float(", "_OVERFLOW", "POOL_SIZE")
 

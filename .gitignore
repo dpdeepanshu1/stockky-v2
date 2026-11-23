@@ -58,3 +58,8 @@ services/analysis-intelligence-service/headlines.txt
 # a blanket `git add -A` pushed frontend/ui-baseline/r532/light-phone/*.png and CI then reported them as tracked files missing from the manifest.
 # On the VM / PC, once: `git rm -r --cached frontend/ui-baseline` (keeps the files on disk), then commit.
 frontend/ui-baseline/
+
+# round 678: local output of scripts/fno_rolling_*.py (last_<index>_<strategy>.log, saved run text). A blanket `git add -A` pushed them and CI listed them as
+# tracked files missing from the manifest. Once on the VM / PC: `git rm -r --cached data/fno_rolling_out docs/fno_rolling_nifty_20261120` (files stay on disk).
+data/fno_rolling_out/
+docs/fno_rolling_nifty_*/

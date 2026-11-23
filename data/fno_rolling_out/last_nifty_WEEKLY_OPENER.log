@@ -1,1 +1,0 @@
-+ python3 scripts/fno_rolling_backtest.py --underlying NIFTY --strategy WEEKLY_OPENER --daily data/fno_real_probe/replay_inputs/nifty_d.csv --intraday data/fno_real_probe/replay_inputs/nifty_5m.csv --rolling-dir data/fno_rolling_long --vix data/fno_real_probe/replay_inputs/vix.csv --out data/fno_rolling_out

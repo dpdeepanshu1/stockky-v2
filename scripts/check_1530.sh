@@ -71,6 +71,26 @@ q = (select(t.c['action'], func.count()).where(t.c['mode'] == 'REAL', t.c['decis
      t.c['created_at'] >= d - timedelta(hours=5, minutes=30), t.c['created_at'] < d + timedelta(hours=18, minutes=30)).group_by(t.c['action']))
 for r in s.execute(q): print(tuple(r))
 E
+
+# round 679: 23 Nov showed 1,466 REAL entry WAIT rows against a target under about 300, and the 3,641-of-5,553 issue list left 1,912 WAITs without a gate. Read-only: which gate_tag
+# the WAIT rows carry, how many different names that is, and the names that wrote the most rows (the same name repeating = what a WAIT dedupe could drop).
+echo; echo "== REAL entry WAIT rows by gate_tag: rows / different names (top 12), then the 8 names with most rows =="
+docker compose exec -T -e DAY="$DAY" real-trade-service python3 - <<'E' 2>&1 | tail -24
+import os
+from datetime import datetime, timedelta
+from db import get_session_factory
+from sqlalchemy import MetaData, Table, select, func
+d = datetime.strptime(os.environ["DAY"], "%Y-%m-%d")
+s = get_session_factory()()
+t = Table('trade_decisions', MetaData(), autoload_with=s.get_bind())
+w = [t.c['mode'] == 'REAL', t.c['decision_type'] == 'ENTRY', t.c['action'] == 'WAIT',
+     t.c['created_at'] >= d - timedelta(hours=5, minutes=30), t.c['created_at'] < d + timedelta(hours=18, minutes=30)]
+q = select(t.c['gate_tag'], func.count(), func.count(func.distinct(t.c['symbol']))).where(*w).group_by(t.c['gate_tag']).order_by(func.count().desc())
+for i, r in enumerate(s.execute(q)):
+    if i < 12: print(f"  {str(r[0]):<28} rows {r[1]:>5}   names {r[2]:>4}")
+q2 = select(t.c['symbol'], func.count()).where(*w).group_by(t.c['symbol']).order_by(func.count().desc())
+print("  most rows:", ", ".join(f"{r[0]} {r[1]}" for i, r in enumerate(s.execute(q2)) if i < 8))
+E
 echo; echo "== Oracle latency since each container start (connect / execute: count, slow count, p95, max ms; slow = ORACLE_SLOW_QUERY_MS, 1500) =="
 PS_URL="${POSITION_STOCKS_URL:-http://127.0.0.1:8006}"
 for u in "real-trade:$RT_URL" "position-stocks:$PS_URL"; do

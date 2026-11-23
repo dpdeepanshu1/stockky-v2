@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """daily_trade_report.py - group 442: every closed trade of both services, per IST day, with entry time, exit time, hold time and profit / loss.
 
-  python3 scripts/daily_trade_report.py [--days 10] [--rt-url http://127.0.0.1:8005] [--ps-url http://127.0.0.1:8006] [--token T | TOKEN=T]
+  python3 scripts/daily_trade_report.py [--days 10] [--rt-url http://127.0.0.1:8005] [--ps-url http://127.0.0.1:8006] [--login | --token T | TOKEN=T]
                                         [--origin all|system|imported] [--min-n 8] [--out daily_trades.txt] [--csv daily_trades.csv]
   python3 scripts/daily_trade_report.py --rt-file rt_2026-10-18.json --ps-file ps_hist.json        # offline, from saved exports
 
@@ -317,6 +317,21 @@ def to_csv(rows: List[Dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------- io
+def _login(rt_url: str) -> str:
+    """round 679: the same /auth/login call scripts/check_1530.sh makes. 23 Nov: 'admin token:' was typed as the PASSWORD and the server answered 401; this asks for
+    username + password and fetches the token itself. Returns "" (the report then skips real-trade with its note) when the login fails."""
+    import getpass
+    try:
+        user = input("admin username [admin]: ").strip() or "admin"
+        pw = getpass.getpass("admin password: ")
+        req = urllib.request.Request(rt_url.rstrip("/") + "/auth/login", data=json.dumps({"username": user, "password": pw}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        return str(json.load(urllib.request.urlopen(req, timeout=30)).get("token", "") or "")
+    except Exception as e:  # noqa: BLE001
+        print(f"login failed ({type(e).__name__}): real-trade will be skipped", file=sys.stderr)
+        return ""
+
+
 def _get(url: str, token: str = "", timeout: float = 30.0) -> Any:
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
     with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - operator-supplied base URL
@@ -329,6 +344,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--rt-url", default=os.environ.get("REAL_TRADE_URL", "http://127.0.0.1:8005"))
     ap.add_argument("--ps-url", default=os.environ.get("POSITION_STOCKS_URL", "http://127.0.0.1:8006"))
     ap.add_argument("--token", default=os.environ.get("TOKEN", ""))
+    ap.add_argument("--login", action="store_true", help="round 679: ask for the admin username and password (hidden), log in to real-trade-service and use the token it returns; nothing is printed or stored")
     ap.add_argument("--rt-file", action="append", default=[])
     ap.add_argument("--ps-file", action="append", default=[])
     ap.add_argument("--origin", default="all", choices=["all", "system", "imported"])
@@ -339,6 +355,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-ps", action="store_true")
     ap.add_argument("--as-of", default="", help="treat this ISO time as 'now' (tests / re-running an old export)")
     a = ap.parse_args(argv)
+    if a.login and not a.token and not a.rt_file and not a.no_rt:
+        a.token = _login(a.rt_url)
     rows: List[Dict[str, Any]] = []
     notes: List[str] = []
     drops: Dict[str, Any] = {}

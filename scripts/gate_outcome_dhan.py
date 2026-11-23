@@ -11,6 +11,7 @@ Price at the block = close of the 1-minute candle that starts at HH:MM. best / w
 """
 import argparse
 import sys
+import time
 from datetime import datetime, timedelta
 
 
@@ -40,6 +41,7 @@ def main():
     ap.add_argument("--day", required=True)
     ap.add_argument("--syms", required=True, help='space separated SYMBOL:HH:MM')
     ap.add_argument("--up", type=float, default=2.0)
+    ap.add_argument("--pause", type=float, default=1.5, help="seconds to wait between names (Dhan answers HTTP 429 when asked too fast)")
     a = ap.parse_args()
     from dhan_data import history, scrip_master  # only present inside the market-data container
     # A fresh python process starts with an EMPTY Dhan symbol map; without this every name reads as "not in the scrip master".
@@ -56,11 +58,18 @@ def main():
             print(f"skip bad token {tok!r} (want SYMBOL:HH:MM)")
             continue
         try:
-            candles = history.fetch_intraday(sym, "1m", frm, to)
+            try:
+                candles = history.fetch_intraday(sym, "1m", frm, to)
+            except Exception as e1:
+                if "429" not in str(e1) and "RateLimit" not in type(e1).__name__:
+                    raise
+                time.sleep(5)        # one retry after a rate-limit answer
+                candles = history.fetch_intraday(sym, "1m", frm, to)
         except Exception as e:  # no scrip / no data / limiter: report, do not guess
             rows.append((sym, hhmm, None, f"no_data ({type(e).__name__}: {str(e)[:70]})"))
             counts["no_data"] = counts.get("no_data", 0) + 1
             continue
+        time.sleep(max(0.0, a.pause))
         r = outcome(candles, hhmm, a.up) if candles else None
         if r is None:
             rows.append((sym, hhmm, None, "no_data"))

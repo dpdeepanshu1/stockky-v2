@@ -63,3 +63,6 @@ frontend/ui-baseline/
 # tracked files missing from the manifest. Once on the VM / PC: `git rm -r --cached data/fno_rolling_out docs/fno_rolling_nifty_20261120` (files stay on disk).
 data/fno_rolling_out/
 docs/fno_rolling_nifty_*/
+
+# round 679: saved daily gate reads (scripts/gates_daily.sh) - local evidence, not release code
+gates_out/

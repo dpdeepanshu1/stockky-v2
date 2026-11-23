@@ -544,6 +544,7 @@ scripts/fno_rolling_probe.py
 scripts/fno_sim_backtest.py
 scripts/freeze_constraints.sh
 scripts/gate_outcome_dhan.py
+scripts/gate_rule_summary.py
 scripts/gate_scorecard.py
 scripts/gates_daily.sh
 scripts/gen_env_reference.py
@@ -636,6 +637,7 @@ scripts/test_flow_tape_report.py
 scripts/test_fno_export_candles.py
 scripts/test_fno_rolling_all.py
 scripts/test_fno_rolling_index_candles.py
+scripts/test_gate_rule_summary.py
 scripts/test_gate_scorecard_direction.py
 scripts/test_group467_performance.py
 scripts/test_group468_calibration_snapshot.py

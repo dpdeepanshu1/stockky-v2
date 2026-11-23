@@ -50,6 +50,30 @@ def main():
     day = datetime.strptime(a.day, "%Y-%m-%d")
     frm, to = day.replace(hour=9, minute=15), day.replace(hour=15, minute=30)
     rows, counts = [], {}
+    retry = []          # round 679: names that failed on the network / a rate limit are asked once more after the pass (23 Nov: 4 of 25 came back ReadTimeout in one call)
+
+    def _fetch(sym):
+        try:
+            return history.fetch_intraday(sym, "1m", frm, to)
+        except Exception as e1:
+            if "429" not in str(e1) and "RateLimit" not in type(e1).__name__:
+                raise
+            time.sleep(5)        # one retry after a rate-limit answer
+            return history.fetch_intraday(sym, "1m", frm, to)
+
+    def _transient(e):
+        t = f"{type(e).__name__} {e}".lower()
+        return "timeout" in t or "network" in t or "429" in t or "ratelimit" in t or "connection" in t
+
+    def _add(sym, hhmm, candles):
+        r = outcome(candles, hhmm, a.up) if candles else None
+        if r is None:
+            rows.append((sym, hhmm, None, "no_data"))
+            counts["no_data"] = counts.get("no_data", 0) + 1
+        else:
+            rows.append((sym, hhmm, r, r["label"]))
+            counts[r["label"]] = counts.get(r["label"], 0) + 1
+
     for tok in a.syms.split():
         try:
             sym, hh, mm = tok.split(":")
@@ -58,25 +82,32 @@ def main():
             print(f"skip bad token {tok!r} (want SYMBOL:HH:MM)")
             continue
         try:
-            try:
-                candles = history.fetch_intraday(sym, "1m", frm, to)
-            except Exception as e1:
-                if "429" not in str(e1) and "RateLimit" not in type(e1).__name__:
-                    raise
-                time.sleep(5)        # one retry after a rate-limit answer
-                candles = history.fetch_intraday(sym, "1m", frm, to)
+            candles = _fetch(sym)
         except Exception as e:  # no scrip / no data / limiter: report, do not guess
-            rows.append((sym, hhmm, None, f"no_data ({type(e).__name__}: {str(e)[:70]})"))
-            counts["no_data"] = counts.get("no_data", 0) + 1
+            if _transient(e):
+                retry.append((sym, hhmm, e))
+            else:
+                rows.append((sym, hhmm, None, f"no_data ({type(e).__name__}: {str(e)[:70]})"))
+                counts["no_data"] = counts.get("no_data", 0) + 1
+            time.sleep(max(0.0, a.pause))
             continue
         time.sleep(max(0.0, a.pause))
-        r = outcome(candles, hhmm, a.up) if candles else None
-        if r is None:
-            rows.append((sym, hhmm, None, "no_data"))
+        _add(sym, hhmm, candles)
+    if retry:
+        print(f"retrying {len(retry)} name(s) that failed on the network: {' '.join(x[0] for x in retry)}")
+        time.sleep(max(3.0, a.pause * 2))
+    for sym, hhmm, e0 in retry:
+        try:
+            candles = _fetch(sym)
+        except Exception as e:  # noqa: BLE001
+            rows.append((sym, hhmm, None, f"no_data ({type(e).__name__}: {str(e)[:70]})"))
             counts["no_data"] = counts.get("no_data", 0) + 1
-        else:
-            rows.append((sym, hhmm, r, r["label"]))
-            counts[r["label"]] = counts.get(r["label"], 0) + 1
+            time.sleep(max(3.0, a.pause * 2))
+            continue
+        time.sleep(max(3.0, a.pause * 2))
+        _add(sym, hhmm, candles)
+    order = {tok.split(":")[0]: i for i, tok in enumerate(a.syms.split())}
+    rows.sort(key=lambda r: order.get(r[0], 0))        # keep the order the names were given in
     print(f"DHAN 1-MIN OUTCOMES day {a.day} (percent of price at first block; RAN = best >= +{a.up}% and close above)")
     print("  ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     print(f"\n{'symbol':<12}{'1st block':>10}{'price':>10}{'best %':>9}{'worst %':>9}{'close %':>9}  label")

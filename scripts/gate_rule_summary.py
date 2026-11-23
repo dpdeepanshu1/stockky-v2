@@ -105,7 +105,7 @@ def verdict(s: dict, a) -> tuple[str, list[str]]:
     if s["ran_pct"] < a.min_ran_pct:
         fails.append(f"(c) RAN {s['ran_pct']:.1f}% < {a.min_ran_pct:g}%")
     if s["mean_close"] <= a.charges:
-        fails.append(f"(d) mean close {s['mean_close']:+.2f}% does not beat charges {a.charges:.2f}")
+        fails.append(f"(d) mean close {s['mean_close']:+.2f}% does not beat charges {a.charges:.2f}" + (" (it is not above zero even before any charge)" if s["mean_close"] <= 0 else ""))
     deep = [r for r in s["ran_names"] if r["worst"] <= -a.stop]
     if deep:
         fails.append("(e) RAN names dipped past the stop: " + ", ".join(f"{r['symbol']} {r['worst']:.2f}" for r in deep))

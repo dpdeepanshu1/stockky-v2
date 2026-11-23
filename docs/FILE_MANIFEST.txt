@@ -705,6 +705,7 @@ scripts/test_vm_full_check.py
 scripts/test_vm_ops.py
 scripts/test_vm_review_evidence.py
 scripts/test_vm_structure_report.py
+scripts/test_wait_dedupe_sim.py
 scripts/time_machine_gate_check.py
 scripts/tsfm_nightly.py
 scripts/tsfm_probe.py
@@ -718,6 +719,7 @@ scripts/vm_quick_check.sh
 scripts/vm_review_evidence.sh
 scripts/vm_runjob.sh
 scripts/vm_structure_report.sh
+scripts/wait_dedupe_sim.py
 scripts/wake_all.sh
 scripts/wiring_check.py
 services/analysis-intelligence-service/.coveragerc
@@ -3046,6 +3048,7 @@ services/real-trade-service/tests/test_round668_reconcile_offload.py
 services/real-trade-service/tests/test_round671_diag_wait_dedupe.py
 services/real-trade-service/tests/test_round672_hourly_reconcile_offload.py
 services/real-trade-service/tests/test_round672_risk_check_offload.py
+services/real-trade-service/tests/test_round682_wait_dedupe_any_sig.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

@@ -10,6 +10,12 @@ Rule (applied to pending ENTRY / WAIT rows just before the entry cycle flushes o
   - otherwise the row is dropped from the session (the cycle's in-memory entry_details, counters and the shortlist are unaffected);
   - an ENTER row (or any non-WAIT ENTRY row) for the symbol resets its state, so the next WAIT after it is always written.
 Exit rows, orders, fills and every non-WAIT row are never touched. WAIT_DEDUPE_MINUTES=0 turns it off. Nothing here raises.
+
+Round 682 (opt-in, default unchanged): WAIT_DEDUPE_MODE=any_sig remembers EVERY signature written for the symbol inside the window, not only the last one, so a name that
+flips between two gate tags (A, B, A, B every cycle: 23 Nov wrote 1,491 rows, the busiest names 32-39 each, more than the 22 a day one unchanged signature allows) writes
+each signature once per window instead of a row at every flip. The first row of every (symbol, signature) is still written, so the name, the gate tag and the first-block
+time of every refusal stay in the table; only the repeat count shrinks. Unset / blank / any other value = the rule above ("last"). Switch it on only after
+scripts/wait_dedupe_sim.py shows it drops 30 % or more of a day's rows.
 """
 from __future__ import annotations
 
@@ -25,6 +31,8 @@ _MAX_KEYS = 20000
 
 _lock = threading.Lock()
 _last: Dict[Tuple[str, str], Tuple[str, float]] = {}
+_seen: Dict[Tuple[str, str], Dict[str, float]] = {}       # round 682, any_sig mode: every signature written for the key -> time written
+_MAX_SIGS = 40                                            # signatures remembered per symbol (oldest dropped first)
 _stats = {"kept": 0, "dropped": 0}
 
 
@@ -35,6 +43,11 @@ def window_s() -> float:
     except ValueError:
         return 900.0
     return v * 60.0 if v > 0 else 0.0
+
+
+def mode() -> str:
+    """'any_sig' only when WAIT_DEDUPE_MODE says so (case and spaces ignored); anything else, including unset or blank, is the 'last' rule."""
+    return "any_sig" if (os.environ.get("WAIT_DEDUPE_MODE") or "").strip().lower() == "any_sig" else "last"
 
 
 def signature(obj) -> str:
@@ -54,10 +67,29 @@ def is_repeat(obj, now: Optional[float] = None) -> bool:
         if getattr(obj, "action", None) != "WAIT":          # ENTER or anything else: the next WAIT is a change, write it
             with _lock:
                 _last.pop(key, None)
+                _seen.pop(key, None)
             return False
         if win <= 0 or not key[1]:
             return False
         sig = signature(obj)
+        if mode() == "any_sig":
+            with _lock:
+                seen = _seen.get(key)
+                if seen is None:
+                    if len(_seen) >= _MAX_KEYS:
+                        for k in sorted(_seen, key=lambda k: max(_seen[k].values(), default=0.0))[: _MAX_KEYS // 10]:
+                            _seen.pop(k, None)
+                    seen = _seen[key] = {}
+                t0 = seen.get(sig)
+                if t0 is not None and (t - t0) < win:
+                    _stats["dropped"] += 1
+                    return True
+                seen[sig] = t
+                if len(seen) > _MAX_SIGS:
+                    for k in sorted(seen, key=seen.get)[: len(seen) - _MAX_SIGS]:
+                        seen.pop(k, None)
+                _stats["kept"] += 1
+            return False
         with _lock:
             prev = _last.get(key)
             if prev is not None and prev[0] == sig and (t - prev[1]) < win:
@@ -76,12 +108,14 @@ def is_repeat(obj, now: Optional[float] = None) -> bool:
 def status() -> dict:
     with _lock:
         s = dict(_stats)
-        s["tracked"] = len(_last)
+        s["tracked"] = len(_seen) if mode() == "any_sig" else len(_last)
     s["window_s"] = window_s()
+    s["mode"] = mode()
     return s
 
 
 def reset_for_tests() -> None:
     with _lock:
         _last.clear()
+        _seen.clear()
         _stats.update(kept=0, dropped=0)

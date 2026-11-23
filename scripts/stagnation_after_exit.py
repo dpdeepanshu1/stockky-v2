@@ -10,6 +10,8 @@ Answers: is the 20-25 minute no-follow-through / 30 minute flat-band exit closin
 3) run INSIDE the market-data container:
      docker compose exec -T market-data-service python - --csv /tmp/daily_trades.csv --pause 1.5 < scripts/stagnation_after_exit.py
    options: --since 2026-11-01   --limit 40 (first 40 trades only, for a test)   --reason no_followthrough | flat_band
+   round 680: the same check for Real Trade's early loss exit (13 trades, all closed at about -0.35R by design):
+     docker compose exec -T market-data-service python - --csv /tmp/daily_trades.csv --pause 1.5 --service real-trade --exit-prefix failed_entry_exit < scripts/stagnation_after_exit.py
 
 For each position-stocks trade whose exit_reason starts with "stagnation_exit": entry price = close of the entry-minute candle, exit price = close of the exit-minute
 candle (approximations: the real fills differ by a few paise). It then prints the return if the trade had been HELD to exit+30 min, exit+60 min and 15:00, and how
@@ -83,6 +85,8 @@ def main():
     ap.add_argument("--since", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--reason", default="")
+    ap.add_argument("--service", default="position-stocks", help="round 680: which service's trades to check (default position-stocks; real-trade for failed_entry_exit)")
+    ap.add_argument("--exit-prefix", default="stagnation_exit", help="round 680: exit_reason prefix to check (default stagnation_exit; failed_entry_exit for Real Trade's early loss exit)")
     ap.add_argument("--pause", type=float, default=1.5)
     a = ap.parse_args()
     from dhan_data import history, scrip_master  # only present inside the market-data container
@@ -92,7 +96,7 @@ def main():
     with open(a.csv, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             reason = (r.get("exit_reason") or "")
-            if r.get("service") != "position-stocks" or not reason.startswith("stagnation_exit"):
+            if r.get("service") != a.service or not reason.startswith(a.exit_prefix):
                 continue
             if a.reason and a.reason not in reason:
                 continue
@@ -101,7 +105,7 @@ def main():
             trades.append(r)
     if a.limit:
         trades = trades[:a.limit]
-    print(f"{len(trades)} stagnation exits to check")
+    print(f"{len(trades)} {a.service} trades with exit reason {a.exit_prefix}* to check")
     cache, groups, skipped, diffs = {}, {}, 0, []
     for r in trades:
         sym = r["symbol"]

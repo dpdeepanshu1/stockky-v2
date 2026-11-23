@@ -86,7 +86,8 @@ def main():
     ap.add_argument("--pause", type=float, default=1.5)
     a = ap.parse_args()
     from dhan_data import history, scrip_master  # only present inside the market-data container
-    print("dhan scrip master:", scrip_master.status(), "(loaded)" if scrip_master.ensure_loaded(block=True) else "(NOT loaded: nothing below can be trusted)")
+    loaded = scrip_master.ensure_loaded(block=True)   # load first, then print the status
+    print("dhan scrip master:", scrip_master.status(), "(loaded)" if loaded else "(NOT loaded: nothing below can be trusted)")
     trades = []
     with open(a.csv, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):

@@ -32,7 +32,17 @@ if [ -n "$TOKEN" ]; then
   echo; echo "== Dhan token (/dhan/status): hours remaining =="; get "$RT_URL/dhan/status"
   echo; echo "== write-behind + WAIT dedupe counters =="; get "$RT_URL/write-behind/status"
 fi
-echo; echo "== CPU throttle (since container start): throttled / periods =="
+echo; echo "== CPU throttle, NOW: share of 100 ms periods that hit the cpu cap during a 20 s sample (since-start ratio below it) =="
+_thr() { docker compose exec -T "$1" sh -c 'echo $(grep nr_periods /sys/fs/cgroup/cpu.stat | cut -d" " -f2) $(grep nr_throttled /sys/fs/cgroup/cpu.stat | cut -d" " -f2)' 2>/dev/null; }
+declare -A _P0 _T0
+for c in position-stocks-service real-trade-service market-data-service; do read -r _P0[$c] _T0[$c] < <(_thr "$c"); done
+sleep 20
+for c in position-stocks-service real-trade-service market-data-service; do
+  read -r p1 t1 < <(_thr "$c")
+  dp=$(( ${p1:-0} - ${_P0[$c]:-0} )); dt=$(( ${t1:-0} - ${_T0[$c]:-0} ))
+  [ "$dp" -gt 0 ] && echo "$c: $dt of $dp periods throttled in 20 s ($(( 100 * dt / dp )) %)" || echo "$c: not readable"
+done
+echo; echo "== since-start CPU throttle (since container start): throttled / periods =="
 for c in position-stocks-service real-trade-service market-data-service; do
   docker compose exec -T "$c" sh -c 'p=$(grep nr_periods /sys/fs/cgroup/cpu.stat | cut -d" " -f2); t=$(grep nr_throttled /sys/fs/cgroup/cpu.stat | cut -d" " -f2); echo "'"$c"' throttled=$t periods=$p $(awk -v t="$t" -v p="$p" "BEGIN{ if (p>0) printf \"(%.1f%%)\", 100*t/p }")"' 2>/dev/null || echo "$c: not readable"
 done
@@ -86,7 +96,7 @@ docker inspect -f '{{.Name}} cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Mem
 echo; echo "== D4: slowest entry attempts, last 24 h (position-stocks 'entry SLOW' lines, newest 25) =="
 docker compose logs --since 24h --no-color position-stocks-service 2>/dev/null | grep "entry SLOW" | tail -25 | cut -c1-400
 echo; echo "== D2: what the DB waited on (ASH, last 3 h; if this errors, use the OCI Metrics page instead) =="
-docker compose exec -T real-trade-service python3 - <<'E' 2>&1 | tail -30
+docker compose exec -T real-trade-service python3 - <<'E' 2>&1 | tail -60
 import sys; sys.path.insert(0, "/app")
 import db
 from sqlalchemy import text
@@ -95,8 +105,8 @@ try:
         print("TOP WAIT EVENTS, last 3 hours")
         for r in c.execute(text("select nvl(event,'ON CPU') ev, count(*) n from v$active_session_history where sample_time > systimestamp - interval '3' hour group by nvl(event,'ON CPU') order by n desc fetch first 12 rows only")):
             print(f"{r[1]:>8} {r[0]}")
-        print("\nSAMPLES PER MINUTE, last 90 minutes")
-        for r in c.execute(text("select to_char(sample_time,'HH24:MI') m, count(*) n from v$active_session_history where sample_time > systimestamp - interval '90' minute group by to_char(sample_time,'HH24:MI') order by 1")):
+        print("\nSAMPLES PER MINUTE, last 30 minutes")
+        for r in c.execute(text("select to_char(sample_time,'HH24:MI') m, count(*) n from v$active_session_history where sample_time > systimestamp - interval '30' minute group by to_char(sample_time,'HH24:MI') order by 1")):
             print(r[0], r[1])
 except Exception as e:
     print("ASH not readable:", str(e)[:200])

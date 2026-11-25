@@ -119,19 +119,45 @@ echo; echo "== I1: compose caps (expect position-stocks cpus=700000000, market-d
 docker inspect -f '{{.Name}} cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}}' $(docker ps -q) 2>/dev/null | sort
 echo; echo "== D4: slowest entry attempts, last 24 h (position-stocks 'entry SLOW' lines, newest 25) =="
 docker compose logs --since 24h --no-color position-stocks-service 2>/dev/null | grep "entry SLOW" | tail -25 | cut -c1-400
-echo; echo "== D2: what the DB waited on (ASH, last 3 h; if this errors, use the OCI Metrics page instead) =="
-docker compose exec -T real-trade-service python3 - <<'E' 2>&1 | tail -60
-import sys; sys.path.insert(0, "/app")
+# round 684: D2 reads a FIXED window, 09:00-11:00 IST of $DAY (the open window), not "the last 3 hours", which on a 15:30 run covers 12:30-15:30 and says nothing
+# about the open. ASH keeps recent samples in memory (v$active_session_history, hours to a day or two); if the window has no samples there it falls back to
+# dba_hist_active_sess_history (1 sample in 10, so counts x10) and says which one it read. Read-only.
+echo; echo "== D2: what the DB waited on, $DAY 09:00-11:00 IST (= 03:30-05:30 UTC); ASH read; if this errors, use the OCI Metrics page instead =="
+docker compose exec -T -e DAY="$DAY" real-trade-service python3 - <<'E' 2>&1 | tail -70
+import os, re, sys
+sys.path.insert(0, "/app")
+from datetime import datetime, timedelta
 import db
 from sqlalchemy import text
+day = os.environ.get("DAY", "")
+if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+    print("DAY is not YYYY-MM-DD:", day); raise SystemExit
+d0 = datetime.strptime(day, "%Y-%m-%d")
+a = (d0 + timedelta(hours=3, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")      # 09:00 IST in UTC
+b = (d0 + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")      # 11:00 IST in UTC
+UTC = "sys_extract_utc(from_tz(cast(sample_time as timestamp), dbtimezone))"  # sample_time is in the database time zone: make it UTC first
+P = {"a": a, "b": b}
+W = f"{UTC} >= to_timestamp(:a,'YYYY-MM-DD HH24:MI:SS') and {UTC} < to_timestamp(:b,'YYYY-MM-DD HH24:MI:SS')"
 try:
     with db.get_engine().connect() as c:
-        print("TOP WAIT EVENTS, last 3 hours")
-        for r in c.execute(text("select nvl(event,'ON CPU') ev, count(*) n from v$active_session_history where sample_time > systimestamp - interval '3' hour group by nvl(event,'ON CPU') order by n desc fetch first 12 rows only")):
-            print(f"{r[1]:>8} {r[0]}")
-        print("\nSAMPLES PER MINUTE, last 30 minutes")
-        for r in c.execute(text("select to_char(sample_time,'HH24:MI') m, count(*) n from v$active_session_history where sample_time > systimestamp - interval '30' minute group by to_char(sample_time,'HH24:MI') order by 1")):
-            print(r[0], r[1])
+        print("database time zone:", c.execute(text("select dbtimezone from dual")).scalar(), "| window UTC:", a, "to", b)
+        for view, mult in (("v$active_session_history", 1), ("dba_hist_active_sess_history", 10)):
+            try:
+                n = c.execute(text(f"select count(*) from {view} where {W}"), P).scalar()
+            except Exception as e:  # noqa: BLE001
+                print(view, "not readable:", str(e)[:120]); continue
+            if not n:
+                print(view, ": no samples in the window"); continue
+            print(f"\nread: {view} ({n} samples" + (", counts x10 = estimate" if mult > 1 else "") + ")")
+            print("TOP WAIT EVENTS in the window")
+            for r in c.execute(text(f"select nvl(event,'ON CPU') ev, count(*) n from {view} where {W} group by nvl(event,'ON CPU') order by n desc fetch first 12 rows only"), P):
+                print(f"{r[1] * mult:>8} {r[0]}")
+            print("\nSAMPLES PER 10 MINUTES in the window")
+            for r in c.execute(text(f"select to_char(cast(sample_time as timestamp),'HH24:') || lpad(trunc(to_number(to_char(sample_time,'MI'))/10)*10,2,'0') m, count(*) n from {view} where {W} group by to_char(cast(sample_time as timestamp),'HH24:') || lpad(trunc(to_number(to_char(sample_time,'MI'))/10)*10,2,'0') order by 1")):
+                print(r[0], r[1] * mult)
+            break
+        else:
+            print("no ASH samples for that window in either view: nothing to read (the window is older than ASH keeps, or ASH is off)")
 except Exception as e:
     print("ASH not readable:", str(e)[:200])
 E

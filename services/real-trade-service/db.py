@@ -64,6 +64,19 @@ def _pool_sizes():
     return _n("RT_DB_POOL_SIZE", 4, 2), _n("RT_DB_MAX_OVERFLOW", 4, 0)
 
 
+def _pool_recycle() -> int:
+    """round 684: seconds after which a pooled Oracle connection is replaced, from RT_DB_POOL_RECYCLE, default 1800 (was 300, the oracle_compat default).
+    With the 60 s keep-warm touching idle connections, a 300 s recycle replaces each pooled connection every 5 minutes: 4 pooled x 288 a day = about 1,150
+    new TLS + auth connects, which fits the ~1,500 a day and the 1.4 s connect p95 of the 25 Nov read. Dead connections are still replaced by pool_pre_ping.
+    Dedicated name (the shared DB_POOL_RECYCLE in .env is written for other services). Blank / non-numeric -> 1800; below 60 -> 60."""
+    import os
+    raw = (os.environ.get("RT_DB_POOL_RECYCLE") or "").strip()
+    try:
+        return max(60, int(raw)) if raw else 1800
+    except ValueError:
+        return 1800
+
+
 def get_engine():
     """Lazily build (once) and return the SQLAlchemy engine for whichever
     backend is configured. Returns None if neither Oracle nor a Postgres
@@ -98,6 +111,7 @@ def get_engine():
             config.DATABASE_URL,
             db_pool_size=_psize,
             db_max_overflow=_pover,
+            db_pool_recycle=_pool_recycle(),
         )
         return _engine
 

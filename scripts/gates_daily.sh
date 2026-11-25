@@ -14,6 +14,12 @@ if [[ "$DAY" > "$(TZ=Asia/Kolkata date +%F)" ]]; then   # round 678: a future da
   echo "DAY=$DAY is after today ($(TZ=Asia/Kolkata date +%F) IST): nothing to read yet. Run it on the day itself after 15:45 IST." >&2
   exit 2
 fi
+# round 683: an NSE holiday has no REAL rows, and a saved empty read adds a file to the rule check without adding a session (24 Nov 2026, Guru Nanak Jayanti, was one).
+if [ -z "${GATES_DAILY_INNER:-}" ] && grep -q "\"$DAY\"" services/real-trade-service/tz_utils.py 2>/dev/null && [ "$(date -d "$DAY" +%u)" -lt 6 ] \
+   && grep -E "^\s+\"$DAY\"," services/real-trade-service/tz_utils.py >/dev/null 2>&1; then
+  echo "DAY=$DAY is an NSE holiday in services/real-trade-service/tz_utils.py: no session, nothing saved." >&2
+  exit 3
+fi
 if [ "$DAY" = "$(TZ=Asia/Kolkata date +%F)" ] && [ "$(TZ=Asia/Kolkata date +%H%M)" -lt 1545 ]; then
   echo "WARNING: it is before 15:45 IST, so the day is not finished; later prices are missing from this read." >&2
 fi

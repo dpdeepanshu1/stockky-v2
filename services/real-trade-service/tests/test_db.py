@@ -344,7 +344,7 @@ class TestGetEngine:
     def test_oracle_branch_uses_4_plus_4_pool_and_caches(self, monkeypatch):
         calls = []
 
-        def fake_build(url, db_pool_size, db_max_overflow):
+        def fake_build(url, db_pool_size, db_max_overflow, db_pool_recycle=None):
             calls.append((url, db_pool_size, db_max_overflow))
             return "ORACLE-ENGINE", "wallet-info"
 

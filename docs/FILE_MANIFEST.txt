@@ -3049,6 +3049,8 @@ services/real-trade-service/tests/test_round671_diag_wait_dedupe.py
 services/real-trade-service/tests/test_round672_hourly_reconcile_offload.py
 services/real-trade-service/tests/test_round672_risk_check_offload.py
 services/real-trade-service/tests/test_round682_wait_dedupe_any_sig.py
+services/real-trade-service/tests/test_round683_wait_dedupe_probe.py
+services/real-trade-service/tests/test_round684_wait_dedupe_catchall.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

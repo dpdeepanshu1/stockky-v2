@@ -16,6 +16,12 @@ flips between two gate tags (A, B, A, B every cycle: 23 Nov wrote 1,491 rows, th
 each signature once per window instead of a row at every flip. The first row of every (symbol, signature) is still written, so the name, the gate tag and the first-block
 time of every refusal stay in the table; only the repeat count shrinks. Unset / blank / any other value = the rule above ("last"). Switch it on only after
 scripts/wait_dedupe_sim.py shows it drops 30 % or more of a day's rows.
+
+Round 684 (catch-all, default ON, WAIT_DEDUPE_CATCHALL=off turns it off): the rule above only ran where write_behind.divert_pending_waits is called, so a WAIT row
+committed or flushed anywhere else reached the table unchecked (25 Nov: 258 rows evaluated, 1,710 stored). A Session before_flush hook now runs the SAME rule on every
+pending ENTRY / WAIT TradeDecision that has not been checked yet and expunges the repeats, so every writer is covered whatever its path. It never touches a row that has
+an id (an order hangs off it), an ENTER row or an exit row, and never raises. Each row it had to check itself is counted in status()['unchecked'] with the call chain
+that flushed it, so the writer is still named while the rule is enforced; status()['caught_dropped'] counts the repeats it removed.
 """
 from __future__ import annotations
 
@@ -33,7 +39,9 @@ _lock = threading.Lock()
 _last: Dict[Tuple[str, str], Tuple[str, float]] = {}
 _seen: Dict[Tuple[str, str], Dict[str, float]] = {}       # round 682, any_sig mode: every signature written for the key -> time written
 _MAX_SIGS = 40                                            # signatures remembered per symbol (oldest dropped first)
-_stats = {"kept": 0, "dropped": 0}
+_stats = {"kept": 0, "dropped": 0, "unchecked": 0, "caught_dropped": 0}
+_unchecked_samples: list = []                             # round 683: first few WAIT rows that reached the DB without passing is_repeat (who wrote them)
+_MAX_SAMPLES = 25
 
 
 def window_s() -> float:
@@ -61,6 +69,10 @@ def signature(obj) -> str:
 def is_repeat(obj, now: Optional[float] = None) -> bool:
     """True when this pending WAIT row repeats the last one written for its symbol inside the window. Records the row when it is kept."""
     try:
+        try:
+            obj._wd_seen = True                             # round 683: the insert probe below tells a checked row from one that bypassed this rule
+        except Exception:  # noqa: BLE001
+            pass
         win = window_s()
         key = (str(getattr(obj, "mode", "") or ""), str(getattr(obj, "symbol", "") or ""))
         t = time.monotonic() if now is None else now
@@ -105,12 +117,87 @@ def is_repeat(obj, now: Optional[float] = None) -> bool:
         return False
 
 
+def catchall_on() -> bool:
+    """Round 684: the before_flush catch-all is ON unless WAIT_DEDUPE_CATCHALL is 0 / off / false / no (blank or unset = on)."""
+    return (os.environ.get("WAIT_DEDUPE_CATCHALL") or "").strip().lower() not in ("0", "off", "false", "no")
+
+
+def _note_unchecked(target, label: str = "") -> None:
+    """Count one WAIT row that arrived without passing is_repeat; keep the first few with symbol, gate tag and the call chain. Never raises."""
+    try:
+        import traceback
+        frames = [f for f in traceback.extract_stack(limit=18)
+                  if "site-packages" not in f.filename and os.path.basename(f.filename) != "wait_dedupe.py"]
+        where = " <- ".join(f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}" for f in reversed(frames[-5:]))
+        with _lock:
+            _stats["unchecked"] += 1
+            if len(_unchecked_samples) < _MAX_SAMPLES:
+                _unchecked_samples.append({"symbol": getattr(target, "symbol", None), "gate_tag": getattr(target, "gate_tag", None),
+                                           "where": where, "via": label})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _is_plain_new_wait(obj) -> bool:
+    return (type(obj).__name__ == "TradeDecision" and getattr(obj, "decision_type", None) == "ENTRY" and getattr(obj, "action", None) == "WAIT"
+            and getattr(obj, "id", None) is None and not getattr(obj, "_wd_seen", False))
+
+
+def _before_flush(session, _ctx=None, _instances=None) -> None:
+    """Round 684 (Session before_flush): apply the dedupe rule to every pending ENTRY / WAIT TradeDecision that did not pass it yet and expunge the repeats.
+    Skips rows already checked (_wd_seen), rows with an id, and anything that is not a plain new WAIT row. Never raises."""
+    try:
+        if not catchall_on() or window_s() <= 0:
+            return
+        for obj in list(session.new):
+            try:
+                if not _is_plain_new_wait(obj):
+                    continue
+                _note_unchecked(obj, "before_flush")
+                if is_repeat(obj):
+                    session.expunge(obj)
+                    with _lock:
+                        _stats["caught_dropped"] += 1
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _probe_insert(_mapper, _conn, target) -> None:
+    """round 683 (before_insert on TradeDecision): count an ENTRY / WAIT row being written by the ORM without having passed is_repeat.
+    With the round 684 catch-all on, a row only gets here unchecked when the catch-all is off or the window is 0. Read only, never raises."""
+    try:
+        if getattr(target, "decision_type", None) != "ENTRY" or getattr(target, "action", None) != "WAIT" or getattr(target, "_wd_seen", False):
+            return
+        _note_unchecked(target, "before_insert")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def install_insert_probe() -> bool:
+    """Register the probe once (called at service start). False when SQLAlchemy / models are not importable. Never raises."""
+    try:
+        from sqlalchemy import event
+        import models
+        if not event.contains(models.TradeDecision, "before_insert", _probe_insert):
+            event.listen(models.TradeDecision, "before_insert", _probe_insert)
+        from sqlalchemy.orm import Session as _Session          # round 684: the catch-all covers every session in the process
+        if not event.contains(_Session, "before_flush", _before_flush):
+            event.listen(_Session, "before_flush", _before_flush)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def status() -> dict:
     with _lock:
         s = dict(_stats)
+        s["unchecked_samples"] = list(_unchecked_samples[:_MAX_SAMPLES])
         s["tracked"] = len(_seen) if mode() == "any_sig" else len(_last)
     s["window_s"] = window_s()
     s["mode"] = mode()
+    s["catchall"] = catchall_on()
     return s
 
 
@@ -118,4 +205,5 @@ def reset_for_tests() -> None:
     with _lock:
         _last.clear()
         _seen.clear()
-        _stats.update(kept=0, dropped=0)
+        _stats.update(kept=0, dropped=0, unchecked=0, caught_dropped=0)
+        _unchecked_samples.clear()

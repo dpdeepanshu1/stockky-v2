@@ -251,6 +251,11 @@ async def startup() -> None:
             logger.error("CONFIG ERROR: %s", e)
         raise RuntimeError(f"real-trade-service refusing to start: {'; '.join(errors)}")
     init_schema()
+    try:
+        import wait_dedupe as _wd_probe
+        _wd_probe.install_insert_probe()         # round 683 probe + round 684 before_flush catch-all: WAIT rows that bypass divert_pending_waits are now checked (status "unchecked", "caught_dropped")
+    except Exception:  # noqa: BLE001
+        pass
     _seed_defaults()
     _migrate_risk_defaults()
     _migrate_risk_default_e46()

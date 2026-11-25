@@ -18,6 +18,9 @@ _SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.d
 def _run(monkeypatch, fill):
     monkeypatch.setenv("WAIT_DEDUPE_MINUTES", "15")      # other tests may leave another value in the environment
     monkeypatch.delenv("WINDOW_MIN", raising=False)
+    # round 684: the before_flush catch-all (installed process-wide by wait_dedupe.install_insert_probe) would drop the repeat rows this fixture
+    # inserts on purpose; the script under test must see them, so the catch-all is off for the fixture.
+    monkeypatch.setenv("WAIT_DEDUPE_CATCHALL", "off")
     import db
     import models
     from sqlalchemy import create_engine

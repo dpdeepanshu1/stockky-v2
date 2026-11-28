@@ -40,6 +40,23 @@ def test_days_counts_sessions_not_calendar_days():            # round 703
     assert p.day_list("2026-11-24", 2) == ["2026-11-24", "2026-11-23"]
 
 
+def test_soft_rows_are_broken_out_by_gate_with_placed_count():            # round 704
+    from datetime import datetime
+    T = datetime(2026, 11, 27, 4, 0)
+    rows = [("A", "SOFT", "OPENING_GATE:NEAR_DAY_HIGH:range_pos 0.93 >= 0.9", T), ("A", "SOFT", "OPENING_GATE:NEAR_DAY_HIGH:range_pos 0.95", T),
+            ("B", "SOFT", "OPENING_GATE:NEAR_DAY_HIGH:x", T), ("C", "SOFT", "QUALITY_GATE:technical_score 28 < floor 30", T),
+            ("A", "ENTERED", "ok", T), ("D", "SKIPPED", "PRICE_GUARD:x", T)]
+    r = p.summarize(rows)
+    assert r["soft_rows"] == 4 and r["skipped_rows"] == 1
+    g = {x["gate"]: x for x in r["soft_gates"]}
+    assert g["OPENING_GATE:NEAR_DAY_HIGH"] == {"gate": "OPENING_GATE:NEAR_DAY_HIGH", "rows": 3, "syms": 2, "placed": 1}
+    assert g["QUALITY_GATE:technical_score"] == {"gate": "QUALITY_GATE:technical_score", "rows": 1, "syms": 1, "placed": 0}
+    assert p.soft_gate("") == "(no reason)" and p.soft_gate("A:B:C") == "A:B"
+    txt = p.format_day("2026-11-27", rows)
+    assert "SOFT by gate" in txt and "OPENING_GATE:NEAR_DAY_HIGH" in txt
+    assert "SOFT by gate" not in p.format_day("2026-11-27", [("D", "SKIPPED", "PRICE_GUARD:x", T)])
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

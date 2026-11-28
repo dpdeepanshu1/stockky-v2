@@ -1,3 +1,10 @@
+## 28 Nov 2026 - Round 704 (E726): `ps_skip_reasons.py` shows which gate each SOFT row came from, and whether that symbol was entered
+
+ * **Found (VM read of 26-27 Nov, pasted):** the header said `SOFT ... 2 rows` (27 Nov) and `3 rows` (26 Nov) with no long entry on either day, but gave no way to tell which gate was softened or whether the entry went on. Round 696 counted SOFT apart but not by gate. I checked the writer: SOFT and ENTERED rows are never de-duplicated against each other (the log writer keys on the decision), so a placed long is not hidden behind a SOFT row.
+ * **Change (`scripts/ps_skip_reasons.py`, read-only):** a "SOFT by gate" block under the header: the gate tag (first two `:` parts, numbers after the tag dropped, so `QUALITY_GATE:technical_score 28 < floor 30` is one gate), rows, symbols, and how many of those symbols also have an ENTERED / SHORT_ENTERED row that day. A day with no SOFT rows prints nothing new.
+ * **Test:** `scripts/test_round702_weekend_guard.py` +1 (6 in all). With `test_ps_skip_reasons.py` and `test_gate_rule_summary.py`: 24 of 24 pass.
+ * **Deploy:** copy `scripts/ps_skip_reasons.py`, `scripts/test_round702_weekend_guard.py`, `CHANGELOG.md`; no rebuild.
+
 ## 28 Nov 2026 - Round 703 (E725): `ps_skip_reasons.py --days N` counted calendar days, so a Monday read spent two of three tables on Sunday and Saturday
 
  * **Found (code read, same class as round 702):** `--days 3` stepped back one calendar day at a time. Run on a Monday it printed Monday, then two "market is closed" tables, and never reached Friday or Thursday. The NSE holiday case is not handled here (the script has no holiday list; a holiday still prints its one "no rows" line).

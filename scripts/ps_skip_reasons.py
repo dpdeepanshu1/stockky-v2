@@ -38,6 +38,17 @@ def family(reason):
 ENTERED_DECISIONS = ("ENTERED", "SHORT_ENTERED")
 
 
+def soft_gate(reason):
+    """'OPENING_GATE:NEAR_DAY_HIGH:range_pos 0.93 ...' -> 'OPENING_GATE:NEAR_DAY_HIGH' (the gate_policy tag: first two ':' parts); empty -> '(no reason)'."""
+    r = (reason or "").strip()
+    if not r:
+        return "(no reason)"
+    parts = [x.strip() for x in r.split(":")[:2]]
+    if len(parts) == 2:
+        parts[1] = parts[1].split()[0] if parts[1].split() else ""     # 'technical_score 28 < floor 30' -> 'technical_score' (numbers are detail, not the gate)
+    return ":".join(x for x in parts if x)[:60]
+
+
 def side(decision):
     """'S' for the short side (SHORT_ENTERED / SHORT_SKIP), 'L' for everything else."""
     return "S" if (decision or "").upper().startswith("SHORT") else "L"
@@ -48,7 +59,7 @@ def summarize(rows, samples=2):
     dict(entered_rows, entered_syms {'L': n, 'S': n}, soft_rows, skipped_rows, families [dicts sorted by rows desc]).
     A family is keyed by (side, family) so a long and a short reason of the same name stay apart."""
     entered, entered_syms = {"L": 0, "S": 0}, {"L": set(), "S": set()}
-    soft, skipped, fam = 0, 0, {}
+    soft, skipped, fam, soft_by = 0, 0, {}, {}
     for sym, dec, reason, ts in rows:
         d = (dec or "").upper()
         sd = side(d)
@@ -58,6 +69,10 @@ def summarize(rows, samples=2):
             continue
         if d == "SOFT":
             soft += 1
+            g = soft_gate(reason)                      # round 704: which gate was softened, and for which symbols
+            e = soft_by.setdefault(g, {"gate": g, "rows": 0, "syms": set()})
+            e["rows"] += 1
+            e["syms"].add(sym)
             continue
         skipped += 1
         key = (sd, family(reason))
@@ -70,7 +85,11 @@ def summarize(rows, samples=2):
         if len(f["samples"]) < samples and txt and txt not in f["samples"]:
             f["samples"].append(txt)
     out = sorted(fam.values(), key=lambda x: (-x["rows"], x["family"], x["side"]))
-    return {"entered_rows": entered, "entered_syms": {k: len(v) for k, v in entered_syms.items()}, "soft_rows": soft, "skipped_rows": skipped, "families": out}
+    entered_all = entered_syms["L"] | entered_syms["S"]
+    soft_gates = sorted(({"gate": e["gate"], "rows": e["rows"], "syms": len(e["syms"]), "placed": len(e["syms"] & entered_all)} for e in soft_by.values()),
+                        key=lambda x: (-x["rows"], x["gate"]))
+    return {"entered_rows": entered, "entered_syms": {k: len(v) for k, v in entered_syms.items()}, "soft_rows": soft, "skipped_rows": skipped, "families": out,
+            "soft_gates": soft_gates}
 
 
 def format_day(day, rows, top=25, samples=2):
@@ -86,6 +105,11 @@ def format_day(day, rows, top=25, samples=2):
     out = [f"POSITION STOCKS SKIP REASONS  day {day}  rows {len(rows)}  symbols {len(syms_all)}",
            f"  ENTERED long {e['L']} rows / {es['L']} symbols   short {e['S']} rows / {es['S']} symbols   |   SOFT (entry went on at reduced size) {r['soft_rows']} rows   |   SKIPPED {skipped} rows",
            ""]
+    if r["soft_gates"]:
+        out.append("  SOFT by gate (rows / symbols / of those symbols that also have an entry row the same day):")
+        for g in r["soft_gates"]:
+            out.append(f"    {g['gate']:<44}{g['rows']:>4} rows {g['syms']:>3} symbols {g['placed']:>3} entered")
+        out.append("")
     out.append(f"{'family':<34}{'side':>5}{'rows':>6}{'symbols':>9}{'share':>8}{'1st (IST)':>11}")
     for f in r["families"][:top]:
         share = 100.0 * f["rows"] / skipped if skipped else 0.0

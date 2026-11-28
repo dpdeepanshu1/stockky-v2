@@ -1094,6 +1094,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _label_upper = (cand.decision_label or "").upper()
         if _label_upper not in _ACTIONABLE_DECISIONS:
             _wait(f"Source decision '{cand.decision_label}' is not actionable for entry.")
+            decision.gate_tag = "not_actionable"            # round 690 (E712): was untagged
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -1109,6 +1110,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 "+0.66% mean — too thin an edge after transaction costs). Set "
                 "VOLUME_SHOCK_BASE_TIER_AUTO_ENTRY_ENABLED=true to re-enable."
             )
+            decision.gate_tag = "vs_base_off"            # round 690 (E712): was untagged
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -1148,6 +1150,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     f"if this persists the market-data service ({MARKET_DATA_URL}) "
                     "may be cold-starting, rate-limited, or MARKET_DATA_URL is misconfigured."
                 )
+                decision.gate_tag = "no_quote"            # round 689 (E711): was untagged, so the daily gate read could not price it
                 decision.proposed_price  = _p_entry
                 decision.proposed_stop   = _p_stop
                 decision.proposed_target = _p_tgt
@@ -1158,6 +1161,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     "The market-data service may be asleep (Render cold start), "
                     "rate-limited, or MARKET_DATA_URL may be unset/misconfigured."
                 )
+                decision.gate_tag = "no_quote"            # round 689 (E711): was untagged, so the daily gate read could not price it
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning,
@@ -1185,6 +1189,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     logger.info("entry_engine: %s %s held back, %s (candidate left queued)", mode, cand.symbol, _age_reason)
                 continue
             _wait(f"Price too old to enter on: {_age_reason}.")
+            decision.gate_tag = "stale_price"            # round 689 (E711): was untagged, so the daily gate read could not price it
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -1283,6 +1288,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"({threshold_src}) {age_note}. "
                 "Nifty regime is weak — deferring new BUY entries until recovery."
             )
+            decision.gate_tag = "regime"            # round 689 (E711): was untagged, so the daily gate read could not price it
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -1306,6 +1312,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 _rearm.arm(mode, cand.symbol, drift_reason, float(tick.price), _tick_day_change_pct(tick) or 0.0,
                            getattr(tick, "day_high", None), candidate_id=cand.id)
             _wait_with_preview(drift_reason)
+            decision.gate_tag = "entry_drift"            # round 689 (E711): was untagged, so the daily gate read could not price it
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": drift_reason, "risk_verdict": None})
@@ -1313,6 +1320,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         if per_share_risk <= 0:
             _wait_with_preview("Computed stop is not below entry — invalid risk setup.")
+            decision.gate_tag = "bad_stop"            # round 690 (E712): was untagged
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -1543,6 +1551,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"R:R {rr:.2f}:1 below floor {_rr_gate_txt}:1 — "
                 "setup does not offer enough reward for the risk. Skip."
             )
+            decision.gate_tag = "rr_floor"            # round 689 (E711): was untagged, so the daily gate read could not price it
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -1565,6 +1574,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 logger.debug("entry_engine: regime rules failed for %s (no penalty): %s", cand.symbol, _rr_err)
         if _regime_skip:
             _wait_with_preview(f"Regime rules: {_regime_reason}. The weak-market floors are missed by too much to trade this one. Skip.")
+            decision.gate_tag = "regime_rules"            # round 689 (E711): was untagged, so the daily gate read could not price it
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": decision.reasoning, "risk_verdict": None})
             continue
@@ -1763,6 +1773,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"Even 1 share exceeds conviction-adjusted risk cap "
                 f"({adj_risk_pct:.2f}% of equity = ₹{max_trade_risk:.2f})."
             )
+            decision.gate_tag = "risk_cap"            # round 689 (E711): was untagged, so the daily gate read could not price it
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
@@ -2055,6 +2066,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 "symbol in one cycle (duplicate candidate rows, e.g. a manual queue plus "
                 "an auto-sourced row). Re-evaluated fresh next cycle if still applicable."
             )
+            decision.gate_tag = "dup_staged"            # round 691 (E713): was untagged
             waited += 1
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
@@ -2242,6 +2254,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             )
             if note:
                 decision.reasoning += f" {note}"
+            decision.gate_tag = "auto_pause_reserve" if note else ("below_floor" if below_floor else "not_top_n")            # round 691 (E713): was untagged
             waited += 1
             db.add(decision)
             entry_details.append({

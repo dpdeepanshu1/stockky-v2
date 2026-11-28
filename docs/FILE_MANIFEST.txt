@@ -542,6 +542,7 @@ scripts/fno_rolling_fetch.py
 scripts/fno_rolling_index_candles.py
 scripts/fno_rolling_probe.py
 scripts/fno_sim_backtest.py
+scripts/fno_sizing_whatif.py
 scripts/freeze_constraints.sh
 scripts/gate_outcome_dhan.py
 scripts/gate_rule_summary.py
@@ -575,6 +576,7 @@ scripts/oracle-vm-tune.sh
 scripts/p8_retest_evidence.py
 scripts/preopen_momentum_study.py
 scripts/price_source_allowlist.txt
+scripts/ps_skip_reasons.py
 scripts/qc_liquidity_check.py
 scripts/records_report.py
 scripts/regime_history_replay.py
@@ -637,6 +639,7 @@ scripts/test_flow_tape_report.py
 scripts/test_fno_export_candles.py
 scripts/test_fno_rolling_all.py
 scripts/test_fno_rolling_index_candles.py
+scripts/test_fno_sizing_whatif.py
 scripts/test_gate_rule_summary.py
 scripts/test_gate_scorecard_direction.py
 scripts/test_group467_performance.py
@@ -664,6 +667,7 @@ scripts/test_policy_replay.py
 scripts/test_position_stocks_pipeline_offline.py
 scripts/test_preopen_momentum_study.py
 scripts/test_provider_order_shipped.py
+scripts/test_ps_skip_reasons.py
 scripts/test_qc_liquidity_check.py
 scripts/test_records_report.py
 scripts/test_regime_overlay.py
@@ -1648,6 +1652,7 @@ services/fno-options-service/tests/test_round559_view_only_chain.py
 services/fno-options-service/tests/test_round585_true_median_range.py
 services/fno-options-service/tests/test_round587_lifespan.py
 services/fno-options-service/tests/test_round632_backtest_start_claim.py
+services/fno-options-service/tests/test_round686_reward_risk.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile
@@ -2408,6 +2413,7 @@ services/position-stocks-service/tests/test_round656_call_timeout_label.py
 services/position-stocks-service/tests/test_round660_universe_filter.py
 services/position-stocks-service/tests/test_round661_backfill_caps.py
 services/position-stocks-service/tests/test_round675_midday_size.py
+services/position-stocks-service/tests/test_round694_catalog_no_duplicate_keys.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -3051,6 +3057,10 @@ services/real-trade-service/tests/test_round672_risk_check_offload.py
 services/real-trade-service/tests/test_round682_wait_dedupe_any_sig.py
 services/real-trade-service/tests/test_round683_wait_dedupe_probe.py
 services/real-trade-service/tests/test_round684_wait_dedupe_catchall.py
+services/real-trade-service/tests/test_round689_untagged_wait_tags.py
+services/real-trade-service/tests/test_round691_direct_wait_tags.py
+services/real-trade-service/tests/test_round692_eod_scan_wait_tags.py
+services/real-trade-service/tests/test_round695_charges_cumulative_offload.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

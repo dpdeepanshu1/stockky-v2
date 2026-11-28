@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Round 676 (P0.1 of the 23 Nov plan): the daily blocked-name read in ONE command. Run from ~/stockky-v2 after 15:45 IST:
 #   bash scripts/gates_daily.sh [YYYY-MM-DD]        (default = today, IST)
-# For the gates no_setup_window and structure it runs scripts/blocked_sources.py (real-trade container), takes the ready --syms line and runs
+# For every gate in GATES (default: the 14 tags set in GATES= below) it runs scripts/blocked_sources.py (real-trade container), takes the ready --syms line and runs
 # scripts/gate_outcome_dhan.py (market-data container) on it, 25 names per call with a 2 s pause (Dhan answers HTTP 429 when asked too fast).
 # Then the recorded-bars read of the structure gate (scripts/blocked_outcome.py). Read-only; writes nothing. GATES="structure" limits it, CHUNK=15 shrinks a call.
 set -u
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "$0")/.." || exit 1
 DAY="${1:-$(TZ=Asia/Kolkata date +%F)}"
-GATES="${GATES:-no_setup_window structure}"
+# round 685: the 23 Nov WAIT rows were blocked by SEVEN tags but only two were ever priced; the other five (time_machine 226 rows, order_flow 154, liquidity 130,
+# vwap_below 23, structure_nodata 46) had no evidence either way. gate_rule_summary.py already groups by whatever gate header it finds, so no other script changes.
+# round 689: five more WAIT paths used to be written with NO gate tag (market regime, regime rules, price drift, the 1:2 reward:risk floor, the one-share risk cap), so none of them could be priced
+# here. They carry a tag now (entry_engine/entry.py); a day's read only finds them from the first session after the Real Trade service is rebuilt with round 689.
+# round 690: the last three untagged WAIT paths (not_actionable, vs_base_off, bad_stop) and no_quote / stale_price are tagged too but left OUT of GATES on purpose: they are a label, a config switch, a bad stop and data-feed health, not entry judgements a price read could loosen.
+# round 691: two more judgement WAITs were written with no tag because they set decision.action directly instead of calling _wait(): a risk-approved pick below the composite quality floor
+# (below_floor) and one that cleared the floor but lost the top-N ranking (not_top_n). Both are in GATES now; dup_staged and auto_pause_reserve are bookkeeping and stay out.
+GATES="${GATES:-no_setup_window structure time_machine order_flow liquidity vwap_below structure_nodata regime regime_rules entry_drift rr_floor risk_cap below_floor not_top_n}"
 CHUNK="${CHUNK:-25}"
 if [[ "$DAY" > "$(TZ=Asia/Kolkata date +%F)" ]]; then   # round 678: a future day has no blocked rows yet
   echo "DAY=$DAY is after today ($(TZ=Asia/Kolkata date +%F) IST): nothing to read yet. Run it on the day itself after 15:45 IST." >&2

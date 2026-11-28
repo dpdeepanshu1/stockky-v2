@@ -121,6 +121,7 @@ FNO_STRAT_EXPIRY_ALPHA = _b("FNO_STRAT_EXPIRY_ALPHA", False)
 FNO_STRATEGY_MAX_PER_DAY = _i("FNO_STRATEGY_MAX_PER_DAY", 1)  # entries per day for each non-core strategy
 FNO_SL_NOISE_ATR_FRAC = max(0.0, _f("FNO_SL_NOISE_ATR_FRAC", 0.20))                # round 498 (E518): the stop is never inside this fraction of one daily ATR move of the option (delta x ATR / premium); 0 = off
 FNO_SL_MAX_PCT = _f("FNO_SL_MAX_PCT", 35.0)                                       # round 498 (E518): the widest the noise floor may make the stop (% of premium)
+FNO_MIN_REWARD_RISK = max(0.0, _f("FNO_MIN_REWARD_RISK", 2.0))                      # round 686 (E708): the target is never less than this x the stop of THAT entry (2.0 = reward:risk 1:2). The round-498 noise floor can widen the stop to 35 % while the target stayed 50 %, i.e. 1:1.43; this keeps the target 2 x the stop. 0 = off (a flat FNO_TARGET_PCT)
 FNO_SL_PCT = _f("FNO_SL_PCT", 25.0)                          # stop loss as % of the entry premium
 FNO_TARGET_PCT = _f("FNO_TARGET_PCT", 50.0)
 FNO_TRAIL_ARM_PCT = _f("FNO_TRAIL_ARM_PCT", 20.0)            # profit % at which the trailing stop switches on

@@ -22,10 +22,17 @@ if [[ "$DAY" > "$(TZ=Asia/Kolkata date +%F)" ]]; then   # round 678: a future da
   exit 2
 fi
 # round 683: an NSE holiday has no REAL rows, and a saved empty read adds a file to the rule check without adding a session (24 Nov 2026, Guru Nanak Jayanti, was one).
-if [ -z "${GATES_DAILY_INNER:-}" ] && grep -q "\"$DAY\"" services/real-trade-service/tz_utils.py 2>/dev/null && [ "$(date -d "$DAY" +%u)" -lt 6 ] \
-   && grep -E "^\s+\"$DAY\"," services/real-trade-service/tz_utils.py >/dev/null 2>&1; then
-  echo "DAY=$DAY is an NSE holiday in services/real-trade-service/tz_utils.py: no session, nothing saved." >&2
-  exit 3
+# round 702: the round 683 guard skipped Saturdays and Sundays (`date +%u` < 6), so a weekend run (Sat 28 Nov 2026) walked all 14 gates, printed "no rows" for each and saved an empty
+# gates_out/gates_<DAY>.txt. A weekend is now refused the same way as a holiday (exit 3, nothing saved).
+if [ -z "${GATES_DAILY_INNER:-}" ]; then
+  if [ "$(date -d "$DAY" +%u)" -ge 6 ]; then
+    echo "DAY=$DAY is a $(date -d "$DAY" +%A): the market is closed, no session, nothing saved. Pass the last trading day, e.g. bash scripts/gates_daily.sh $(date -d "$DAY -$(( $(date -d "$DAY" +%u) - 5 )) day" +%F)" >&2
+    exit 3
+  fi
+  if grep -E "^\s+\"$DAY\"," services/real-trade-service/tz_utils.py >/dev/null 2>&1; then
+    echo "DAY=$DAY is an NSE holiday in services/real-trade-service/tz_utils.py: no session, nothing saved." >&2
+    exit 3
+  fi
 fi
 if [ "$DAY" = "$(TZ=Asia/Kolkata date +%F)" ] && [ "$(TZ=Asia/Kolkata date +%H%M)" -lt 1545 ]; then
   echo "WARNING: it is before 15:45 IST, so the day is not finished; later prices are missing from this read." >&2

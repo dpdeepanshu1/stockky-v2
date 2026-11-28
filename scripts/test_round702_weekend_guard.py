@@ -49,12 +49,31 @@ def test_soft_rows_are_broken_out_by_gate_with_placed_count():            # roun
     r = p.summarize(rows)
     assert r["soft_rows"] == 4 and r["skipped_rows"] == 1
     g = {x["gate"]: x for x in r["soft_gates"]}
-    assert g["OPENING_GATE:NEAR_DAY_HIGH"] == {"gate": "OPENING_GATE:NEAR_DAY_HIGH", "rows": 3, "syms": 2, "placed": 1}
-    assert g["QUALITY_GATE:technical_score"] == {"gate": "QUALITY_GATE:technical_score", "rows": 1, "syms": 1, "placed": 0}
+    assert {k: v for k, v in g["OPENING_GATE:NEAR_DAY_HIGH"].items() if k != "then_refused"} == {"gate": "OPENING_GATE:NEAR_DAY_HIGH", "rows": 3, "syms": 2, "placed": 1}
+    assert g["OPENING_GATE:NEAR_DAY_HIGH"]["then_refused"] == []
+    assert g["QUALITY_GATE:technical_score"]["then_refused"] == [] and g["QUALITY_GATE:technical_score"]["placed"] == 0
+    assert (g["QUALITY_GATE:technical_score"]["rows"], g["QUALITY_GATE:technical_score"]["syms"], g["QUALITY_GATE:technical_score"]["placed"]) == (1, 1, 0)
     assert p.soft_gate("") == "(no reason)" and p.soft_gate("A:B:C") == "A:B"
     txt = p.format_day("2026-11-27", rows)
     assert "SOFT by gate" in txt and "OPENING_GATE:NEAR_DAY_HIGH" in txt
     assert "SOFT by gate" not in p.format_day("2026-11-27", [("D", "SKIPPED", "PRICE_GUARD:x", T)])
+
+
+def test_soft_symbols_show_where_they_were_refused_afterwards():            # round 704b
+    from datetime import datetime, timedelta
+    T = datetime(2026, 11, 27, 4, 0)
+    rows = [("A", "SKIPPED", "PRICE_GUARD:early", T - timedelta(minutes=5)),                  # before the SOFT row: not counted
+            ("A", "SOFT", "OPENING_GATE:BELOW_OPEN:1.20% under the open (size penalty 2.6, SOFT)", T),
+            ("A", "SKIPPED", "SOFT_PENALTIES_TOO_HIGH:total 6.4 >= 6", T + timedelta(minutes=1)),
+            ("B", "SOFT", "OPENING_GATE:BELOW_OPEN:0.90% under the open (size penalty 1.5, SOFT)", T),
+            ("B", "SKIPPED", "SOFT_PENALTIES_TOO_HIGH:total 7.8 >= 6", T + timedelta(minutes=2)),
+            ("B", "SKIPPED", "PRICE_GUARD:ENTRY_SLIPPAGE:x", T + timedelta(minutes=3)),
+            ("Z", "SKIPPED", "NEAR_DAY_LOW:x", T + timedelta(minutes=3))]                      # not a SOFT symbol: not counted
+    g = p.summarize(rows)["soft_gates"][0]
+    assert g["gate"] == "OPENING_GATE:BELOW_OPEN" and g["placed"] == 0
+    assert g["then_refused"] == [("SOFT_PENALTIES_TOO_HIGH", 2), ("PRICE_GUARD", 1)]
+    assert "then refused by: SOFT_PENALTIES_TOO_HIGH x2, PRICE_GUARD x1" in p.format_day("2026-11-27", rows)
+    assert "gate softened; entry may still be refused" in p.format_day("2026-11-27", rows)
 
 
 if __name__ == "__main__":

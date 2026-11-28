@@ -5,7 +5,9 @@ Run INSIDE the position-stocks container, from ~/stockky-v2, after the close:
   docker compose exec -T position-stocks-service python - --day 2026-11-28 < scripts/ps_skip_reasons.py
   ... --days 3   (the day and the 2 before it, one table each)   --top 25   --samples 2
 
-Reads scalp_candidate_log (decision ENTERED | SKIPPED, reason text like "RANGE_GATE:..." / "MAX_POSITIONS:3"). The reason FAMILY is the text before the first ':'
+Reads scalp_candidate_log. decision is ENTERED / SKIPPED (long side), SHORT_ENTERED / SHORT_SKIP (short side) or SOFT (a policy gate fired but the entry went on at reduced size:
+NOT a skip, counted apart); reason text is like "RANGE_GATE:..." / "MAX_POSITIONS:3". Round 695-696 fix: round 693 counted only the exact value ENTERED, so a placed short (SHORT_ENTERED)
+showed as a skip and the header read ENTERED 0. The reason FAMILY is the text before the first ':'
 (digits and '=' parts after it are the detail, so "MAX_POSITIONS:3" and "MAX_POSITIONS:4" are one family). Per family: rows (a skip row is written every cycle, so
 rows overstate), DISTINCT SYMBOLS (the number to compare with a trade count), share of all skipped rows, first row (IST) and up to --samples raw reasons.
 ENTERED rows are counted at the top so the ratio is visible. Writes nothing; a day with no rows says so instead of printing zeros.
@@ -33,17 +35,33 @@ def family(reason):
     return head[:48] or "(no reason)"
 
 
+ENTERED_DECISIONS = ("ENTERED", "SHORT_ENTERED")
+
+
+def side(decision):
+    """'S' for the short side (SHORT_ENTERED / SHORT_SKIP), 'L' for everything else."""
+    return "S" if (decision or "").upper().startswith("SHORT") else "L"
+
+
 def summarize(rows, samples=2):
-    """rows: [(symbol, decision, reason, created_utc)] -> (entered_rows, entered_symbols, skipped_rows, [family dicts sorted by rows desc])."""
-    entered, entered_syms, fam = 0, set(), {}
-    skipped = 0
+    """rows: [(symbol, decision, reason, created_utc)] ->
+    dict(entered_rows, entered_syms {'L': n, 'S': n}, soft_rows, skipped_rows, families [dicts sorted by rows desc]).
+    A family is keyed by (side, family) so a long and a short reason of the same name stay apart."""
+    entered, entered_syms = {"L": 0, "S": 0}, {"L": set(), "S": set()}
+    soft, skipped, fam = 0, 0, {}
     for sym, dec, reason, ts in rows:
-        if (dec or "").upper() == "ENTERED":
-            entered += 1
-            entered_syms.add(sym)
+        d = (dec or "").upper()
+        sd = side(d)
+        if d in ENTERED_DECISIONS:
+            entered[sd] += 1
+            entered_syms[sd].add(sym)
+            continue
+        if d == "SOFT":
+            soft += 1
             continue
         skipped += 1
-        f = fam.setdefault(family(reason), {"family": family(reason), "rows": 0, "syms": set(), "first": None, "samples": []})
+        key = (sd, family(reason))
+        f = fam.setdefault(key, {"side": sd, "family": key[1], "rows": 0, "syms": set(), "first": None, "samples": []})
         f["rows"] += 1
         f["syms"].add(sym)
         if ts and (f["first"] is None or ts < f["first"]):
@@ -51,25 +69,29 @@ def summarize(rows, samples=2):
         txt = (reason or "").strip().replace("\n", " ")[:110]
         if len(f["samples"]) < samples and txt and txt not in f["samples"]:
             f["samples"].append(txt)
-    out = sorted(fam.values(), key=lambda x: (-x["rows"], x["family"]))
-    return entered, len(entered_syms), skipped, out
+    out = sorted(fam.values(), key=lambda x: (-x["rows"], x["family"], x["side"]))
+    return {"entered_rows": entered, "entered_syms": {k: len(v) for k, v in entered_syms.items()}, "soft_rows": soft, "skipped_rows": skipped, "families": out}
 
 
 def format_day(day, rows, top=25, samples=2):
     if not rows:
         return f"no scalp_candidate_log rows on {day} (check --day; a holiday or a day the service was off has none)"
-    entered, entered_syms, skipped, fams = summarize(rows, samples)
-    syms_all = {r[0] for r in rows}
-    out = [f"POSITION STOCKS SKIP REASONS  day {day}  rows {len(rows)}  symbols {len(syms_all)}  ENTERED {entered} rows / {entered_syms} symbols  SKIPPED {skipped} rows", ""]
-    out.append(f"{'family':<34}{'rows':>6}{'symbols':>9}{'share':>8}{'1st (IST)':>11}")
-    for f in fams[:top]:
+    r = summarize(rows, samples)
+    e, es = r["entered_rows"], r["entered_syms"]
+    skipped = r["skipped_rows"]
+    syms_all = {x[0] for x in rows}
+    out = [f"POSITION STOCKS SKIP REASONS  day {day}  rows {len(rows)}  symbols {len(syms_all)}",
+           f"  ENTERED long {e['L']} rows / {es['L']} symbols   short {e['S']} rows / {es['S']} symbols   |   SOFT (entry went on at reduced size) {r['soft_rows']} rows   |   SKIPPED {skipped} rows",
+           ""]
+    out.append(f"{'family':<34}{'side':>5}{'rows':>6}{'symbols':>9}{'share':>8}{'1st (IST)':>11}")
+    for f in r["families"][:top]:
         share = 100.0 * f["rows"] / skipped if skipped else 0.0
         hhmm = (f["first"] + IST).strftime("%H:%M") if f["first"] else "?"
-        out.append(f"{f['family']:<34}{f['rows']:>6}{len(f['syms']):>9}{share:>7.1f}%{hhmm:>11}")
-        for s in f["samples"]:
-            out.append(f"      {s}")
-    if len(fams) > top:
-        out.append(f"... {len(fams) - top} more families (raise --top)")
+        out.append(f"{f['family']:<34}{f['side']:>5}{f['rows']:>6}{len(f['syms']):>9}{share:>7.1f}%{hhmm:>11}")
+        for sm in f["samples"]:
+            out.append(f"      {sm}")
+    if len(r["families"]) > top:
+        out.append(f"... {len(r['families']) - top} more families (raise --top)")
     return "\n".join(out)
 
 

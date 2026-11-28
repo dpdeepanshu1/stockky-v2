@@ -185,7 +185,7 @@ def test_first_run_relaxes_a_gate_only_when_the_evidence_passes_and_the_table_sh
     s = factory()
     row = s.query(models.ScalpGatePolicy).filter_by(gate=G, side="LONG").one()
     assert row.state == "SOFT" and row.last_change_day == "2026-11-02" and row.n_samples == 40 and row.n_days == 6 and row.n_symbols == 25 and row.lb_net60 > 0
-    assert s.query(models.ScalpGatePolicy).count() == 4
+    assert s.query(models.ScalpGatePolicy).count() == 5                    # five gates since round 697 (technical_score)
     s.close()
     again = job.run(factory, NOW)                                              # same day, not forced
     assert again["skipped"] == "already evaluated today"

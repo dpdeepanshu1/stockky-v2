@@ -3,7 +3,7 @@
 
 Run INSIDE the position-stocks container, from ~/stockky-v2, after the close:
   docker compose exec -T position-stocks-service python - --day 2026-11-28 < scripts/ps_skip_reasons.py
-  ... --days 3   (the day and the 2 before it, one table each)   --top 25   --samples 2
+  ... --days 3   (the day and the 2 sessions before it, one table each; weekends are skipped)   --top 25   --samples 2
 
 Reads scalp_candidate_log. decision is ENTERED / SKIPPED (long side), SHORT_ENTERED / SHORT_SKIP (short side) or SOFT (a policy gate fired but the entry went on at reduced size:
 NOT a skip, counted apart); reason text is like "RANGE_GATE:..." / "MAX_POSITIONS:3". Round 695-696 fix: round 693 counted only the exact value ENTERED, so a placed short (SHORT_ENTERED)
@@ -75,6 +75,9 @@ def summarize(rows, samples=2):
 
 def format_day(day, rows, top=25, samples=2):
     if not rows:
+        wd = datetime.strptime(day, "%Y-%m-%d").weekday()
+        if wd >= 5:   # round 702
+            return f"no scalp_candidate_log rows on {day}: a {'Saturday' if wd == 5 else 'Sunday'}, the market is closed (use the last trading day)"
         return f"no scalp_candidate_log rows on {day} (check --day; a holiday or a day the service was off has none)"
     r = summarize(rows, samples)
     e, es = r["entered_rows"], r["entered_syms"]
@@ -105,6 +108,16 @@ def fetch(day):
     return [(r[0], r[1], r[2], r[3]) for r in s.execute(q)]
 
 
+def day_list(day, n):
+    """round 703: --days N means N sessions: the named day first (shown even on a weekend, so it can say why it is empty), then earlier weekdays only."""
+    d, out = datetime.strptime(day, "%Y-%m-%d"), [day]
+    while len(out) < max(1, n):
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            out.append(d.strftime("%Y-%m-%d"))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--day", required=True)
@@ -112,9 +125,7 @@ def main():
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--samples", type=int, default=2)
     a = ap.parse_args()
-    d0 = datetime.strptime(a.day, "%Y-%m-%d")
-    for i in range(max(1, a.days)):
-        day = (d0 - timedelta(days=i)).strftime("%Y-%m-%d")
+    for day in day_list(a.day, a.days):
         print(format_day(day, fetch(day), a.top, a.samples))
         print()
 

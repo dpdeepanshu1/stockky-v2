@@ -1,7 +1,7 @@
 """orders/gate_policy_job.py - E285 batch 5: the nightly job behind the adaptive gate policy (position-stocks longs).
 
 Every trading day after GATE_POLICY_JOB_AT_IST (16:30, bars are complete) the job
-  1. reads the last GATE_POLICY_DAYS (15) days of scalp_candidate_log rows of the four adaptable gates (orders/gate_policy.py): SKIPPED rows (the gate refused) and SOFT rows
+  1. reads the last GATE_POLICY_DAYS (15) days of scalp_candidate_log rows of the five adaptable gates (orders/gate_policy.py): SKIPPED rows (the gate refused) and SOFT rows
      (the gate fired but the entry went on at half size),
   2. de-duplicates them like scripts/gate_scorecard.py (one per symbol, gate, day, 30-minute bucket) and measures what the stock did next on the recorded 1-minute bars:
      net60 = the move 60 minutes later, as a long, minus GATE_POLICY_COST_PCT (0.15) round-trip cost,
@@ -55,7 +55,7 @@ def _i(name: str, default: int) -> int:
 
 def gate_key(reason: Optional[str], decision: Optional[str]) -> str:
     """Same grouping as scripts/gate_scorecard.py::gate_key."""
-    if decision == "ENTERED":
+    if decision in ("ENTERED", "SHORT_ENTERED"):        # round 700: a placed short (orders/short_live.py) is an entry too; its reason is "SELL 3 @ ..." and used to read as "OTHER:SELL", measured as a long
         return "ENTERED (baseline)"
     r = (reason or "").strip()
     if not r:

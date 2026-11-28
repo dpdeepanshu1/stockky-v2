@@ -10,7 +10,7 @@ from orders import gate_policy as gp
 from orders import gate_policy_job as job
 from screening import opening_gate as og, prev_day
 
-G, B, N, E = gp.GAP_DOWN, gp.BELOW_OPEN, gp.NEAR_DAY_HIGH, gp.EVENT
+G, B, N, E, T = gp.GAP_DOWN, gp.BELOW_OPEN, gp.NEAR_DAY_HIGH, gp.EVENT, gp.TECH
 
 
 # ------------------------------------------------------------------ state()
@@ -50,7 +50,7 @@ def test_safety_gates_are_not_adaptable():
     names = " ".join(gp.GATES)
     for banned in ("CIRCUIT", "LIQUIDITY", "SPREAD", "DEPTH", "STALE", "CAPITAL", "MAX_POSITIONS", "SHORT_TOO_EARLY", "DAY_GAIN", "NEWS_NEGATIVE", "NEG_EVENT", "EARNINGS"):
         assert banned not in names.upper()
-    assert set(gp.GATES) == {G, B, N, E}
+    assert set(gp.GATES) == {G, B, N, E, T}
 
 
 # ------------------------------------------------------------------ statistics and rules

@@ -30,7 +30,7 @@ _DAY_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _lock = threading.Lock()
 _written: Dict[str, Tuple[str, int, float, float, float]] = {}
 _priority: Dict[str, Any] = {"day": None, "syms": set()}      # E272: scan candidates and premarket watchlist names noted today
-_state: Dict[str, Any] = {"priority_missing_names": [], "priority_missing_not_subscribed": [], "priority_missing_no_tick": [], "priority_missing_cause_known": False, "priority_noted": 0, "wanted_read": 0, "priority_missing": 0, "last_run": 0.0, "last_write": 0.0, "final_day": None, "pruned_day": None, "files_written": 0, "bytes_written": 0,
+_state: Dict[str, Any] = {"priority_too_few_bars": 0, "priority_too_few_bars_names": [], "priority_missing_names": [], "priority_missing_not_subscribed": [], "priority_missing_no_tick": [], "priority_missing_cause_known": False, "priority_noted": 0, "wanted_read": 0, "priority_missing": 0, "last_run": 0.0, "last_write": 0.0, "final_day": None, "pruned_day": None, "files_written": 0, "bytes_written": 0,
                           "symbols_last": 0, "skipped_unchanged": 0, "merged_existing": 0, "errors": 0, "last_error": None, "disabled_reason": None}
 
 
@@ -46,7 +46,7 @@ def reset() -> None:
     with _lock:
         _written.clear()
         _priority.update(day=None, syms=set())
-        _state.update(priority_missing_names=[], priority_missing_not_subscribed=[], priority_missing_no_tick=[], priority_missing_cause_known=False, priority_noted=0, wanted_read=0, priority_missing=0, last_run=0.0, last_write=0.0, final_day=None, pruned_day=None, files_written=0, bytes_written=0, symbols_last=0,
+        _state.update(priority_too_few_bars=0, priority_too_few_bars_names=[], priority_missing_names=[], priority_missing_not_subscribed=[], priority_missing_no_tick=[], priority_missing_cause_known=False, priority_noted=0, wanted_read=0, priority_missing=0, last_run=0.0, last_write=0.0, final_day=None, pruned_day=None, files_written=0, bytes_written=0, symbols_last=0,
                       skipped_unchanged=0, merged_existing=0, errors=0, last_error=None, disabled_reason=None)
 
 
@@ -62,6 +62,12 @@ def _note_locked(symbols: Any, now: Optional[float] = None) -> int:
         if sym and len(_priority["syms"]) < cap:
             _priority["syms"].add(sym)
     _state["priority_noted"] = len(_priority["syms"])
+    try:        # round 699: the bar store keeps (and starts tracking) every noted name, so the bars exist when the recorder writes them
+        if _cfg("BAR_PROTECT_NOTED", True):
+            from feed import bar_store
+            bar_store.protect(_priority["syms"])
+    except Exception:  # noqa: BLE001
+        pass
     return len(_priority["syms"])
 
 
@@ -150,11 +156,11 @@ def _atomic_write(path: str, doc: Dict[str, Any]) -> int:
     return os.path.getsize(path)
 
 
-def write_symbol(root: str, date: str, symbol: str, bars: Any, backfilled: bool = False) -> Optional[int]:
+def write_symbol(root: str, date: str, symbol: str, bars: Any, backfilled: bool = False, min_bars: Optional[int] = None) -> Optional[int]:
     """Write one symbol's day. Merges with the file on disk the first time this process writes the symbol; returns bytes written, or None when nothing
     changed / nothing worth writing. Raises only OSError-like problems (the caller counts them)."""
     mem = _clean(bars)
-    if len(mem) < int(_cfg("BAR_RECORD_MIN_BARS", 20)):
+    if len(mem) < int(min_bars if min_bars is not None else _cfg("BAR_RECORD_MIN_BARS", 20)):
         return None
     path = file_for(root, date, symbol)
     prev = _written.get(symbol)
@@ -290,9 +296,18 @@ def run_once(now: float, market_open: bool, bars_fn: Any = None, symbols_fn: Any
                 have_set = set(syms)
                 syms = syms + sorted(x for x in noted if x in have and x not in have_set)
             _state["symbols_last"] = len(syms)
+            # Round 698: a noted candidate (scan hit / watchlist / Real Trade's list) needs only BAR_RECORD_PRIORITY_MIN_BARS minute bars, not BAR_RECORD_MIN_BARS (20): a thinly traded name
+            # that was scanned and skipped often ends the day with fewer than 20 traded minutes and left no file, so the scorecard could not price the skip ("no file for the symbol").
+            _pmin = max(2, int(_cfg("BAR_RECORD_PRIORITY_MIN_BARS", 2)))        # label() needs a bar after the skip: 2 is the floor
+            _noted_now = set(_priority["syms"]) if (_priority["day"] == ist_date(now) and _cfg("BAR_RECORD_PRIORITY_ENABLED", True)) else set()
+            _few: List[str] = []
             for sym in syms:
                 try:
-                    size = write_symbol(root, date, sym, bars_fn(sym), bool(backfilled_fn(sym)) if backfilled_fn else _is_backfilled(sym))
+                    _b = bars_fn(sym)
+                    _mb = _pmin if sym in _noted_now else None
+                    if _mb is not None and len(_clean(_b)) < _mb:
+                        _few.append(sym)
+                    size = write_symbol(root, date, sym, _b, bool(backfilled_fn(sym)) if backfilled_fn else _is_backfilled(sym), min_bars=_mb)
                 except Exception as e:  # noqa: BLE001
                     _err(f"write {sym}", e)
                     continue
@@ -302,6 +317,8 @@ def run_once(now: float, market_open: bool, bars_fn: Any = None, symbols_fn: Any
                     did["wrote"] += 1
                     _state["files_written"] += 1
                     _state["bytes_written"] += size
+            _state["priority_too_few_bars"] = len(_few)                         # noted names in the store with fewer than _pmin bars (nothing to measure yet)
+            _state["priority_too_few_bars_names"] = _few[:30]
             if did["wrote"]:
                 _state["last_write"] = now
             if final:

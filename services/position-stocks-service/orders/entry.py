@@ -1114,6 +1114,16 @@ def _attempt_entry_impl(
         if _eu > 0:
             _penalties["event_unchecked"] = _eu
             _log_policy_soft(candidate, "QUALITY_GATE:EVENT_CHECK_UNAVAILABLE: the news / earnings service did not answer, nothing negative known (half size, SOFT)", quality)
+    # Round 697: a technical score under MIN_TECHNICAL_SCORE trades at the policy's SOFT size (GATE_POLICY_SOFT_PENALTY, 1.0 = half) once the nightly scorecard moved the gate to SOFT; HARD (the
+    # default) already refused it in quality_gate.passes(). The SOFT row uses the refusal's own wording so gate_scorecard keeps measuring "QUALITY_GATE:technical_score".
+    try:
+        if quality is not None and quality.tech_below_floor() and gate_policy.tech_half_size():
+            _tp = gate_policy.soft_penalty()
+            if _tp > 0:
+                _penalties["tech_low"] = _tp
+                _log_policy_soft(candidate, f"QUALITY_GATE:technical_score {float(quality.technical_score):.0f} < floor {float(config.MIN_TECHNICAL_SCORE):.0f} (size penalty {_tp:.1f}, SOFT)", quality)
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: technical-score SOFT penalty skipped", exc_info=True)
     _pen_early = dict(_penalties)          # E273 round 32: penalties known when the setup engine sizes; later ones (rvol, structure) rescale it below
     try:
         from tz_utils import ist_now as _ist_now

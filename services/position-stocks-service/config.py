@@ -1654,6 +1654,8 @@ BAR_RECORD_DIR = _get_str("BAR_RECORD_DIR", "/data/bars")
 BAR_RECORD_EVERY_S = max(60, _get_int("BAR_RECORD_EVERY_S", 300))
 BAR_RECORD_MAX_SYMBOLS = max(10, _get_int("BAR_RECORD_MAX_SYMBOLS", 250))
 BAR_RECORD_MIN_BARS = max(1, _get_int("BAR_RECORD_MIN_BARS", 20))
+BAR_PROTECT_NOTED = _get_bool("BAR_PROTECT_NOTED", True)   # round 699: noted candidates are tracked below BOARD_MIN_DAY_VOLUME and never pruned from the bar store (false = old behaviour)
+BAR_RECORD_PRIORITY_MIN_BARS = max(2, _get_int("BAR_RECORD_PRIORITY_MIN_BARS", 2))   # round 698: minute bars a NOTED candidate needs to get a file (others keep BAR_RECORD_MIN_BARS); 2 = the least label() can measure
 BAR_RECORD_KEEP_DAYS = max(2, _get_int("BAR_RECORD_KEEP_DAYS", 45))
 # Round 660 (T4): subscribe only to names that can pass the liquidity floor (feed/universe_filter.py). The first session after the deploy records each name's
 # day turnover (from 15:20 IST) under <BAR_RECORD_DIR>/_universe_turnover.json; from the next session a name whose BEST recorded session is under
@@ -1766,7 +1768,8 @@ QUALITY_GATE_PREOPEN_WARM_MOVERS = max(0, _get_int("QUALITY_GATE_PREOPEN_WARM_MO
 QUALITY_GATE_EVENT_UNCHECKED_HALF_SIZE = _get_bool("QUALITY_GATE_EVENT_UNCHECKED_HALF_SIZE", True)
 QUALITY_GATE_EVENT_UNCHECKED_PENALTY = max(0.0, _get_float("QUALITY_GATE_EVENT_UNCHECKED_PENALTY", 1.0))
 QUALITY_GATE_TYPED_NEG_MEMORY_H = max(0.0, _get_float("QUALITY_GATE_TYPED_NEG_MEMORY_H", 2.0))
-# E285 batch 5 (adaptive gate policy, orders/gate_policy.py + gate_policy_job.py): four gates (opening GAP_DOWN, BELOW_OPEN, opening NEAR_DAY_HIGH, EVENT_CHECK_UNAVAILABLE) move
+# E285 batch 5 (adaptive gate policy, orders/gate_policy.py + gate_policy_job.py): five gates (opening GAP_DOWN, BELOW_OPEN, opening NEAR_DAY_HIGH, EVENT_CHECK_UNAVAILABLE, and from round 697 the
+# technical-score floor, QUALITY_GATE:technical_score) move
 # between HARD (refuse) and SOFT (half size) from a nightly rolling 15-day scorecard. Safety gates (circuit, liquidity, spread / depth, stale tick, capital, max positions,
 # SHORT_TOO_EARLY, the day-gain cap) and known-negative-event refusals are never adapted.
 #  GATE_POLICY_MODE            adaptive (default: the rows the job wrote; a gate never moved follows its own config) | static (rows ignored = every gate as its config says; the

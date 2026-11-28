@@ -212,6 +212,13 @@ class QualitySignal:
     event_age_min: Optional[float] = None
     announced_at: Optional[str] = None
 
+    def tech_below_floor(self) -> bool:
+        """Round 697: a technical score IS present and under MIN_TECHNICAL_SCORE (None = unknown = False)."""
+        try:
+            return self.technical_score is not None and float(self.technical_score) < float(config.MIN_TECHNICAL_SCORE)
+        except (TypeError, ValueError):
+            return False
+
     def passes(self) -> tuple[bool, str]:
         """Lenient pass/fail: only reject on data that IS present and below
         floor. Missing data always passes through with a reason noting so."""
@@ -230,7 +237,7 @@ class QualitySignal:
             return False, "EVENT_CHECK_UNAVAILABLE: the news / earnings service did not answer - not entering without a news check (retried next cycle)"
         if self.fundamental_score is not None and self.fundamental_score < config.MIN_FUNDAMENTAL_SCORE:
             return False, f"fundamental_score {self.fundamental_score:.0f} < floor {config.MIN_FUNDAMENTAL_SCORE:.0f}"
-        if self.technical_score is not None and self.technical_score < config.MIN_TECHNICAL_SCORE:
+        if self.tech_below_floor() and not gate_policy.tech_half_size():      # round 697: SOFT = half size instead (entry.py), after every negative / fundamental check above
             return False, f"technical_score {self.technical_score:.0f} < floor {config.MIN_TECHNICAL_SCORE:.0f}"
         if self.market_cap_cr is not None and self.market_cap_cr < config.MIN_MARKET_CAP_CR:
             return False, f"market_cap ₹{self.market_cap_cr:.0f}cr < floor ₹{config.MIN_MARKET_CAP_CR:.0f}cr"

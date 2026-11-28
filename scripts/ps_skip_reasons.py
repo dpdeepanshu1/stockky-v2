@@ -76,7 +76,8 @@ def summarize(rows, samples=2):
                 e["syms"][sym] = ts                      # first SOFT row of the symbol
             continue
         skipped += 1
-        skip_rows.append((sym, family(reason), ts))
+        if sd == "L":                                   # round 706: a SOFT row is a long-side row; short refusals of the same symbol are not its fate
+            skip_rows.append((sym, family(reason), ts))
         key = (sd, family(reason))
         f = fam.setdefault(key, {"side": sd, "family": key[1], "rows": 0, "syms": set(), "first": None, "samples": []})
         f["rows"] += 1
@@ -89,7 +90,7 @@ def summarize(rows, samples=2):
     out = sorted(fam.values(), key=lambda x: (-x["rows"], x["family"], x["side"]))
     entered_all = entered_syms["L"] | entered_syms["S"]
     def _then_refused(e):
-        """round 704b: skip families the SOFT symbols hit AFTER their first SOFT row (rows, most first): where a 'softened' entry went instead of being placed."""
+        """round 704b / 706: LONG-side skip families the SOFT symbols hit AFTER their first SOFT row (rows, most first): where a 'softened' entry went instead of being placed."""
         cnt = {}
         for sym, fam_, ts in skip_rows:
             t0 = e["syms"].get(sym, "x")
@@ -121,7 +122,7 @@ def format_day(day, rows, top=25, samples=2):
         for g in r["soft_gates"]:
             out.append(f"    {g['gate']:<44}{g['rows']:>4} rows {g['syms']:>3} symbols {g['placed']:>3} entered")
             if g["then_refused"]:
-                out.append("        then refused by: " + ", ".join(f"{f} x{n}" for f, n in g["then_refused"][:6]))
+                out.append("        then refused by (long side): " + ", ".join(f"{f} x{n}" for f, n in g["then_refused"][:6]))
         out.append("")
     out.append(f"{'family':<34}{'side':>5}{'rows':>6}{'symbols':>9}{'share':>8}{'1st (IST)':>11}")
     for f in r["families"][:top]:

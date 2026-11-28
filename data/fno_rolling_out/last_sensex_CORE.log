@@ -1,1 +1,0 @@
-+ python3 scripts/fno_rolling_backtest.py --underlying SENSEX --strategy CORE --daily data/fno_real_probe/replay_inputs/sensex_d.csv --intraday data/fno_real_probe/replay_inputs/sensex_5m.csv --rolling-dir data/fno_rolling_long --vix data/fno_real_probe/replay_inputs/vix.csv --out data/fno_rolling_out

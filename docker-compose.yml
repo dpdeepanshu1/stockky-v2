@@ -81,7 +81,7 @@ services:
     # Heaviest I/O fan-out service (AngelOne + yfinance + NSE waterfall) —
     # give it the largest CPU share of the six.
     cpus: "0.55"
-    mem_limit: 1200m
+    mem_limit: 1600m
     mem_reservation: 500m
 
   analysis-intelligence-service:
@@ -697,7 +697,7 @@ services:
     logging: *default-logging
     # Separate from real-trade-service's CPU/mem budget — runs its own
     # event loop and WS connection independently.
-    cpus: "0.30"
+    cpus: "0.70"
     mem_limit: 2400m  # round 151: was 700m (VM ran 1600m; 3 Nov 09:34 OOM kill, 900 MB peak at 10:51). Steady state ~550-700 MB; the headroom is for the opening burst. See WS_TICK_BUDGET
     mem_reservation: 128m
 

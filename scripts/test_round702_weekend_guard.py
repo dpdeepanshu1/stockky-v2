@@ -68,11 +68,12 @@ def test_soft_symbols_show_where_they_were_refused_afterwards():            # ro
             ("B", "SOFT", "OPENING_GATE:BELOW_OPEN:0.90% under the open (size penalty 1.5, SOFT)", T),
             ("B", "SKIPPED", "SOFT_PENALTIES_TOO_HIGH:total 7.8 >= 6", T + timedelta(minutes=2)),
             ("B", "SKIPPED", "PRICE_GUARD:ENTRY_SLIPPAGE:x", T + timedelta(minutes=3)),
-            ("Z", "SKIPPED", "NEAR_DAY_LOW:x", T + timedelta(minutes=3))]                      # not a SOFT symbol: not counted
+            ("Z", "SKIPPED", "NEAR_DAY_LOW:x", T + timedelta(minutes=3)),                      # not a SOFT symbol: not counted
+            ("B", "SHORT_SKIP", "SHORT_STRUCTURE_BULLISH:x", T + timedelta(minutes=4))]        # round 706: a short refusal is not the long entry's fate
     g = p.summarize(rows)["soft_gates"][0]
     assert g["gate"] == "OPENING_GATE:BELOW_OPEN" and g["placed"] == 0
     assert g["then_refused"] == [("SOFT_PENALTIES_TOO_HIGH", 2), ("PRICE_GUARD", 1)]
-    assert "then refused by: SOFT_PENALTIES_TOO_HIGH x2, PRICE_GUARD x1" in p.format_day("2026-11-27", rows)
+    assert "then refused by (long side): SOFT_PENALTIES_TOO_HIGH x2, PRICE_GUARD x1" in p.format_day("2026-11-27", rows)
     assert "gate softened; entry may still be refused" in p.format_day("2026-11-27", rows)
 
 

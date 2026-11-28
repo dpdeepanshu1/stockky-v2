@@ -18,6 +18,7 @@ _last_cum_vol: Dict[str, float] = {}
 _turnover: Dict[str, float] = {}
 _day: Optional[int] = None
 _installed = False
+_protected: set = set()                   # round 699: noted candidates (feed/bar_recorder.note_symbols): tracked below BOARD_MIN_DAY_VOLUME and never pruned
 _backfilled: Dict[str, int] = {}          # group311: symbol -> history bars merged in (mid-session restart backfill)
 _stats = {"ticks": 0, "skipped_low_volume": 0, "pruned": 0, "errors": 0, "backfilled_symbols": 0, "backfilled_bars": 0}
 
@@ -33,7 +34,7 @@ def _cfg_int(name: str, default: int) -> int:
 def reset() -> None:
     global _day
     with _lock:
-        _bars.clear(); _last_cum_vol.clear(); _turnover.clear(); _backfilled.clear()
+        _bars.clear(); _last_cum_vol.clear(); _turnover.clear(); _backfilled.clear(); _protected.clear()
         _day = None
         for k in _stats:
             _stats[k] = 0
@@ -58,7 +59,7 @@ def on_tick(symbol: str, ltp: float, cum_volume, ts: float) -> None:
                 _day = day
             dq = _bars.get(symbol)
             if dq is None:
-                if cum < min_vol:
+                if cum < min_vol and symbol not in _protected:
                     _stats["skipped_low_volume"] += 1
                     return
                 dq = _bars[symbol] = deque(maxlen=MAX_BARS)
@@ -114,13 +115,27 @@ def day_number() -> Optional[int]:
     return _day
 
 
+def protect(symbols) -> int:
+    """Round 699: replace the protected set (noted scan candidates / watchlist names). A protected symbol is tracked even under BOARD_MIN_DAY_VOLUME and is never pruned, so a
+    skipped candidate keeps its bars until the recorder writes them (the 400-by-turnover prune and the volume floor used to drop thin names: no bar file, an unmeasured skip).
+    Returns the size of the set. Never raises."""
+    global _protected
+    try:
+        with _lock:
+            _protected = {str(s or "").upper().replace(".NS", "").strip() for s in (symbols or []) if s}
+            _protected.discard("")
+            return len(_protected)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def prune(keep: Optional[int] = None) -> int:
     keep = max(1, keep if keep is not None else _cfg_int("BOARD_TOP_SYMBOLS", 400))
     with _lock:
         if len(_bars) <= keep:
             return 0
         order = sorted(_bars.keys(), key=lambda s: _turnover.get(s, 0.0), reverse=True)
-        drop = order[keep:]
+        drop = [s for s in order[keep:] if s not in _protected]
         for s in drop:
             _bars.pop(s, None); _last_cum_vol.pop(s, None); _turnover.pop(s, None); _backfilled.pop(s, None)
         _stats["pruned"] += len(drop)

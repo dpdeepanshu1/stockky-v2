@@ -22,11 +22,12 @@ from orders import candidate_outcomes as co, gate_policy, gate_policy_job as job
 IST = timedelta(hours=5, minutes=30)
 
 
-def side_sign(reason: Optional[str], direction: str) -> int:
-    """+1 = measure as a long, -1 = as a short (the move is flipped so positive always means the trade would have gained)."""
+def side_sign(reason: Optional[str], direction: str, decision: Optional[str] = None) -> int:
+    """+1 = measure as a long, -1 = as a short (the move is flipped so positive always means the trade would have gained).
+    Round 700: in auto, a placed short (decision SHORT_ENTERED, reason "SELL ...") is a short too."""
     if direction == "short":
         return -1
-    if direction == "auto" and str(reason or "").strip().upper().startswith("SHORT_"):
+    if direction == "auto" and (str(reason or "").strip().upper().startswith("SHORT_") or decision == "SHORT_ENTERED"):
         return -1
     return 1
 
@@ -84,7 +85,7 @@ def build(rows: Iterable[Dict[str, Any]], load_bars: Callable[[str, str], Option
         try:
             cov["rows"] += 1
             gk = job.gate_key(r.get("reason"), r.get("decision"))
-            sign = side_sign(r.get("reason"), direction)
+            sign = side_sign(r.get("reason"), direction, r.get("decision"))
             side = "SHORT" if sign < 0 else "LONG"
             if direction == "long" and str(r.get("reason") or "").strip().upper().startswith("SHORT_"):
                 short_rows_as_long += 1
@@ -176,7 +177,7 @@ def coverage_lines(cov: Dict[str, Any]) -> List[str]:
     L = [f"rows read: {cov['rows']}   unique samples (symbol, gate, side, day, 30 min): {unique}   measured: {ok} ({(100.0 * ok / unique) if unique else 0:.0f}%)   not measured: {unique - ok}"]
     if unique - ok:
         L.append(f"  not measured because: no bar folder for the day {nd} ({', '.join(sorted(cov['no_day_folder'])[:6])}{' ...' if len(cov['no_day_folder']) > 6 else ''}); "
-                 f"folder exists but no file for the symbol {cov['no_file']} (symbol never got ticks or was not noted); bars start after the skip {cov['starts_after']}; "
+                 f"folder exists but no file for the symbol {cov['no_file']} (symbol never got ticks, was not noted, or before round 698 traded in under 20 minutes); bars start after the skip {cov['starts_after']}; "
                  f"bars end before +60 min {cov['ends_before']}; other {cov['no_bars']}")
     top = cov.get("no_file_symbols") or {}
     if top:

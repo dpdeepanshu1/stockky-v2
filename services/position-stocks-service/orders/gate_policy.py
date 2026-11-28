@@ -1,6 +1,6 @@
 """orders/gate_policy.py - E285 batch 5: the adaptive gate policy, READ side (position-stocks longs).
 
-Four entry gates are allowed to move between three states, decided by a nightly job (orders/gate_policy_job.py) from a rolling 15-day scorecard:
+Five entry gates are allowed to move between three states, decided by a nightly job (orders/gate_policy_job.py) from a rolling 15-day scorecard:
     HARD  the gate refuses, as its own code always did
     SOFT  the gate no longer refuses; the entry trades at half size (a size penalty of GATE_POLICY_SOFT_PENALTY, 1.0 = half)
     OFF   the gate does nothing (set by an operator only; the job never writes it)
@@ -9,6 +9,7 @@ The gates (keys are the gate_scorecard.py keys, so the same rows measure them):
     OPENING_GATE:BELOW_OPEN                 price under the day's open
     OPENING_GATE:NEAR_DAY_HIGH              price in the top of the day's range (opening window)
     QUALITY_GATE:EVENT_CHECK_UNAVAILABLE    the news / earnings service did not answer and nothing is remembered
+    QUALITY_GATE:technical_score            round 697: the stock's technical score is under MIN_TECHNICAL_SCORE (HARD / SOFT only; no OFF)
 NEVER in this list, never adapted: circuit limits, liquidity, spread / depth, stale tick, capital, max positions, SHORT_TOO_EARLY, the 7% day-gain cap, and every
 known-negative-event refusal (negative news, negative typed event, results today).
 
@@ -36,6 +37,7 @@ GAP_DOWN = "OPENING_GATE:GAP_DOWN"
 BELOW_OPEN = "OPENING_GATE:BELOW_OPEN"
 NEAR_DAY_HIGH = "OPENING_GATE:NEAR_DAY_HIGH"
 EVENT = "QUALITY_GATE:EVENT_CHECK_UNAVAILABLE"
+TECH = "QUALITY_GATE:technical_score"
 
 # gate -> (label, states a row may hold). EVENT has no OFF: "no news check at full size" is not something this policy ever allows.
 GATES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
@@ -43,6 +45,7 @@ GATES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     BELOW_OPEN: ("Price under the day open", (HARD, SOFT, OFF)),
     NEAR_DAY_HIGH: ("Opening: near the day high", (HARD, SOFT, OFF)),
     EVENT: ("News check unavailable", (HARD, SOFT)),
+    TECH: ("Technical score under the floor", (HARD, SOFT)),       # round 697: no OFF - the floor itself stays; SOFT only trades the miss at reduced size
 }
 
 _cache: Dict[Tuple[str, str], str] = {}
@@ -92,6 +95,12 @@ def soft_penalty() -> float:
         return max(0.0, float(getattr(config, "GATE_POLICY_SOFT_PENALTY", 1.0)))
     except (TypeError, ValueError):
         return 1.0
+
+
+def tech_half_size() -> bool:
+    """Round 697: True when a LONG whose technical score is under MIN_TECHNICAL_SCORE trades at reduced size instead of being refused. No row = HARD (today's behaviour):
+    only the nightly job (or an operator) moves it, and only on the scorecard's evidence. A missing score is never a refusal either way (quality_gate.passes())."""
+    return state(TECH) == SOFT
 
 
 def event_half_size() -> bool:

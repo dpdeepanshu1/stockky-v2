@@ -2849,7 +2849,8 @@ def candidates_log(
     technical score, market cap, positive-catalyst flag). Pure DB read, no
     external calls — flagged in TRACKING.md §3.13 / STATUS.md next-steps
     as a cheap natural follow-up to the quality gate, built session 12.
-    `decision_filter` optionally narrows to "ENTERED" or "SKIPPED".
+    `decision_filter` optionally narrows to "ENTERED" or "SKIPPED". Round 701: "ENTERED" also returns SHORT_ENTERED (a placed short) and "SKIPPED" also returns SHORT_SKIP;
+    any other value (SOFT, SHORT_ENTERED, SHORT_SKIP ...) matches exactly as before.
 
     AUDIT FIX (session62, issue #5 — admin visibility into what the
     quality gate is dropping): `reason_prefix` optionally narrows further
@@ -2862,7 +2863,9 @@ def candidates_log(
     row's reason text by eye."""
     q = db.query(ScalpCandidateLog).order_by(ScalpCandidateLog.created_at.desc())
     if decision_filter:
-        q = q.filter_by(decision=decision_filter.upper())
+        _df = decision_filter.upper()
+        _grp = {"ENTERED": ("ENTERED", "SHORT_ENTERED"), "SKIPPED": ("SKIPPED", "SHORT_SKIP")}.get(_df)
+        q = q.filter(ScalpCandidateLog.decision.in_(_grp)) if _grp else q.filter_by(decision=_df)
     if reason_prefix:
         q = q.filter(ScalpCandidateLog.reason.like(f"{reason_prefix}%"))
     rows = q.limit(max(1, min(limit, 500))).all()

@@ -69,7 +69,7 @@ def label(bars: Optional[List[list]], t0: float, side: str = "LONG") -> Dict[str
 
 
 def _gate_key(reason: Optional[str], decision: Optional[str]) -> str:
-    if decision == "ENTERED":
+    if decision in ("ENTERED", "SHORT_ENTERED"):        # round 701: a placed short is an entry too (its reason is "SELL ...")
         return "ENTERED"
     r = (reason or "").strip()
     return ":".join(r.split(":")[:2])[:60] if r else "SKIPPED"

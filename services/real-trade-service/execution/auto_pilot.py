@@ -1619,7 +1619,7 @@ async def _eod_signal_scan(db, mode: str, gate_armed: bool) -> None:
         c.consumed = True
         db.add(models.TradeDecision(
             mode=mode, candidate_id=c.id, symbol=c.symbol, decision_type="ENTRY",
-            action="WAIT",
+            action="WAIT", gate_tag="eod_scan",            # round 692 (E714): was untagged
             reasoning=(
                 "EOD signal scan: market is closing, not evaluated for entry today."
                 + (" Selected as an overnight-priority pick for tomorrow's open."
@@ -1660,7 +1660,7 @@ async def _eod_signal_scan(db, mode: str, gate_armed: bool) -> None:
                 c.consumed = True
                 db.add(models.TradeDecision(
                     mode=mode, candidate_id=c.id, symbol=c.symbol, decision_type="ENTRY",
-                    action="WAIT",
+                    action="WAIT", gate_tag="eod_carryover",            # round 692 (E714): was untagged
                     reasoning=(
                         "EOD signal scan: qualified for same-day entry "
                         f"(conviction {c.conviction_score} >= "

@@ -2684,13 +2684,13 @@ def regime_override_stats(
 
 
 @app.get("/charges/{mode}/cumulative")
-async def charges_cumulative(
+@_offload            # round 695 (D7c): the whole body is blocking DB work with no real await (the one to_thread below only ran the report), so it runs in a worker thread as one step
+def charges_cumulative(
     mode: str, days: int = 14,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
     """2026-10-08 (group 258): brokerage over every filled order since the first one (trade_orders/trade_fills are
     never purged), with per-product, per-day and top-symbol splits. Estimate from the Charges-tab rate card."""
-    import asyncio
     import charges_ledger
     # group 263: the account row is read FIRST so today's gross P&L is stored together with the charges.
     account = None
@@ -2702,7 +2702,7 @@ async def charges_cumulative(
         logger.warning("charges cumulative: account row unavailable", exc_info=True)
         account = None
     g_today_stored = float(account.realized_pnl_today or 0.0) if account is not None else None
-    rep = await asyncio.to_thread(charges_ledger.report, db, mode.upper(), days, True, g_today_stored)
+    rep = charges_ledger.report(db, mode.upper(), days, True, g_today_stored)
     # group 262: net P&L = booked realized P&L minus the charges above, taken from the same account row the Overview
     # shows, so the dashboard never has to subtract two differently-scoped numbers itself. Best-effort only.
     try:

@@ -71,6 +71,7 @@ class Params:
     sl_noise_atr_frac: float = 0.20    # round 498 (E518): the stop is never inside this fraction of one daily ATR move of the OPTION (delta x ATR / premium). 0 = off (a flat sl_pct)
     sl_max_pct: float = 35.0           # round 498 (E518): the widest the noise floor may make the stop (% of premium); never below sl_pct
     target_pct: float = 50.0
+    min_reward_risk: float = 2.0       # round 686 (E708): the target is never below this x the stop % of the entry (2.0 = 1:2). 0 = off
     trail_arm_pct: float = 20.0        # round 495 (E515): was 30. Trailing 20 % below a +30 % peak left a winner at about +4 %
     trail_pct: float = 12.0            # round 495 (E515): was 20. Armed at +20 %, a +30 % peak now exits at about +14 %
     slippage_pct: float = 0.5
@@ -115,7 +116,7 @@ class Params:
             entry_settle_min=int(g("FNO_ENTRY_SETTLE_MIN", 10)), early_trades_max=int(g("FNO_EARLY_TRADES_MAX", 2)), early_until=str(g("FNO_EARLY_UNTIL", "12:00")),
             expiry_entry_end=str(g("FNO_EXPIRY_ENTRY_END", "13:30")), expiry_squareoff_at=str(g("FNO_EXPIRY_SQUAREOFF_AT", "14:45")),
             expiry_risk_mult=float(g("FNO_EXPIRY_RISK_MULT", 0.5)), expiry_real_ok=bool(g("FNO_EXPIRY_REAL", False)),
-            sl_pct=float(g("FNO_SL_PCT", 25.0)), sl_noise_atr_frac=float(g("FNO_SL_NOISE_ATR_FRAC", 0.20)), sl_max_pct=float(g("FNO_SL_MAX_PCT", 35.0)), target_pct=float(g("FNO_TARGET_PCT", 50.0)), trail_arm_pct=float(g("FNO_TRAIL_ARM_PCT", 20.0)),
+            sl_pct=float(g("FNO_SL_PCT", 25.0)), sl_noise_atr_frac=float(g("FNO_SL_NOISE_ATR_FRAC", 0.20)), sl_max_pct=float(g("FNO_SL_MAX_PCT", 35.0)), target_pct=float(g("FNO_TARGET_PCT", 50.0)), min_reward_risk=float(g("FNO_MIN_REWARD_RISK", 2.0)), trail_arm_pct=float(g("FNO_TRAIL_ARM_PCT", 20.0)),
             trail_pct=float(g("FNO_TRAIL_PCT", 12.0)), slippage_pct=float(g("FNO_SLIPPAGE_PCT", 0.5)),
             brokerage_per_order=float(g("BROKERAGE_PER_ORDER", 20.0)), brokerage_pct_cap=float(g("BROKERAGE_PCT_CAP", 100.0)),
             stt_sell_pct=float(g("STT_SELL_PCT", 0.15)), exch_txn_pct_nse=float(g("EXCH_TXN_PCT_NSE", 0.03553)),
@@ -184,6 +185,7 @@ CONFIG_NAME: Dict[str, str] = {
     "sl_noise_atr_frac": "FNO_SL_NOISE_ATR_FRAC",
     "sl_max_pct": "FNO_SL_MAX_PCT",
     "target_pct": "FNO_TARGET_PCT",
+    "min_reward_risk": "FNO_MIN_REWARD_RISK",
     "trail_arm_pct": "FNO_TRAIL_ARM_PCT",
     "trail_pct": "FNO_TRAIL_PCT",
     "slippage_pct": "FNO_SLIPPAGE_PCT",

@@ -37,7 +37,21 @@ def noise_stop_pct(p: Params, premium: float, delta: Optional[float], atr: Optio
 def with_noise_stop(p: Params, premium: float, delta: Optional[float], atr: Optional[float]) -> Params:
     """`p` with this entry's stop % (never tighter than p.sl_pct). Sizing and open_position then both use it, so the rupee risk per trade stays the same and only the lots shrink."""
     pct = noise_stop_pct(p, premium, delta, atr)
-    return p if pct <= p.sl_pct else p.with_(sl_pct=pct)
+    return p.with_(**changes) if (changes := _rr_changes(p, pct)) else p
+
+
+def _rr_changes(p: Params, pct: float) -> Dict[str, float]:
+    """Round 686 (E708): what to change in `p` for an entry whose stop is `pct` %: a wider stop than sl_pct (round 498), and a target of at least min_reward_risk x that stop
+    (never lower than target_pct). Empty = nothing changes, so the caller keeps the very same Params object."""
+    out: Dict[str, float] = {}
+    if pct > p.sl_pct:
+        out["sl_pct"] = pct
+    rr = float(getattr(p, "min_reward_risk", 0.0) or 0.0)
+    if rr > 0:
+        want = round(rr * max(pct, p.sl_pct), 2)
+        if want > p.target_pct:
+            out["target_pct"] = want
+    return out
 
 
 def lots_in_room(lots: int, fill: float, lot_size: int, capital: float, used: float) -> int:

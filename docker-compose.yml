@@ -883,6 +883,8 @@ services:
       # round 498 (E518): the noise floor under the stop (blank = code default)
       FNO_SL_NOISE_ATR_FRAC: ${FNO_SL_NOISE_ATR_FRAC:-}
       FNO_SL_MAX_PCT: ${FNO_SL_MAX_PCT:-}
+      # round 686 (E708): target >= this x the stop of the entry (2.0 = reward:risk 1:2; blank = code default)
+      FNO_MIN_REWARD_RISK: ${FNO_MIN_REWARD_RISK:-}
       FNO_SNAPSHOT_INTERVAL_S: ${FNO_SNAPSHOT_INTERVAL_S:-}
       FNO_SQUAREOFF_AT: ${FNO_SQUAREOFF_AT:-}
       FNO_STAMP_BUY_PCT: ${FNO_STAMP_BUY_PCT:-}

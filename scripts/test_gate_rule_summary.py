@@ -84,3 +84,44 @@ def test_shell_scripts_parse_and_refuse_a_future_day():
         assert subprocess.run(["bash", "-n", os.path.join(ROOT, "scripts", name)]).returncode == 0
     r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "gates_daily.sh"), "2099-01-01"], capture_output=True, text=True, timeout=30)
     assert r.returncode == 2 and "after today" in r.stderr
+
+
+def test_round685_gates_daily_default_reads_every_blocking_gate():
+    """round 685: the default GATES of gates_daily.sh names all seven WAIT gate tags, so each one gets its own KEEP / CANDIDATE line."""
+    src = open(os.path.join(ROOT, "scripts", "gates_daily.sh"), encoding="utf-8").read()
+    line = [ln for ln in src.splitlines() if ln.startswith("GATES=")][0]
+    for tag in ("no_setup_window", "structure", "time_machine", "order_flow", "liquidity", "vwap_below", "structure_nodata"):
+        assert tag in line, tag
+
+
+def test_round685_summary_groups_a_new_gate_on_its_own():
+    text = _day("2026-11-26", "order_flow", 4, 1) + _day("2026-11-26", "liquidity", 3, 0)
+    gates = {r["gate"] for r in g.parse(text)}
+    assert gates == {"order_flow", "liquidity"}
+
+
+def test_round688_parse_keeps_the_waits_and_the_buckets_follow_them():
+    rows = g.parse(_day("2026-11-23", "no_setup_window", 2, 0))
+    assert [r["waits"] for r in rows] == [3, 3]                      # the helper writes 3 waits for every name
+    assert g.waits_bucket({"waits": 1}) == "a 1 wait" and g.waits_bucket({"waits": 3}) == "b 2-3 waits"
+    assert g.waits_bucket({"waits": 9}) == "c 4-9 waits" and g.waits_bucket({"waits": 10}) == "d 10+ waits" and g.waits_bucket({"waits": None}) == "unknown"
+    assert [g.block_bucket({"block": b}) for b in ("09:30", "09:59", "10:00", "11:59", "12:00", "13:55")] == ["a 09:30-09:59", "a 09:30-09:59", "b 10:00-10:59", "c 11:00-11:59", "d 12:00 or later", "d 12:00 or later"]
+
+
+def test_round688_slices_split_the_group_and_flag_few_and_charges(capsys):
+    rows = g.parse(_day("2026-11-23", "no_setup_window", 4, 1, close=1.0))
+    rows[0]["block"], rows[1]["block"], rows[2]["block"], rows[3]["block"] = "09:35", "10:05", "10:05", "13:00"
+    sl = dict(g.slices(rows, g.block_bucket, 0.25, 1.5))
+    assert sl["a 09:30-09:59"]["priced"] == 1 and sl["b 10:00-10:59"]["priced"] == 2 and sl["d 12:00 or later"]["priced"] == 1
+    g.show_slices("t", rows, g.block_bucket, _args(min_slice=30))
+    out = capsys.readouterr().out
+    assert "10:00-10:59" in out and "few" in out
+
+
+def test_round688_main_prints_the_slices_unless_asked_not_to(tmp_path, capsys):
+    f = tmp_path / "gates_2026-11-23.txt"
+    f.write_text(_day("2026-11-23", "no_setup_window", 5, 1))
+    assert g.main([str(f)]) == 0
+    assert "slices: all blocked names by hour" in capsys.readouterr().out
+    assert g.main([str(f), "--no-slices"]) == 0
+    assert "slices:" not in capsys.readouterr().out

@@ -25,18 +25,18 @@ from collections import OrderedDict
 HDR = re.compile(r"^#{4,}\s+gate\s+(\S+)\s+day\s+(\d{4}-\d{2}-\d{2})")
 REC = re.compile(r"^#{4,}\s+structure gate, recorded bars")
 OTHER_HDR = re.compile(r"^#{4,}")
-BLK = re.compile(r"^([A-Z0-9&\-]+)\s+\d+\s+\d\d:\d\d\s+\S+\s+.*?(\s\*)?\s*$")
+BLK = re.compile(r"^([A-Z0-9&\-]+)\s+(\d+)\s+\d\d:\d\d\s+\S+\s+.*?(\s\*)?\s*$")
 OUT = re.compile(r"^([A-Z0-9&\-]+)\s+(\d\d:\d\d)\s+([\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(RAN|SPIKE|NO_MOVE)\s*$")
 NODATA = re.compile(r"^([A-Z0-9&\-]+)\s+(\d\d:\d\d)\s+no_data")
 
 
 def parse(text: str) -> list[dict]:
     """One dict per priced or unpriced row: day, gate, symbol, block, best, worst, close, label, event (bool)."""
-    rows, gate, day, in_blocked, in_rec, starred = [], None, None, False, False, set()
+    rows, gate, day, in_blocked, in_rec, starred, waits = [], None, None, False, False, set(), {}
     for line in text.splitlines():
         m = HDR.match(line)
         if m:
-            gate, day, in_blocked, in_rec, starred = m.group(1), m.group(2), False, False, set()
+            gate, day, in_blocked, in_rec, starred, waits = m.group(1), m.group(2), False, False, set(), {}
             continue
         if REC.match(line):
             in_rec = True
@@ -55,17 +55,18 @@ def parse(text: str) -> list[dict]:
         if in_blocked:
             b = BLK.match(line)
             if b and not line.startswith("symbol "):
-                if b.group(2):
+                waits[b.group(1)] = int(b.group(2))                      # round 688: how many times the engine said WAIT for this name that day
+                if b.group(3):
                     starred.add(b.group(1))
             continue
         o = OUT.match(line)
         if o:
             sym, hhmm, px, best, worst, close, label = o.groups()
-            rows.append(dict(day=day, gate=gate, symbol=sym, block=hhmm, best=float(best), worst=float(worst), close=float(close), label=label, event=sym in starred))
+            rows.append(dict(day=day, gate=gate, symbol=sym, block=hhmm, best=float(best), worst=float(worst), close=float(close), label=label, event=sym in starred, waits=waits.get(sym)))
             continue
         n = NODATA.match(line)
         if n:
-            rows.append(dict(day=day, gate=gate, symbol=n.group(1), block=n.group(2), best=None, worst=None, close=None, label="no_data", event=n.group(1) in starred))
+            rows.append(dict(day=day, gate=gate, symbol=n.group(1), block=n.group(2), best=None, worst=None, close=None, label="no_data", event=n.group(1) in starred, waits=waits.get(n.group(1))))
     return rows
 
 
@@ -92,6 +93,38 @@ def stats(rows: list[dict], charges: float, stop: float) -> dict:
                    stop_mean=statistics.fmean([(-stop if r["worst"] <= -stop else r["close"]) for r in p]),
                    mean_best=statistics.fmean([r["best"] for r in p]))
     return out
+
+
+def block_bucket(r: dict) -> str:
+    """Round 688: when the first block of the name happened (IST wall clock)."""
+    h, m = (int(x) for x in r["block"].split(":"))
+    t = h * 60 + m
+    return "a 09:30-09:59" if t < 600 else "b 10:00-10:59" if t < 660 else "c 11:00-11:59" if t < 720 else "d 12:00 or later"
+
+
+def waits_bucket(r: dict) -> str:
+    """Round 688: how persistent the signal was (how many WAIT rows the name got that day). Unknown = the blocked table was not in the file."""
+    w = r.get("waits")
+    return "unknown" if w is None else "a 1 wait" if w <= 1 else "b 2-3 waits" if w <= 3 else "c 4-9 waits" if w <= 9 else "d 10+ waits"
+
+
+def slices(rows: list[dict], key, charges: float, stop: float) -> list[tuple[str, dict]]:
+    """Round 688: the same numbers as a group, per slice (information only: a slice is never a verdict and loosens nothing)."""
+    out: dict = {}
+    for r in rows:
+        out.setdefault(key(r), []).append(r)
+    return [(k, stats(v, charges, stop)) for k, v in sorted(out.items())]
+
+
+def show_slices(title: str, rows: list[dict], key, a) -> None:
+    print(f"\n== slices: {title} ==")
+    print(f"  {'slice':<18}{'names':>6}{'RAN%':>7}{'mean close':>12}{'median':>8}{'with stop':>11}{'after chg':>10}")
+    for name, s in slices(rows, key, a.charges, a.stop):
+        if not s["priced"]:
+            continue
+        after = s["stop_mean"] - a.charges
+        note = "  few" if s["priced"] < a.min_slice else ("  beats charges: only a lead, read it again after more sessions" if after > 0 else "")
+        print(f"  {name[2:] if name[1:2] == ' ' else name:<18}{s['priced']:>6}{s['ran_pct']:>6.1f}%{s['mean_close']:>+11.2f}%{s['median_close']:>+7.2f}%{s['stop_mean']:>+10.2f}%{after:>+9.2f}%{note}")
 
 
 def verdict(s: dict, a) -> tuple[str, list[str]]:
@@ -136,6 +169,8 @@ def main(argv=None) -> int:
     ap.add_argument("--min-days", type=int, default=3)
     ap.add_argument("--min-names", type=int, default=60)
     ap.add_argument("--min-ran-pct", type=float, default=15.0)
+    ap.add_argument("--min-slice", type=int, default=30, help="round 688: fewer priced names than this in a slice is marked few")
+    ap.add_argument("--no-slices", action="store_true", help="round 688: skip the by-hour / by-waits breakdown")
     a = ap.parse_args(argv)
     files = a.files or sorted(glob.glob("gates_out/gates_*.txt"))
     if not files:
@@ -150,6 +185,10 @@ def main(argv=None) -> int:
         show(f"gate {g}", stats([r for r in per_gate if r["gate"] == g], a.charges, a.stop), a)
     show("all blocked names (one row per name and day)", stats(dedupe(rows, False), a.charges, a.stop), a)
     show("event-sourced names only (* in the blocked table), first candidate of P2", stats([r for r in dedupe(rows, False) if r["event"]], a.charges, a.stop), a)
+    if not a.no_slices:
+        allrows = dedupe(rows, False)
+        show_slices("all blocked names by hour of the first block", allrows, block_bucket, a)
+        show_slices("all blocked names by number of waits that day", allrows, waits_bucket, a)
     print("\nOne number never loosens a gate: the verdict only says whether the rule of the plan is met. Not met = keep every gate as it is.")
     return 0
 

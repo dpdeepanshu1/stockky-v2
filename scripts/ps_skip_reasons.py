@@ -59,7 +59,7 @@ def summarize(rows, samples=2):
     dict(entered_rows, entered_syms {'L': n, 'S': n}, soft_rows, skipped_rows, families [dicts sorted by rows desc]).
     A family is keyed by (side, family) so a long and a short reason of the same name stay apart."""
     entered, entered_syms = {"L": 0, "S": 0}, {"L": set(), "S": set()}
-    soft, skipped, fam, soft_by = 0, 0, {}, {}
+    soft, skipped, fam, soft_by, skip_rows = 0, 0, {}, {}, []
     for sym, dec, reason, ts in rows:
         d = (dec or "").upper()
         sd = side(d)
@@ -70,11 +70,13 @@ def summarize(rows, samples=2):
         if d == "SOFT":
             soft += 1
             g = soft_gate(reason)                      # round 704: which gate was softened, and for which symbols
-            e = soft_by.setdefault(g, {"gate": g, "rows": 0, "syms": set()})
+            e = soft_by.setdefault(g, {"gate": g, "rows": 0, "syms": {}})
             e["rows"] += 1
-            e["syms"].add(sym)
+            if sym not in e["syms"] or (ts and (e["syms"][sym] is None or ts < e["syms"][sym])):
+                e["syms"][sym] = ts                      # first SOFT row of the symbol
             continue
         skipped += 1
+        skip_rows.append((sym, family(reason), ts))
         key = (sd, family(reason))
         f = fam.setdefault(key, {"side": sd, "family": key[1], "rows": 0, "syms": set(), "first": None, "samples": []})
         f["rows"] += 1
@@ -86,8 +88,17 @@ def summarize(rows, samples=2):
             f["samples"].append(txt)
     out = sorted(fam.values(), key=lambda x: (-x["rows"], x["family"], x["side"]))
     entered_all = entered_syms["L"] | entered_syms["S"]
-    soft_gates = sorted(({"gate": e["gate"], "rows": e["rows"], "syms": len(e["syms"]), "placed": len(e["syms"] & entered_all)} for e in soft_by.values()),
-                        key=lambda x: (-x["rows"], x["gate"]))
+    def _then_refused(e):
+        """round 704b: skip families the SOFT symbols hit AFTER their first SOFT row (rows, most first): where a 'softened' entry went instead of being placed."""
+        cnt = {}
+        for sym, fam_, ts in skip_rows:
+            t0 = e["syms"].get(sym, "x")
+            if t0 == "x" or (t0 is not None and ts is not None and ts < t0):
+                continue
+            cnt[fam_] = cnt.get(fam_, 0) + 1
+        return sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))
+    soft_gates = sorted(({"gate": e["gate"], "rows": e["rows"], "syms": len(e["syms"]), "placed": len(set(e["syms"]) & entered_all), "then_refused": _then_refused(e)}
+                         for e in soft_by.values()), key=lambda x: (-x["rows"], x["gate"]))
     return {"entered_rows": entered, "entered_syms": {k: len(v) for k, v in entered_syms.items()}, "soft_rows": soft, "skipped_rows": skipped, "families": out,
             "soft_gates": soft_gates}
 
@@ -103,12 +114,14 @@ def format_day(day, rows, top=25, samples=2):
     skipped = r["skipped_rows"]
     syms_all = {x[0] for x in rows}
     out = [f"POSITION STOCKS SKIP REASONS  day {day}  rows {len(rows)}  symbols {len(syms_all)}",
-           f"  ENTERED long {e['L']} rows / {es['L']} symbols   short {e['S']} rows / {es['S']} symbols   |   SOFT (entry went on at reduced size) {r['soft_rows']} rows   |   SKIPPED {skipped} rows",
+           f"  ENTERED long {e['L']} rows / {es['L']} symbols   short {e['S']} rows / {es['S']} symbols   |   SOFT (gate softened; entry may still be refused) {r['soft_rows']} rows   |   SKIPPED {skipped} rows",
            ""]
     if r["soft_gates"]:
-        out.append("  SOFT by gate (rows / symbols / of those symbols that also have an entry row the same day):")
+        out.append("  SOFT by gate (a SOFT row is written when the gate softens; the entry can still be refused later):")
         for g in r["soft_gates"]:
             out.append(f"    {g['gate']:<44}{g['rows']:>4} rows {g['syms']:>3} symbols {g['placed']:>3} entered")
+            if g["then_refused"]:
+                out.append("        then refused by: " + ", ".join(f"{f} x{n}" for f, n in g["then_refused"][:6]))
         out.append("")
     out.append(f"{'family':<34}{'side':>5}{'rows':>6}{'symbols':>9}{'share':>8}{'1st (IST)':>11}")
     for f in r["families"][:top]:
